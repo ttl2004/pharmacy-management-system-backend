@@ -8,8 +8,9 @@ export default () => {
   return {
     port: env.PORT,
 
+    // URL kết nối đọc thẳng từ biến DATABASE_URL (Prisma CLI và Prisma Client dùng
+    // chung biến này), ở đây chỉ cấu hình phần logging của Prisma.
     database: {
-      url: env.DATABASE_URL,
       logging: env.DB_LOGGING === 'true',
     },
 

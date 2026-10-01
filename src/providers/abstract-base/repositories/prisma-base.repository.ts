@@ -25,9 +25,8 @@ interface Delegate {
 /**
  * Repository nền cho mọi model Prisma.
  *
- * Giữ nguyên ngữ nghĩa của bản TypeORM trước đây: mọi filter luôn được chèn thêm
- * `isDeleted: false`, `limit` mặc định là 10, sort mặc định là `createdAt DESC`,
- * và các method đọc trả về plain object.
+ * Mọi filter luôn được chèn thêm `isDeleted: false`, `limit` mặc định là 10,
+ * sort mặc định là `createdAt DESC`, và các method đọc trả về plain object.
  */
 export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBaseRepository<T> {
   constructor(
@@ -261,8 +260,7 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
   }
 
   /**
-   * Soft delete. Trả về `true` khi có ít nhất một dòng thực sự bị sửa
-   * (giống `affected > 0` của TypeORM trước đây).
+   * Soft delete. Trả về `true` khi có ít nhất một dòng thực sự bị sửa.
    */
   async softDelete(filter: BaseWhere<T>): Promise<boolean> {
     return this.applySoftDelete(filter);

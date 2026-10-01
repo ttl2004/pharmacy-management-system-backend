@@ -10,8 +10,6 @@ export default () => {
 
     database: {
       url: env.DATABASE_URL,
-      path: env.DB_DATABASE,
-      synchronize: env.DB_SYNCHRONIZE === 'true',
       logging: env.DB_LOGGING === 'true',
     },
 

@@ -22,8 +22,11 @@ export enum ErrorCode {
   //- User
   USER_NOT_FOUND = 1200,
 
-  //- Jwt
+  //- Jwt / Phiên đăng nhập
   INVALID_TOKEN = 1300,
+  TOKEN_EXPIRED = 1301,
+  TOKEN_REUSED = 1302,
+  SESSION_REVOKED = 1303,
 
   //- Mailer
   MAILER_CONFIG_MISSING = 1400,

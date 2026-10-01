@@ -151,6 +151,16 @@ describe.each([false, true])('Một phiên đăng nhập: body=%s', (inBody) => 
     await refresh(b).expect(200);
   });
 
+  it('Thời gian trả về client là chuỗi ISO 8601, bản ghi mới có updatedAt null', async () => {
+    const a = await login();
+    const res = await me(a).expect(200);
+    const data = bodyOf(res).data as unknown as { createdAt: unknown; updatedAt: unknown };
+
+    expect(typeof data.createdAt).toBe('string');
+    expect(data.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(data.updatedAt).toBeNull();
+  });
+
   it('Hai lần đăng nhập song song đều thành công, không lỗi khoá ghi', async () => {
     const [first, second] = await Promise.all([
       request(app.getHttpServer()).post('/auth/login').send({ username: 'tester', password: 'Original-password1' }),

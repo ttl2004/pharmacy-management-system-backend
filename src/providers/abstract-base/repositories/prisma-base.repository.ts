@@ -80,8 +80,7 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
 
   protected buildWhere(
     filter: BaseWhere<T> = {},
-    search?: string,
-    searchFields?: string[],
+    searchIds?: string[],
     ranges?: Record<string, QueryRange>,
   ): Record<string, unknown> {
     const base = { ...this.sanitize(filter), isDeleted: false } as Record<string, unknown>;
@@ -97,19 +96,47 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
       }
     }
 
-    const fields = (searchFields ?? []).filter((field) => this.columnNames.has(field));
-
-    if (search && fields.length) {
-      const value = this.escapeLike(search);
-      return { AND: [base, { OR: fields.map((field) => ({ [field]: { contains: value } })) }] };
-    }
+    if (searchIds) return { AND: [base, { id: { in: searchIds } }] };
 
     return base;
   }
 
-  /** Escape ký tự đại diện của LIKE để từ khoá tìm kiếm được hiểu là văn bản thuần. */
-  protected escapeLike(value: string): string {
-    return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+  /** Id các bản ghi khớp từ khoá; `undefined` khi không có từ khoá hoặc không có cột nào để tìm. */
+  protected async resolveSearchIds(search?: string, searchFields?: string[]): Promise<string[] | undefined> {
+    if (!search) return undefined;
+
+    const fields = (searchFields ?? []).filter((field) => this.columnNames.has(field));
+    if (!fields.length) return undefined;
+
+    return this.searchIds(search, fields);
+  }
+
+  /**
+   * Id các bản ghi khớp từ khoá tìm kiếm.
+   *
+   * Prisma dịch `contains` thành `LIKE ?` **không kèm mệnh đề ESCAPE**, mà SQLite không có
+   * ký tự escape mặc định cho LIKE — nên `%` và `_` do người dùng gõ sẽ thành ký tự đại diện
+   * và không thể vô hiệu hoá ở tầng Prisma. Truy vấn thô dưới đây dùng `LIKE ... ESCAPE '\'`
+   * để từ khoá luôn được hiểu là văn bản thuần.
+   */
+  private async searchIds(search: string, fields: string[]): Promise<string[]> {
+    const model = Prisma.dmmf.datamodel.models.find((item) => item.name === this.modelName);
+    const table = model?.dbName ?? this.modelName;
+    const pattern = `%${search.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+
+    const conditions = fields.map((field) => {
+      const column = model?.fields.find((item) => item.name === field)?.dbName ?? field;
+      return Prisma.sql`${Prisma.raw(`"${column}"`)} LIKE ${pattern} ESCAPE '\\'`;
+    });
+
+    const rows = await this.prisma.$queryRaw<{ id: string }[]>(
+      Prisma.sql`SELECT "id" FROM ${Prisma.raw(`"${table}"`)} WHERE "isDeleted" = false AND (${Prisma.join(
+        conditions,
+        ' OR ',
+      )})`,
+    );
+
+    return rows.map((row) => row.id);
   }
 
   protected toOrder(sort?: Record<string, SortDirection> | string): Record<string, 'asc' | 'desc'>[] {
@@ -188,9 +215,10 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
 
   async findOne(filter: BaseWhere<T> = {}, options?: BaseFindOptions): Promise<T | null> {
     const { relations, sort, search, searchFields, ranges } = this.parseOptions(options);
+    const searchIds = await this.resolveSearchIds(search, searchFields);
 
     const row = await this.delegate.findFirst({
-      where: this.buildWhere(filter, search, searchFields, ranges),
+      where: this.buildWhere(filter, searchIds, ranges),
       include: this.toInclude(relations),
       orderBy: this.toOrder(sort),
     });
@@ -200,9 +228,10 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
 
   async findMany(filter: BaseWhere<T> = {}, options?: BaseFindOptions): Promise<T[]> {
     const { relations, sort, limit, skip, search, searchFields, ranges } = this.parseOptions(options);
+    const searchIds = await this.resolveSearchIds(search, searchFields);
 
     const rows = await this.delegate.findMany({
-      where: this.buildWhere(filter, search, searchFields, ranges),
+      where: this.buildWhere(filter, searchIds, ranges),
       include: this.toInclude(relations),
       orderBy: this.toOrder(sort),
       take: limit,
@@ -219,7 +248,8 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
     const finalOptions = this.parseOptions(options);
     const page = options?.page || 1;
     const { relations, sort, limit, search, searchFields, ranges } = finalOptions;
-    const where = this.buildWhere(filter, search, searchFields, ranges);
+    const searchIds = await this.resolveSearchIds(search, searchFields);
+    const where = this.buildWhere(filter, searchIds, ranges);
 
     const [rows, total] = await Promise.all([
       this.delegate.findMany({

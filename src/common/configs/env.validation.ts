@@ -24,8 +24,6 @@ export const envSchema = z
     PORT: z.coerce.number().int().positive().default(3000),
 
     //- Cơ sở dữ liệu
-    DB_DATABASE: z.string().min(1, 'DB_DATABASE không được để trống').default('data/pos-ndm.sqlite'),
-    DB_SYNCHRONIZE: boolStr('true'),
     DB_LOGGING: boolStr('false'),
     DATABASE_URL: z.string().min(1, 'DATABASE_URL không được để trống'),
 

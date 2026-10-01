@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
-import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
 import { UserModule } from '../user/user.module';
@@ -10,8 +9,6 @@ import { AuthzController } from './authz.controller';
 import { AuthzService } from './authz.service';
 import { AuthzGuard } from './guards/auth.guard';
 import { AuthzRepository } from './repositories/authz.repository';
-import { AuthzEntity } from './entities/authz.entity';
-import { RefreshToken } from './entities/refresh-token.entity';
 import { AuthzStrategy } from './strategies/auth.strategy';
 import { AuthConfig } from './auth.config';
 import { SessionStore, DbSessionStore, SessionTransactions } from './session.store';
@@ -26,7 +23,6 @@ class AuthConfigModule {}
     AuthConfigModule,
     PassportModule.register({ defaultStrategy: AUTH_JWT }),
     UserModule,
-    TypeOrmModule.forFeature([AuthzEntity, RefreshToken]),
     ThrottlerModule.forRoot([{ ttl: 60000, limit: 10 }]),
     JwtModule.registerAsync({
       imports: [AuthConfigModule],

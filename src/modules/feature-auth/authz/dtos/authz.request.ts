@@ -1,5 +1,5 @@
 import { ApiProperty, PartialType } from '@nestjs/swagger';
-import { IsMongoId, IsString } from 'class-validator';
+import { IsString, IsUUID } from 'class-validator';
 
 export class CreateAuthzRequest {
   @IsString()
@@ -10,8 +10,8 @@ export class CreateAuthzRequest {
   @ApiProperty()
   password: string;
 
-  @IsMongoId()
-  @ApiProperty({ description: 'Reference to user._id' })
+  @IsUUID()
+  @ApiProperty({ description: 'Tham chiếu đến user.id' })
   userId: string;
 }
 

@@ -73,16 +73,25 @@ describe('PrismaBaseRepository', () => {
     expect(await repo.update({ id: 'khong-ton-tai' }, { fullName: 'X' })).toBeNull();
   });
 
-  it('tìm kiếm coi % và _ là văn bản thuần', async () => {
+  it('tìm kiếm coi %, _ và \\ là văn bản thuần', async () => {
     await repo.create(makeUser({ fullName: 'Nguyễn Văn A' }));
     await repo.create(makeUser({ fullName: 'Nguyễn Văn B' }));
     await repo.create(makeUser({ fullName: 'Trần Thị C' }));
+    const percent = await repo.create(makeUser({ fullName: 'Giảm 100% hôm nay' }));
+    const underscore = await repo.create(makeUser({ fullName: 'SP_001 paracetamol' }));
+    const backslash = await repo.create(makeUser({ fullName: 'C:\\temp dir' }));
 
     const found = await repo.findMany({}, { search: 'Văn', searchFields: ['fullName'] });
     expect(found).toHaveLength(2);
 
-    expect(await repo.findMany({}, { search: '%', searchFields: ['fullName'] })).toHaveLength(0);
-    expect(await repo.findMany({}, { search: '_', searchFields: ['fullName'] })).toHaveLength(0);
+    const ids = async (search: string) =>
+      (await repo.findMany({}, { search, searchFields: ['fullName'] })).map((user) => user.id);
+
+    expect(await ids('%')).toEqual([percent.id]);
+    expect(await ids('_')).toEqual([underscore.id]);
+    expect(await ids('100%')).toEqual([percent.id]);
+    expect(await ids('SP_001')).toEqual([underscore.id]);
+    expect(await ids('\\')).toEqual([backslash.id]);
   });
 
   it('sort mặc định createdAt DESC, bỏ qua field không tồn tại', async () => {

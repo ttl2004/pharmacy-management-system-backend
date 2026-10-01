@@ -1,40 +1,53 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ConfigModule } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
-import { MongooseModule } from '@nestjs/mongoose';
 import { PassportModule } from '@nestjs/passport';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
-import { UserDocument, UserSchema } from '../user/schemas/user.schema';
+import { UserModule } from '../user/user.module';
 import { AuthzController } from './authz.controller';
 import { AuthzService } from './authz.service';
 import { AuthzGuard } from './guards/auth.guard';
 import { AuthzRepository } from './repositories/authz.repository';
-import { AuthzDocument, AuthzSchema } from './schemas/authz.schema';
+import { AuthzEntity } from './entities/authz.entity';
+import { RefreshToken } from './entities/refresh-token.entity';
 import { AuthzStrategy } from './strategies/auth.strategy';
+import { AuthConfig } from './auth.config';
+import { SessionStore, DbSessionStore, SessionTransactions } from './session.store';
+import { TokenService } from './token.service';
+import { PasswordService } from './password.service';
+
+@Module({ imports: [ConfigModule], providers: [AuthConfig], exports: [AuthConfig] })
+class AuthConfigModule {}
 
 @Module({
   imports: [
-    ConfigModule,
+    AuthConfigModule,
     PassportModule.register({ defaultStrategy: AUTH_JWT }),
-    MongooseModule.forFeature([
-      { name: AuthzDocument.name, schema: AuthzSchema },
-      { name: UserDocument.name, schema: UserSchema },
-    ]),
+    UserModule,
+    TypeOrmModule.forFeature([AuthzEntity, RefreshToken]),
+    ThrottlerModule.forRoot([{ ttl: 60000, limit: 10 }]),
     JwtModule.registerAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => {
-        return {
-          secret: config.get('jwt.secret'),
-          signOptions: {
-            expiresIn: config.get('jwt.signOptions.expiresIn'),
-          },
-        };
-      },
+      imports: [AuthConfigModule],
+      inject: [AuthConfig],
+      useFactory: (config: AuthConfig) => ({
+        secret: config.secret,
+        signOptions: { expiresIn: config.accessTtl, algorithm: 'HS256' },
+      }),
     }),
   ],
   controllers: [AuthzController],
-  providers: [AuthzService, AuthzRepository, AuthzStrategy, AuthzGuard],
-  exports: [AuthzService, AuthzGuard],
+  providers: [
+    AuthzService,
+    AuthzRepository,
+    AuthzStrategy,
+    AuthzGuard,
+    SessionTransactions,
+    TokenService,
+    PasswordService,
+    { provide: SessionStore, useClass: DbSessionStore },
+  ],
+  exports: [AuthzService, AuthzGuard, SessionStore, PasswordService],
 })
 export class AuthzModule {}

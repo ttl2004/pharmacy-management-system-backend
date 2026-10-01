@@ -7,14 +7,16 @@ import { dirname, resolve } from 'path';
 /**
  * Prisma Client dưới dạng provider của Nest.
  *
- * `DATABASE_URL` dạng `file:../data/pos-ndm.sqlite` được Prisma CLI hiểu là tương đối
- * theo thư mục `prisma/`. Ở runtime, đường dẫn được đổi thành tuyệt đối để không phụ
- * thuộc vào cách Prisma Client resolve đường dẫn tương đối.
+ * URL đọc từ đúng biến `DATABASE_URL` mà Prisma CLI và Prisma Client dùng, nên CLI
+ * (migrate) và runtime không bao giờ lệch nhau. Giá trị dạng
+ * `file:../data/pos-ndm.sqlite` được Prisma CLI hiểu là tương đối theo thư mục
+ * `prisma/`; ở runtime đường dẫn được đổi thành tuyệt đối để không phụ thuộc vào cách
+ * Prisma Client resolve đường dẫn tương đối.
  */
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   constructor(config: ConfigService) {
-    const url = config.getOrThrow<string>('database.url');
+    const url = config.getOrThrow<string>('DATABASE_URL');
     const absolutePath = PrismaService.toAbsoluteSqlitePath(url);
 
     // SQLite không tự tạo thư mục cha; thiếu thư mục sẽ chỉ báo lỗi chung chung

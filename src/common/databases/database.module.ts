@@ -1,16 +1,18 @@
 import { DynamicModule, Module } from '@nestjs/common';
 import { DatabaseOptions } from './types/database.type';
-import { MongooseDatabaseModule } from './drivers/mongoose.module';
+import { PrismaDatabaseModule } from './drivers/prisma.module';
 
 @Module({})
 export class DatabaseModule {
   static forRoot(options: DatabaseOptions): DynamicModule {
-    let modules: DynamicModule[] = [];
+    const modules: DynamicModule[] = [];
 
     switch (options.driver) {
-      case 'mongoose':
-        modules.push(MongooseDatabaseModule.forRoot());
+      case 'prisma':
+        modules.push(PrismaDatabaseModule.forRoot());
         break;
+      default:
+        throw new Error(`Unsupported database driver: ${String(options.driver)}`);
     }
 
     return {

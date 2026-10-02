@@ -1,45 +1,42 @@
-export default () => ({
-  port: parseInt(process.env.PORT as string, 10),
+import { envSchema } from './env.validation';
 
-  mongo: {
-    uri: process.env.MONGO_URI,
-  },
+// Dựng lại cấu trúc lồng nhau từ env đã được validate. envSchema là nguồn duy nhất
+// quyết định giá trị mặc định, ở đây chỉ đổi tên và đổi kiểu cho tiện dùng.
+export default () => {
+  const env = envSchema.parse(process.env);
 
-  mail: {
-    gmail: {
-      user: process.env.MAIL_GMAIL_USER,
-      appPassword: process.env.MAIL_GMAIL_APP_PASSWORD,
+  return {
+    port: env.PORT,
+
+    // URL kết nối đọc thẳng từ biến DATABASE_URL (Prisma CLI và Prisma Client dùng
+    // chung biến này), ở đây chỉ cấu hình phần logging của Prisma.
+    database: {
+      logging: env.DB_LOGGING === 'true',
     },
-    fromDefault: process.env.MAIL_FROM_DEFAULT,
-    templateDir: process.env.MAIL_TEMPLATE_DIR ?? 'src/providers/mailer/templates',
-    rabbitmq: {
-      url: process.env.MAIL_RABBITMQ_URL,
-      exchange: process.env.MAIL_RABBITMQ_EXCHANGE ?? 'mailer.exchange',
-      queue: process.env.MAIL_RABBITMQ_QUEUE ?? 'mailer.queue',
+
+    mail: {
+      gmail: {
+        user: env.MAIL_GMAIL_USER,
+        appPassword: env.MAIL_GMAIL_APP_PASSWORD,
+      },
+      fromDefault: env.MAIL_FROM_DEFAULT,
+      templateDir: env.MAIL_TEMPLATE_DIR,
+      rabbitmq: {
+        url: env.MAIL_RABBITMQ_URL,
+        exchange: env.MAIL_RABBITMQ_EXCHANGE,
+        queue: env.MAIL_RABBITMQ_QUEUE,
+      },
     },
-  },
 
-  jwt: {
-    secret: process.env.JWT_SECRET,
-    refreshSecret: process.env.JWT_REFRESH_SECRET,
-    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRESIN,
-    signOptions: {
-      expiresIn: process.env.JWT_EXPIRESIN,
+    superAdmin: {
+      email: env.SUPER_ADMIN_EMAIL,
+      username: env.SUPER_ADMIN_USERNAME,
+      password: env.SUPER_ADMIN_PASSWORD,
+      fullName: env.SUPER_ADMIN_FULL_NAME,
+      phoneNumber: env.SUPER_ADMIN_PHONE_NUMBER,
+      address: env.SUPER_ADMIN_ADDRESS,
+      age: env.SUPER_ADMIN_AGE,
+      gender: env.SUPER_ADMIN_GENDER,
     },
-  },
-
-  security: {
-    cookieSecret: process.env.COOKIE_SECRET,
-  },
-
-  superAdmin: {
-    email: process.env.SUPER_ADMIN_EMAIL,
-    username: process.env.SUPER_ADMIN_USERNAME,
-    password: process.env.SUPER_ADMIN_PASSWORD,
-    fullName: process.env.SUPER_ADMIN_FULL_NAME ?? 'Super Admin',
-    phoneNumber: process.env.SUPER_ADMIN_PHONE_NUMBER ?? '',
-    address: process.env.SUPER_ADMIN_ADDRESS ?? '',
-    age: process.env.SUPER_ADMIN_AGE ?? '',
-    gender: process.env.SUPER_ADMIN_GENDER ?? 'male',
-  },
-});
+  };
+};

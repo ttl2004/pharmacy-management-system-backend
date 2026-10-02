@@ -3,14 +3,14 @@ import { Transform } from 'class-transformer';
 import { IsNumber, IsOptional, IsString, Min } from 'class-validator';
 
 export class AbstractBaseQuery {
-  @ApiPropertyOptional({ example: 1, description: 'Page number' })
+  @ApiPropertyOptional({ example: 1, description: 'Số trang' })
   @IsOptional()
   @Transform(({ value }) => Number(value))
   @IsNumber()
   @Min(1)
   page: number = 1;
 
-  @ApiPropertyOptional({ example: 10, description: 'Items per page' })
+  @ApiPropertyOptional({ example: 10, description: 'Số lượng mỗi trang' })
   @IsOptional()
   @Transform(({ value }) => Number(value))
   @IsNumber()
@@ -18,14 +18,14 @@ export class AbstractBaseQuery {
   limit: number = 10;
 
   @ApiPropertyOptional({
-    description: 'Sort string: "field:asc" or "field:desc"',
+    description: 'Chuỗi sắp xếp: "field:asc" hoặc "field:desc"',
   })
   @IsOptional()
   @IsString()
   sort?: string;
 
   @ApiPropertyOptional({
-    description: 'Search keyword for partial match',
+    description: 'Từ khóa tìm kiếm',
   })
   @IsOptional()
   @IsString()

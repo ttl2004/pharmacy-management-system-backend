@@ -19,7 +19,7 @@ async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
     new FastifyAdapter({
-      trustProxy: true,
+      trustProxy: false,
       logger: false,
     }),
     { bufferLogs: true }, // không để bị log kép
@@ -40,16 +40,7 @@ async function bootstrap() {
   });
 
   const configService = app.get(ConfigService);
-  const cookieSecret = configService.get<string>('security.cookieSecret');
-
-  if (!cookieSecret) {
-    throw new Error('COOKIE_SECRET is required');
-  }
-
-  await app.register(cookie, {
-    secret: cookieSecret,
-    parseOptions: { signed: true },
-  });
+  await app.register(cookie);
 
   const pinoLogger = app.get(Logger);
   app.useLogger(pinoLogger);
@@ -74,7 +65,7 @@ async function bootstrap() {
         scheme: 'bearer',
         bearerFormat: 'JWT',
         name: 'Authorization',
-        description: 'Enter JWT access token',
+        description: 'Nhập access token JWT',
         in: 'header',
       },
       AUTH_JWT,
@@ -84,14 +75,16 @@ async function bootstrap() {
     .build();
 
   const documentFactory = () => SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('docs', app, documentFactory);
+  SwaggerModule.setup('docs', app, documentFactory, {
+    swaggerOptions: { persistAuthorization: true },
+  });
 
-  const port = (await configService.get('port')) ?? 3000;
+  const port = configService.get<number>('port') || 3000;
 
   await app.listen(port, '0.0.0.0');
 
-  pinoLogger.log(` Application is running on: http://localhost:${port}`, 'Bootstrap');
-  pinoLogger.log(` Swagger UI available at: http://localhost:${port}/docs`, 'Swagger');
+  pinoLogger.log(`App Running at: http://localhost:${port}`, 'Bootstrap');
+  pinoLogger.log(`Swagger at: http://localhost:${port}/docs`, 'Swagger');
 }
 
-bootstrap();
+void bootstrap();

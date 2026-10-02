@@ -1,6 +1,6 @@
 # Pharmacy Management System — Backend
 
-REST API cho hệ thống quản lý nhà thuốc, xây dựng trên **NestJS 12 + TypeORM + SQLite**.
+REST API cho hệ thống quản lý nhà thuốc, xây dựng trên **NestJS 11 + Prisma + SQLite**.
 
 > Package manager: **npm** (dự án này dùng `package-lock.json`, không dùng `pnpm` hay `yarn`).
 
@@ -32,7 +32,7 @@ npm install
 cp .env.example .env
 ```
 
-Mở `.env` và chỉnh các giá trị cho phù hợp (port, JWT secret, mailer, …).
+Mở `.env` và chỉnh các giá trị cho phù hợp (port, đường dẫn SQLite, JWT secret, tài khoản super admin, …).
 
 ---
 
@@ -64,16 +64,16 @@ Sau khi chạy thành công:
 ```
 src/
 ├── app.module.ts                 # Root module
-├── main.ts                       # Bootstrap (port, CORS, global pipes, seed)
+├── main.ts                       # Bootstrap (Fastify, CORS, global pipes, Swagger)
 ├── common/
 │   ├── configs/                  # Configuration loader (ConfigService)
-│   ├── databases/                # TypeORM DataSource / driver module
+│   ├── databases/                # Prisma client / driver module
 │   ├── exceptions/               # Global exception filter
 │   ├── interceptors/             # Transform interceptor (response shape)
 │   └── types/                    # Enum / type chung
 ├── modules/
 │   └── feature-auth/             # Module xác thực & phân quyền
-│       ├── authz/                # Login / refresh / logout
+│       ├── authz/                # /auth: login, refresh, logout, password, sessions
 │       ├── permission/           # Quyền
 │       └── user/                 # Người dùng
 ├── providers/
@@ -89,15 +89,22 @@ src/
 | Biến | Mô tả | Mặc định |
 |---|---|---|
 | `PORT` | Port HTTP server | `3000` |
-| `JWT_ACCESS_SECRET` | Secret ký access token | (bắt buộc) |
-| `JWT_REFRESH_SECRET` | Secret ký refresh token | (bắt buộc) |
-| `JWT_ACCESS_TTL` | Thời hạn access token | `15m` |
-| `JWT_REFRESH_TTL` | Thời hạn refresh token | `7d` |
-| `MAIL_HOST` | SMTP host | `smtp.gmail.com` |
-| `MAIL_USER` | SMTP user | — |
-| `MAIL_PASS` | SMTP app password | — |
-| `MAIL_FROM` | Địa chỉ gửi | `MAIL_USER` |
-| `SEED_SUPER_ADMIN_ON_BOOT` | Tự seed super-admin khi start | `true` |
+| `DATABASE_URL` | Chuỗi kết nối Prisma, dạng `file:../data/pos-ndm.sqlite` (tương đối theo `prisma/schema.prisma`) | `file:../data/pos-ndm.sqlite` |
+| `DB_LOGGING` | In câu SQL ra log | `false` |
+| `JWT_ACCESS_SECRET` | Secret ký access JWT, tối thiểu 32 ký tự | (bắt buộc) |
+| `JWT_ACCESS_TTL` | Thời hạn access JWT | `15m` |
+| `REFRESH_TTL` | Thời hạn opaque refresh token | `7d` |
+| `AUTH_REFRESH_IN_BODY` | Cho phép refresh token trong body để test | `false` |
+| `COOKIE_SECURE` | Chỉ gửi cookie qua HTTPS | `false` |
+| `COOKIE_SAMESITE` | strict, lax, none | `strict` |
+| `COOKIE_PATH` | Đường dẫn cookie, bao gồm global prefix nếu có | `/auth` |
+| `SUPER_ADMIN_EMAIL` | Email super admin | (bắt buộc để seed) |
+| `SUPER_ADMIN_USERNAME` | Username đăng nhập của super admin | (bắt buộc để seed) |
+| `SUPER_ADMIN_PASSWORD` | Mật khẩu super admin | (bắt buộc để seed) |
+| `SUPER_ADMIN_FULL_NAME` | Họ tên | `Super Admin` |
+| `SUPER_ADMIN_PHONE_NUMBER` / `_ADDRESS` / `_AGE` / `_GENDER` | Thông tin phụ | — |
+
+> ENV authentication được validate khi khởi động. Xem [hướng dẫn authentication](docs/AUTHENTICATION.md) để chuyển cấu hình cũ, test Swagger, tích hợp frontend và chuẩn bị Redis.
 
 > **Không commit file `.env`** — đã được liệt kê trong `.gitignore`.
 
@@ -105,24 +112,40 @@ src/
 
 ## 6. Database
 
-- **SQLite** (`sqlite3`), file mặc định tại root dự án.
-- TypeORM `synchronize` được bật — schema tự đồng bộ với entity khi dev.
-- File `.db` / `.sqlite` / `.sqlite3` đã được `.gitignore`.
+- **SQLite** qua Prisma, file mặc định `data/pos-ndm.sqlite` (đổi bằng `DATABASE_URL`). Thư mục `data/` được ứng dụng tự tạo lúc khởi động nếu chưa có.
+- Schema khai báo tại `prisma/schema.prisma`; thay đổi schema bằng **Prisma Migrate**, không tự đồng bộ khi khởi động.
+- Khoá chính là **UUID** (`@default(uuid())`).
+- Mọi cột thời gian dùng `DateTime`; `createdAt` tự điền khi tạo, `updatedAt` do repository gán khi cập nhật (bản ghi mới có `updatedAt = null`).
+- Model đặt trong `prisma/schema.prisma`; type sinh ra được dùng trực tiếp (`User`, `Auth`, `RefreshToken` từ `@prisma/client`).
+- Repository nền: `src/providers/abstract-base/repositories/prisma-base.repository.ts` — mọi filter tự động thêm `isDeleted: false` (soft delete).
+- File `.db` / `.sqlite` / `.sqlite3` và thư mục `data/` đã được `.gitignore`.
 
-Xem cấu hình tại: `src/common/configs/configuration.ts` và `src/common/databases/drivers/typeorm.module.ts`.
+Các lệnh thường dùng:
+
+```bash
+npm run db:migrate    # tạo migration mới khi sửa schema (dev)
+npm run db:deploy     # áp migration đã commit (máy mới / production)
+npm run db:generate   # sinh lại Prisma Client
+npm run db:studio     # mở giao diện xem dữ liệu
+```
+
+Thiết lập máy mới: `npm install` → `cp .env.example .env` → `npm run db:deploy` → `npm run seed:super-admin`.
+
+Xem cấu hình tại: `src/common/configs/configuration.ts` và `src/common/databases/prisma.service.ts`.
 
 ---
 
 ## 7. Seed super admin
 
-Khi server khởi động, nếu `SEED_SUPER_ADMIN_ON_BOOT=true`, hệ thống sẽ tự tạo tài khoản super admin nếu chưa tồn tại (xem `src/scripts/seed-super-admin.ts`).
-
-Bạn cũng có thể chạy thủ công:
+Seed **không** tự chạy khi khởi động — phải gọi thủ công. Script sẽ tạo super admin nếu email chưa tồn tại, và bỏ qua nếu đã có:
 
 ```bash
-npm run build
-node dist/scripts/seed-super-admin.js
+npm run seed:super-admin
 ```
+
+Script cần `SUPER_ADMIN_EMAIL`, `SUPER_ADMIN_USERNAME`, `SUPER_ADMIN_PASSWORD`; thiếu một trong ba thì sẽ cảnh báo và thoát mà không tạo gì.
+
+Xem `src/scripts/seed-super-admin.ts` và `AuthzService.seedSuperAdmin()`.
 
 ---
 
@@ -147,7 +170,7 @@ npm run test:e2e
 ## 9. Lint & Format
 
 ```bash
-npm run lint           # oxlint (type-aware)
+npm run lint           # eslint (type-aware)
 npm run format         # prettier cho src/ và test/
 ```
 
@@ -161,8 +184,8 @@ Dự án đang dùng `Logger` mặc định của NestJS — log được in ra 
 
 ## 11. Công nghệ sử dụng
 
-- **NestJS 12** (Express adapter)
-- **TypeORM 0.3** + **SQLite3**
+- **NestJS 11** (Fastify adapter)
+- **Prisma 6** + **SQLite**
 - **Passport JWT** cho xác thực
 - **class-validator** + **class-transformer** cho DTO
 - **@nestjs/swagger** cho API docs

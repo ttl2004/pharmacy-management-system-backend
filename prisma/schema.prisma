@@ -1,0 +1,65 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  isDeleted    Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  createdBy    String?
+  updatedAt    DateTime?
+  updatedBy    String?
+  phoneNumber  String?
+  email        String    @unique
+  address      String?
+  fullName     String
+  age          String?
+  gender       String?
+  status       String    @default("active")
+  role         String
+  permissionId String?
+
+  auths         Auth[]
+  refreshTokens RefreshToken[]
+
+  @@map("users")
+}
+
+model Auth {
+  id        String    @id @default(uuid())
+  isDeleted Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  createdBy String?
+  updatedAt DateTime?
+  updatedBy String?
+  password  String
+  username  String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+
+  @@map("auths")
+}
+
+model RefreshToken {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sid          String
+  tokenHash    String    @unique
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  replacedById String?
+  userAgent    String?
+  ip           String?
+  createdAt    DateTime  @default(now())
+  lastUsedAt   DateTime?
+
+  @@index([userId, sid])
+  @@index([sid])
+  @@map("refresh_tokens")
+}

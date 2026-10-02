@@ -1,4 +1,4 @@
-export type DatabaseDriver = 'mongoose' | 'typeorm';
+export type DatabaseDriver = 'prisma';
 
 export interface DatabaseOptions {
   driver: DatabaseDriver;

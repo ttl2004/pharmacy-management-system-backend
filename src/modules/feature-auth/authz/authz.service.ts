@@ -1,33 +1,27 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
-import { InjectModel } from '@nestjs/mongoose';
+import { TokenService, TokenMetadata } from './token.service';
+import { authError } from './auth.error';
 import * as bcrypt from 'bcrypt';
-import { Model } from 'mongoose';
-import { AuthRole, RecordStatusEnum } from '../../../common/types/common.enum.js';
-import { ErrorException } from '../../../common/exceptions/error.exception.js';
-import { ErrorCode } from '../../../common/types/error-code.js';
-import { AbstractBaseService } from '../../../providers/abstract-base/abstract-base.service.js';
-import { UserDocument } from '../user/schemas/user.schema.js';
-import { LoginRequest } from './dtos/login.request.js';
-import { RefreshTokenRequest } from './dtos/refresh.request.js';
-import { AuthzDocument } from './schemas/authz.schema.js';
-import { AuthJwtPayload, JwtUser } from './types/authz.types.js';
+import { AuthRole, RecordStatusEnum } from 'src/common/types/common.enum';
+import { ErrorException } from 'src/common/exceptions/error.exception';
+import { ErrorCode } from 'src/common/types/error-code';
+import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
+import { UserRepository } from '../user/repositories/user.repository';
+import { LoginRequest } from './dtos/login.request';
+
+import { Auth } from '@prisma/client';
+import { JwtUser } from './types/authz.types';
 import { AuthzRepository } from './repositories/authz.repository';
 
 @Injectable()
-export class AuthzService extends AbstractBaseService<AuthzDocument> {
+export class AuthzService extends AbstractBaseService<Auth> {
   private readonly authzLogger = new Logger(AuthzService.name);
 
   constructor(
-    @InjectModel(AuthzDocument.name)
-    private readonly authzModel: Model<AuthzDocument>,
-
-    @InjectModel(UserDocument.name)
-    private readonly userModel: Model<UserDocument>,
-
     private readonly authzRepository: AuthzRepository,
-    private readonly jwtService: JwtService,
+    private readonly userRepository: UserRepository,
+    private readonly tokens: TokenService,
     private readonly configService: ConfigService,
   ) {
     super(authzRepository);
@@ -40,7 +34,7 @@ export class AuthzService extends AbstractBaseService<AuthzDocument> {
 
     if (!email || !username || !password) {
       this.authzLogger.warn(
-        'Skip seeding super admin because SUPER_ADMIN_EMAIL, SUPER_ADMIN_USERNAME or SUPER_ADMIN_PASSWORD is missing',
+        'Bỏ qua khởi tạo quản trị viên cấp cao vì thiếu SUPER_ADMIN_EMAIL, SUPER_ADMIN_USERNAME hoặc SUPER_ADMIN_PASSWORD',
       );
       return;
     }
@@ -51,13 +45,13 @@ export class AuthzService extends AbstractBaseService<AuthzDocument> {
     const age = this.configService.get<string>('superAdmin.age');
     const gender = this.configService.get<string>('superAdmin.gender');
 
-    this.authzLogger.log('Seeding super admin...');
-    const superAdmin = await this.userModel.findOne({ email }).lean();
+    this.authzLogger.log('Đang khởi tạo quản trị viên cấp cao...');
+    const existingSuperAdmin = await this.userRepository.findByEmailIgnoringSoftDelete(email);
 
-    if (!superAdmin) {
-      this.authzLogger.log('Super admin not found, creating...');
+    if (!existingSuperAdmin) {
+      this.authzLogger.log('Chưa có quản trị viên cấp cao, đang tạo...');
 
-      const superAdmin = await this.userModel.create({
+      const superAdmin = await this.userRepository.create({
         email,
         fullName,
         phoneNumber,
@@ -68,100 +62,48 @@ export class AuthzService extends AbstractBaseService<AuthzDocument> {
         status: RecordStatusEnum.ACTIVE,
       });
 
-      const authz = await this.authzModel.create({
+      await this.authzRepository.create({
         username,
         password: await bcrypt.hash(password, 10),
-        userId: superAdmin._id,
+        userId: superAdmin.id,
       });
 
-      this.authzLogger.log('Super admin created successfully', { superAdmin, authz });
+      this.authzLogger.log('Đã tạo quản trị viên cấp cao thành công');
     } else {
-      this.authzLogger.log('Super admin already exists');
+      this.authzLogger.log('Quản trị viên cấp cao đã tồn tại');
     }
   }
 
-  async login(dto: LoginRequest) {
-    const { password, username } = dto;
-
-    const authz = await this.getAuthzByUsername(username);
-
-    if (!authz) {
-      throw new ErrorException({
-        code: ErrorCode.AUTHZ_NOT_FOUND,
-        message: 'Tài khoản không tồn tại',
-      });
+  async login(dto: LoginRequest, metadata: TokenMetadata = {}) {
+    const authz = await this.getAuthzByUsername(dto.username);
+    // Trả cùng thông báo và đều so sánh bcrypt khi tên đăng nhập không tồn tại hoặc mật khẩu sai.
+    const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
+    const valid = await bcrypt.compare(dto.password, authz?.password ?? dummyHash);
+    if (!authz || !valid || !authz.user || authz.user.isDeleted || authz.user.status !== RecordStatusEnum.ACTIVE) {
+      throw authError(ErrorCode.LOGIN_INVALID);
     }
+    return this.tokens.login(authz, metadata);
+  }
 
-    const isPasswordValid = await bcrypt.compare(password, authz.password);
+  async refreshToken(token: string | undefined) {
+    return this.tokens.refresh(token);
+  }
+  async logout(sid: string, token: string | undefined) {
+    await this.tokens.logout(sid, token);
+  }
+  async getAuthzByUsername(username: string) {
+    return this.authzRepository.findByUsernameWithUser(username);
+  }
 
-    if (!isPasswordValid) {
-      throw new ErrorException({
-        code: ErrorCode.PASSWORD_INVALID,
-        message: 'Mật khẩu không chính xác',
-      });
-    }
-
-    const user = await this.userModel.findOne({ _id: authz.userId, isDeleted: false }).lean();
-
-    if (!user) {
+  async getProfileUser(authz: JwtUser) {
+    if (!authz.userId) {
       throw new ErrorException({
         code: ErrorCode.USER_NOT_FOUND,
         message: 'Người dùng không tồn tại',
       });
     }
 
-    const payload: AuthJwtPayload = {
-      email: user.email,
-      role: user.role,
-      sub: user._id.toString(),
-      permissionId: user.permissionId,
-    };
-
-    const accessToken = await this.jwtService.signAsync(payload);
-
-    return {
-      accessToken,
-    };
-  }
-
-  async refreshToken(dto: RefreshTokenRequest) {
-    const { refreshToken } = dto;
-
-    const decoded = this.jwtService.verify(refreshToken);
-
-    if (!decoded) {
-      throw new ErrorException({
-        code: ErrorCode.INVALID_TOKEN,
-        message: 'Token không hợp lệ',
-      });
-    }
-
-    const payload: AuthJwtPayload = {
-      email: decoded.email,
-      role: decoded.role,
-      sub: decoded.sub,
-      permissionId: decoded.permissionId,
-    };
-
-    const accessToken = await this.jwtService.signAsync(payload);
-
-    return {
-      accessToken,
-    };
-  }
-
-  async getAuthzByUsername(username: string) {
-    const authz = await this.authzModel.findOne({ username, isDeleted: false }).populate('userId').lean();
-
-    if (!authz) {
-      return null;
-    }
-
-    return authz;
-  }
-
-  async getProfileUser(authz: JwtUser) {
-    const user = await this.userModel.findOne({ _id: authz.userId, isDeleted: false }).lean();
+    const user = await this.userRepository.findOne({ id: authz.userId });
 
     if (!user) {
       throw new ErrorException({

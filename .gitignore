@@ -37,11 +37,19 @@ lerna-debug.log*
 
 # dotenv environment variable files
 .env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
-.env.example
+.env.*
+!.env.example
+
+# Local AI/development tools
+/.codegraph/
+/.claude/
+/.codex
+/.superpower/
+/.superpowers/
+
+# Local documentation and tests
+/docs/
+/test/
 
 # temp directory
 .temp
@@ -59,6 +67,8 @@ yarn.lock
 
 
 # SQLite database (local dev)
+# Thư mục data/ do ứng dụng tự tạo lúc khởi động, không cần commit.
+/data/
 /*.db
 /*.sqlite
 /*.sqlite3

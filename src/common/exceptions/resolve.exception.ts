@@ -13,7 +13,7 @@ import {
 } from '@nestjs/common';
 import { ErrorCode } from '../types/error-code';
 import { ErrorException } from './error.exception';
-import { FastifyReply } from 'fastify';
+import { FastifyReply, FastifyRequest } from 'fastify';
 
 @Catch()
 export class ResolveExceptionFilter implements ExceptionFilter {
@@ -46,31 +46,45 @@ export class ResolveExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<FastifyReply>();
-    const request = ctx.getRequest();
+    const request = ctx.getRequest<FastifyRequest>();
 
     let message: string;
     let errorCode: ErrorCode;
+    let statusCode = 500;
+    let code: ErrorCode | undefined;
 
     if (exception instanceof ErrorException) {
       message = exception.message;
       errorCode = exception.errorCode;
+      statusCode = 400;
     } else if (exception instanceof HttpException) {
-      message = 'An error occurred';
+      statusCode = exception.getStatus();
+      const body = exception.getResponse();
+      const details =
+        typeof body === 'object' ? (body as { code?: unknown; message?: string | string[] }) : undefined;
+      message = Array.isArray(details?.message) ? details.message.join('; ') : (details?.message ?? exception.message);
       errorCode = this.getErrorCodeFromHttpException(exception);
+      // Exception tự mang mã lỗi riêng (ví dụ authError) thì mã đó thắng mã suy ra từ loại HTTP.
+      if (typeof details?.code === 'number') {
+        code = details.code as ErrorCode;
+        errorCode = code;
+      }
+      if (statusCode === 429) {
+        errorCode = ErrorCode.HTTP_TOO_MANY_REQUESTS;
+        message = 'Đã vượt quá số yêu cầu cho phép. Vui lòng thử lại sau';
+      }
     } else {
-      message = 'Internal server error';
+      message = 'Lỗi máy chủ nội bộ';
       errorCode = ErrorCode.INTERNAL_SERVER_ERROR;
     }
 
-    response
-      .status(200)
-      .header('content-type', 'application/json')
-      .send({
-        timestamp: new Date().toISOString(),
-        path: request.url,
-        message: message,
-        errorCode: errorCode,
-        stack: exception instanceof Error ? exception.stack : undefined,
-      });
+    response.status(statusCode).header('content-type', 'application/json').send({
+      timestamp: new Date().toISOString(),
+      path: request.url,
+      message: message,
+      errorCode: errorCode,
+      code,
+      statusCode,
+    });
   }
 }

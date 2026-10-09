@@ -1,6 +1,6 @@
 # Pharmacy Management System — Backend
 
-REST API cho hệ thống quản lý nhà thuốc, xây dựng trên **NestJS 11 + Prisma + SQLite**.
+REST API cho hệ thống quản lý nhà thuốc, xây dựng trên **NestJS 11 + Prisma + PostgreSQL**.
 
 > Package manager: **npm** (dự án này dùng `package-lock.json`, không dùng `pnpm` hay `yarn`).
 
@@ -32,7 +32,7 @@ npm install
 cp .env.example .env
 ```
 
-Mở `.env` và chỉnh các giá trị cho phù hợp (port, đường dẫn SQLite, JWT secret, tài khoản super admin, …).
+Mở `.env` và chỉnh các giá trị cho phù hợp (port, chuỗi kết nối PostgreSQL, JWT secret, tài khoản super admin, …).
 
 ---
 
@@ -89,7 +89,7 @@ src/
 | Biến | Mô tả | Mặc định |
 |---|---|---|
 | `PORT` | Port HTTP server | `3000` |
-| `DATABASE_URL` | Chuỗi kết nối Prisma, dạng `file:../data/pos-ndm.sqlite` (tương đối theo `prisma/schema.prisma`) | `file:../data/pos-ndm.sqlite` |
+| `DATABASE_URL` | Chuỗi kết nối PostgreSQL, dạng `postgresql://user:password@host:5432/dbname`. Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`) | (bắt buộc) |
 | `DB_LOGGING` | In câu SQL ra log | `false` |
 | `JWT_ACCESS_SECRET` | Secret ký access JWT, tối thiểu 32 ký tự | (bắt buộc) |
 | `JWT_ACCESS_TTL` | Thời hạn access JWT | `15m` |
@@ -102,7 +102,9 @@ src/
 | `SUPER_ADMIN_USERNAME` | Username đăng nhập của super admin | (bắt buộc để seed) |
 | `SUPER_ADMIN_PASSWORD` | Mật khẩu super admin | (bắt buộc để seed) |
 | `SUPER_ADMIN_FULL_NAME` | Họ tên | `Super Admin` |
-| `SUPER_ADMIN_PHONE_NUMBER` / `_ADDRESS` / `_AGE` / `_GENDER` | Thông tin phụ | — |
+| `SUPER_ADMIN_PHONE_NUMBER` / `_ADDRESS` | Thông tin phụ | — |
+| `SUPER_ADMIN_DATE_OF_BIRTH` | Ngày sinh, định dạng `YYYY-MM-DD` | — |
+| `SUPER_ADMIN_GENDER` | `MALE`, `FEMALE` hoặc `OTHER` | — |
 
 > ENV authentication được validate khi khởi động. Xem [hướng dẫn authentication](docs/AUTHENTICATION.md) để chuyển cấu hình cũ, test Swagger, tích hợp frontend và chuẩn bị Redis.
 
@@ -112,13 +114,22 @@ src/
 
 ## 6. Database
 
-- **SQLite** qua Prisma, file mặc định `data/pos-ndm.sqlite` (đổi bằng `DATABASE_URL`). Thư mục `data/` được ứng dụng tự tạo lúc khởi động nếu chưa có.
+- **PostgreSQL** qua Prisma, cấu hình bằng `DATABASE_URL`.
 - Schema khai báo tại `prisma/schema.prisma`; thay đổi schema bằng **Prisma Migrate**, không tự đồng bộ khi khởi động.
-- Khoá chính là **UUID** (`@default(uuid())`).
-- Mọi cột thời gian dùng `DateTime`; `createdAt` tự điền khi tạo, `updatedAt` do repository gán khi cập nhật (bản ghi mới có `updatedAt = null`).
+- Khoá chính là **UUID** (`@default(uuid())`, sinh phía client — INSERT thô bằng SQL phải tự cấp `id`).
+- Mọi cột thời gian là `timestamptz`; `createdAt` tự điền khi tạo, `updatedAt` do repository gán khi cập nhật (bản ghi mới có `updatedAt = null`).
+- Cột trạng thái dùng **enum thật của PostgreSQL** (`RecordStatus`, `UserStatus`, `Gender`), giá trị lưu dạng chữ HOA.
 - Model đặt trong `prisma/schema.prisma`; type sinh ra được dùng trực tiếp (`User`, `Auth`, `RefreshToken` từ `@prisma/client`).
 - Repository nền: `src/providers/abstract-base/repositories/prisma-base.repository.ts` — mọi filter tự động thêm `isDeleted: false` (soft delete).
-- File `.db` / `.sqlite` / `.sqlite3` và thư mục `data/` đã được `.gitignore`.
+- `createdBy` / `updatedBy` là kiểu `uuid`; thao tác do hệ thống khởi phát dùng hằng `SYSTEM_ACTOR_ID` trong `src/common/constants/app.constant.ts`, **không** ghi chuỗi tự do.
+
+> **Prisma Migrate cần shadow database** — tạo và xoá một CSDL tạm trên cùng server. Nếu tài khoản
+> không có quyền `CREATEDB`, dùng phương án dự phòng: `prisma migrate diff --from-empty
+> --to-schema-datamodel prisma/schema.prisma --script` để sinh SQL, `prisma db execute --file` để áp,
+> rồi `prisma migrate resolve --applied <tên migration>`.
+>
+> Khi dùng nhà cung cấp có pooler (Supabase, Neon…): migrate cần **session pooler (cổng 5432)**.
+> Cổng 6543 là transaction pooler, không chạy được DDL.
 
 Các lệnh thường dùng:
 
@@ -221,7 +232,7 @@ Dự án đang dùng `Logger` mặc định của NestJS — log được in ra 
 ## 12. Công nghệ sử dụng
 
 - **NestJS 11** (Fastify adapter)
-- **Prisma 6** + **SQLite**
+- **Prisma 6** + **PostgreSQL**
 - **Passport JWT** cho xác thực
 - **class-validator** + **class-transformer** cho DTO
 - **@nestjs/swagger** cho API docs

@@ -12,6 +12,7 @@ export interface AuthJwtPayload {
 export interface JwtUser {
   userId: string;
   sid: string;
-  email: string;
+  /** Nullable: khách mua tại quầy không có email. */
+  email: string | null;
   role: AuthRole;
 }

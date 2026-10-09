@@ -27,7 +27,7 @@ export class PasswordService {
       if (!active) throw authError(ErrorCode.SESSION_REVOKED);
       const updated = await tx.auth.updateMany({
         where: { id: credentials.id, password: credentials.password },
-        data: { password: hash, updatedAt: new Date() },
+        data: { password: hash, lastChangedPasswordAt: new Date(), updatedAt: new Date() },
       });
       if (updated.count !== 1) throw authError(ErrorCode.LOGIN_INVALID);
       await tx.refreshToken.updateMany({
@@ -46,7 +46,7 @@ export class PasswordService {
     await this.transactions.write(async (tx) => {
       const updated = await tx.auth.updateMany({
         where: { userId, isDeleted: false },
-        data: { password: hash, updatedAt: new Date() },
+        data: { password: hash, lastChangedPasswordAt: new Date(), updatedAt: new Date() },
       });
       if (!updated.count) throw authError(ErrorCode.LOGIN_INVALID);
       await tx.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });

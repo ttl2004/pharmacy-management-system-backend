@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Role } from '@prisma/client';
+import { SYSTEM_ACTOR_ID } from 'src/common/constants/app.constant';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import { ErrorException } from 'src/common/exceptions/error.exception';
@@ -152,7 +153,8 @@ export class PermissionService {
       const permissionIds = codes.map((code) => idByCode.get(code)).filter((id): id is string => Boolean(id));
 
       await this.transactions.write(async (tx) => {
-        await this.rolePermissions.replaceForRole(tx, role.id, permissionIds, 'system');
+        // `createdBy`/`updatedBy` là cột uuid, không được ghi chuỗi tự do.
+        await this.rolePermissions.replaceForRole(tx, role.id, permissionIds, SYSTEM_ACTOR_ID);
       });
     }
   }

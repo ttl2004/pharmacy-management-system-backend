@@ -2,7 +2,7 @@ import { AuthRole } from 'src/common/types/common.enum';
 
 export interface AuthJwtPayload {
   sub: string; // Mã người dùng
-  role: AuthRole;
+  role: AuthRole; // Chỉ để đọc khi debug — nguồn thật là bảng users
   sid: string;
   jti: string;
   iat: number;
@@ -14,5 +14,4 @@ export interface JwtUser {
   sid: string;
   email: string;
   role: AuthRole;
-  permissionId?: string;
 }

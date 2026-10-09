@@ -21,8 +21,8 @@ model User {
   age          String?
   gender       String?
   status       String    @default("active")
-  role         String
-  permissionId String?
+  roleId       String
+  role         Role      @relation(fields: [roleId], references: [id])
 
   auths         Auth[]
   refreshTokens RefreshToken[]
@@ -62,4 +62,58 @@ model RefreshToken {
   @@index([userId, sid])
   @@index([sid])
   @@map("refresh_tokens")
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  isDeleted   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  createdBy   String?
+  updatedAt   DateTime?
+  updatedBy   String?
+  code        String   @unique
+  name        String
+  description String?
+  level       Int
+  isSystem    Boolean  @default(true)
+
+  rolePermissions RolePermission[]
+  users           User[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(uuid())
+  isDeleted   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  createdBy   String?
+  updatedAt   DateTime?
+  updatedBy   String?
+  code        String   @unique
+  name        String
+  module      String
+  sortOrder   Int      @default(0)
+
+  rolePermissions RolePermission[]
+
+  @@index([module, sortOrder])
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String   @id @default(uuid())
+  isDeleted    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  createdBy    String?
+  updatedAt    DateTime?
+  updatedBy    String?
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+  @@map("role_permissions")
 }

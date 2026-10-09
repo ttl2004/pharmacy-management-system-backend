@@ -13,6 +13,7 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "seed:super-admin": "ts-node -r tsconfig-paths/register src/scripts/seed-super-admin.ts",
+    "seed:permissions": "ts-node -r tsconfig-paths/register src/scripts/seed-permissions.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",

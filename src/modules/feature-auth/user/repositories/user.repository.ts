@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { User } from '@prisma/client';
+import { Role, User } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { PrismaBaseRepository } from 'src/providers/abstract-base/repositories/prisma-base.repository';
 
@@ -18,5 +18,10 @@ export class UserRepository extends PrismaBaseRepository<User> {
    */
   async findByEmailIgnoringSoftDelete(email: string): Promise<User | null> {
     return this.prisma.user.findFirst({ where: { email } });
+  }
+
+  /** Lấy user kèm vai trò — vai trò nằm ở bảng `roles` từ khi chuyển sang khoá ngoại. */
+  async findByIdWithRole(id: string): Promise<(User & { role: Role }) | null> {
+    return this.prisma.user.findFirst({ where: { id, isDeleted: false }, include: { role: true } });
   }
 }

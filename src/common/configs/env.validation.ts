@@ -77,7 +77,14 @@ export const envSchema = z
 export type EnvConfig = z.infer<typeof envSchema>;
 
 export function validateEnv(config: Record<string, unknown>): EnvConfig & Record<string, unknown> {
-  const result = envSchema.safeParse(config);
+  // `dotenv` biến dòng `KEY=` thành chuỗi rỗng, còn `.optional()` của zod chỉ bỏ qua `undefined`.
+  // Chuẩn hoá rỗng thành "không khai báo" để file `.env.example` để trống không làm chết ứng dụng
+  // khi dựng máy mới; biến bắt buộc vẫn bị từ chối vì thiếu hẳn giá trị.
+  const normalized = Object.fromEntries(
+    Object.entries(config).map(([key, value]) => [key, value === '' ? undefined : value]),
+  );
+
+  const result = envSchema.safeParse(normalized);
 
   if (!result.success) {
     const details = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('\n  - ');

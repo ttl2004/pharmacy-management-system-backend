@@ -34,8 +34,13 @@ export class UserService extends AbstractBaseService<User> {
 
     if (query.roleCode) {
       const roleId = await this.userRepository.findRoleIdByCode(query.roleCode);
-      // Vai trò không tồn tại thì trả rỗng, không ném lỗi — đây là bộ lọc, không phải tra cứu.
-      filter.roleId = roleId ?? '__khong_ton_tai__';
+      // Vai trò không tồn tại thì trả rỗng ngay, không ném lỗi — đây là bộ lọc, không phải tra cứu.
+      // Không thể nhét giá trị sentinel vào `filter.roleId`: cột đó là uuid, chuỗi lạ sẽ ném lỗi
+      // ở tầng CSDL và bộ lọc ngoại lệ biến nó thành 500.
+      if (!roleId) {
+        return { hits: [], total: 0, page: query.page, totalPages: 0, limit: query.limit };
+      }
+      filter.roleId = roleId;
     }
     if (query.branchId) filter.branchId = query.branchId;
     if (query.status) filter.status = query.status;

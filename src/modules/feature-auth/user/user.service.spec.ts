@@ -102,14 +102,22 @@ describe('UserService — sửa người dùng', () => {
   });
 
   it('không gửi branchId thì giữ nguyên chi nhánh cũ, không kiểm luật 10', async () => {
-    const update = jest.fn().mockResolvedValue({ id: 'pm-id' });
+    // Bắt tham số qua mockImplementation thay vì đọc `mock.calls` — `calls` là `any[][]` nên
+    // truy cập vào nó vi phạm no-unsafe-member-access.
+    let payload: Record<string, unknown> | undefined;
+    const update = jest.fn().mockImplementation((_filter: unknown, data: Record<string, unknown>) => {
+      payload = data;
+      return Promise.resolve({ id: 'pm-id' });
+    });
     const service = makeService({
       findByIdWithRole: jest.fn().mockResolvedValue({ id: 'pm-id', role: { code: 'PHARMACY_MANAGER' } }),
       update,
     });
     jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+
     await expect(service.update('pm-id', { fullName: 'Tên mới' } as never, 'caller-id')).resolves.toBeDefined();
-    expect(update.mock.calls[0][1]).not.toHaveProperty('branchId');
+    expect(payload).toBeDefined();
+    expect(payload).not.toHaveProperty('branchId');
   });
 });
 

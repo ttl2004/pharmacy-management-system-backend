@@ -25,7 +25,9 @@ export const envSchema = z
 
     //- Cơ sở dữ liệu
     DB_LOGGING: boolStr('false'),
-    DATABASE_URL: z.string().min(1, 'DATABASE_URL không được để trống').default('file:../data/pos-ndm.sqlite'),
+    DATABASE_URL: z
+      .string({ error: 'DATABASE_URL là bắt buộc và phải là chuỗi ký tự' })
+      .regex(/^postgres(ql)?:\/\//, 'DATABASE_URL phải là chuỗi kết nối PostgreSQL'),
 
     //- Xác thực
     JWT_ACCESS_SECRET: z
@@ -48,10 +50,16 @@ export const envSchema = z
     SUPER_ADMIN_USERNAME: z.string().optional(),
     SUPER_ADMIN_PASSWORD: z.string().optional(),
     SUPER_ADMIN_FULL_NAME: z.string().default('Super Admin'),
-    SUPER_ADMIN_PHONE_NUMBER: z.string().default(''),
-    SUPER_ADMIN_ADDRESS: z.string().default(''),
-    SUPER_ADMIN_AGE: z.string().default(''),
-    SUPER_ADMIN_GENDER: z.string().default('male'),
+    // Không default '' cho SĐT: cột là UNIQUE, hai bản ghi rỗng sẽ vi phạm ràng buộc.
+    SUPER_ADMIN_PHONE_NUMBER: z.string().optional(),
+    SUPER_ADMIN_ADDRESS: z.string().optional(),
+    SUPER_ADMIN_DATE_OF_BIRTH: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, 'SUPER_ADMIN_DATE_OF_BIRTH phải có dạng YYYY-MM-DD')
+      .optional(),
+    SUPER_ADMIN_GENDER: z
+      .enum(['MALE', 'FEMALE', 'OTHER'], { error: 'SUPER_ADMIN_GENDER chỉ nhận MALE, FEMALE hoặc OTHER' })
+      .optional(),
 
     //- Mailer
     MAIL_GMAIL_USER: z.string().optional(),
@@ -69,7 +77,14 @@ export const envSchema = z
 export type EnvConfig = z.infer<typeof envSchema>;
 
 export function validateEnv(config: Record<string, unknown>): EnvConfig & Record<string, unknown> {
-  const result = envSchema.safeParse(config);
+  // `dotenv` biến dòng `KEY=` thành chuỗi rỗng, còn `.optional()` của zod chỉ bỏ qua `undefined`.
+  // Chuẩn hoá rỗng thành "không khai báo" để file `.env.example` để trống không làm chết ứng dụng
+  // khi dựng máy mới; biến bắt buộc vẫn bị từ chối vì thiếu hẳn giá trị.
+  const normalized = Object.fromEntries(
+    Object.entries(config).map(([key, value]) => [key, value === '' ? undefined : value]),
+  );
+
+  const result = envSchema.safeParse(normalized);
 
   if (!result.success) {
     const details = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('\n  - ');

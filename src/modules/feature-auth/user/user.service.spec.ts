@@ -63,3 +63,52 @@ describe('UserService — tạo người dùng', () => {
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
   });
 });
+
+describe('UserService — sửa người dùng', () => {
+  it('chặn tự đổi status của chính mình (1605)', async () => {
+    const service = makeService({});
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    await expect(service.update('me-id', { status: 'INACTIVE' } as never, 'me-id')).rejects.toMatchObject({
+      errorCode: ErrorCode.SELF_OPERATION_FORBIDDEN,
+    });
+  });
+
+  it('vẫn cho tự sửa hồ sơ thường', async () => {
+    const update = jest.fn().mockResolvedValue({ id: 'me-id', fullName: 'Tên mới' });
+    const service = makeService({ update });
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    await expect(service.update('me-id', { fullName: 'Tên mới' } as never, 'me-id')).resolves.toBeDefined();
+    expect(update).toHaveBeenCalled();
+  });
+
+  it('SUPER_ADMIN tự sửa chính mình vẫn bị chặn (1604)', async () => {
+    // Luật 14 đứng trước luật 15, nên chính chủ cũng không sửa được tài khoản tối cao.
+    const service = makeService({
+      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'sa-id', role: { code: 'SUPER_ADMIN' } }),
+    });
+    await expect(service.update('sa-id', { fullName: 'Tên mới' } as never, 'sa-id')).rejects.toMatchObject({
+      errorCode: ErrorCode.SUPER_ADMIN_PROTECTED,
+    });
+  });
+
+  it('gửi branchId null cho vai trò bắt buộc có chi nhánh thì bị từ chối (1602)', async () => {
+    const service = makeService({
+      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'pm-id', role: { code: 'PHARMACY_MANAGER' } }),
+    });
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    await expect(service.update('pm-id', { branchId: null } as never, 'caller-id')).rejects.toMatchObject({
+      errorCode: ErrorCode.INVALID_REFERENCE,
+    });
+  });
+
+  it('không gửi branchId thì giữ nguyên chi nhánh cũ, không kiểm luật 10', async () => {
+    const update = jest.fn().mockResolvedValue({ id: 'pm-id' });
+    const service = makeService({
+      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'pm-id', role: { code: 'PHARMACY_MANAGER' } }),
+      update,
+    });
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    await expect(service.update('pm-id', { fullName: 'Tên mới' } as never, 'caller-id')).resolves.toBeDefined();
+    expect(update.mock.calls[0][1]).not.toHaveProperty('branchId');
+  });
+});

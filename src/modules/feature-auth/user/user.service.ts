@@ -213,6 +213,23 @@ export class UserService extends AbstractBaseService<User> {
     }
   }
 
+  /** Luật 13: xoá mềm + thu hồi mọi refresh token còn hiệu lực. */
+  async remove(id: string, callerId: string): Promise<{ success: true }> {
+    await this.assertNotSuperAdminTarget(id);
+    this.assertNotSelfDelete(callerId, id);
+
+    const deleted = await this.userRepository.softDelete({ id });
+    if (!deleted) {
+      throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+    }
+
+    // Thu hồi sau khi xoá: nếu bước này lỗi thì bản ghi đã xoá mềm rồi, phiên sẽ chết ở lần
+    // refresh kế tiếp vì token trỏ tới user đã isDeleted.
+    await this.sessions.revokeAllByUser(id);
+
+    return { success: true };
+  }
+
   /** Luật 14: không ai sửa/xoá được tài khoản SUPER_ADMIN. */
   async assertNotSuperAdminTarget(id: string): Promise<void> {
     const target = await this.userRepository.findByIdWithRole(id);

@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { Branch, Prisma, Role, User, UserStatus } from '@prisma/client';
+import { Branch, Role, User, UserStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { APP_CONSTANTS } from 'src/common/constants/app.constant';
 import { ErrorException } from 'src/common/exceptions/error.exception';
+import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
@@ -66,20 +67,6 @@ export class UserService extends AbstractBaseService<User> {
     return user;
   }
 
-  /** Dịch lỗi trùng ràng buộc duy nhất của Prisma thành mã nghiệp vụ. */
-  private rethrowDuplicate(error: unknown): never {
-    // Bắt P2002 chứ không chỉ kiểm tra trước khi ghi — kiểm tra trước vẫn thủng khi hai request
-    // chạy song song.
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      const target = (error.meta?.target as string[] | undefined)?.join(', ') ?? 'trường duy nhất';
-      throw new ErrorException({
-        code: ErrorCode.DUPLICATE_CODE,
-        message: `Giá trị đã tồn tại: ${target}. Lưu ý bản ghi bị xoá mềm vẫn giữ giá trị duy nhất.`,
-      });
-    }
-    throw error;
-  }
-
   async create(dto: CreateUserRequest, callerId: string): Promise<User> {
     const hasUsername = Boolean(dto.username);
     const hasPassword = Boolean(dto.password);
@@ -124,7 +111,7 @@ export class UserService extends AbstractBaseService<User> {
         return user;
       });
     } catch (error) {
-      this.rethrowDuplicate(error);
+      rethrowDuplicate(error);
     }
   }
 
@@ -214,7 +201,7 @@ export class UserService extends AbstractBaseService<User> {
       }
       return updated;
     } catch (error) {
-      this.rethrowDuplicate(error);
+      rethrowDuplicate(error);
     }
   }
 

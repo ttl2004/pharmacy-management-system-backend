@@ -9,8 +9,9 @@ export abstract class SessionStore {
   abstract revokeAllByUser(userId: string): Promise<void>;
 }
 
-// SQLite chỉ cho một writer. Thực hiện tuần tự các transaction để tránh
-// transaction lồng nhau, xen kẽ giữa các yêu cầu HTTP đồng thời.
+// Thực hiện tuần tự các transaction để tránh transaction lồng nhau, xen kẽ giữa các
+// yêu cầu HTTP đồng thời. (Trước đây còn vì SQLite chỉ cho một writer; nay dùng PostgreSQL
+// nhưng hành vi tuần tự vẫn được giữ và vẫn đang được dựa vào.)
 @Injectable()
 export class SessionTransactions {
   private tail: Promise<unknown> = Promise.resolve();

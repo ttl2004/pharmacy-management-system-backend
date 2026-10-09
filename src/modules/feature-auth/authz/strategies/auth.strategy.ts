@@ -2,7 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
-import { AuthRole, RecordStatusEnum } from 'src/common/types/common.enum';
+import { UserStatus } from '@prisma/client';
+import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import { UserRepository } from '../../user/repositories/user.repository';
 import { AuthJwtPayload, JwtUser } from '../types/authz.types';
@@ -38,7 +39,7 @@ export class AuthzStrategy extends PassportStrategy(Strategy, AUTH_JWT) {
     }
     if (!(await this.sessions.isActive(payload.sid))) throw authError(ErrorCode.SESSION_REVOKED);
     const user = await this.users.findByIdWithRole(payload.sub);
-    if (!user || user.status !== RecordStatusEnum.ACTIVE) throw authError(ErrorCode.SESSION_REVOKED);
+    if (!user || user.status !== UserStatus.ACTIVE) throw authError(ErrorCode.SESSION_REVOKED);
     return {
       userId: user.id,
       sid: payload.sid,

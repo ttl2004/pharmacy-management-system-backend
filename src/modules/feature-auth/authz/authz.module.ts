@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
@@ -22,7 +22,8 @@ class AuthConfigModule {}
   imports: [
     AuthConfigModule,
     PassportModule.register({ defaultStrategy: AUTH_JWT }),
-    UserModule,
+    // forwardRef vì UserModule cần AuthzGuard của module này — xem user.module.ts.
+    forwardRef(() => UserModule),
     ThrottlerModule.forRoot([{ ttl: 60000, limit: 10 }]),
     JwtModule.registerAsync({
       imports: [AuthConfigModule],

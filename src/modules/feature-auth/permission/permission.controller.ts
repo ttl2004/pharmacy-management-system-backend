@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Put, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Put, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
@@ -67,7 +67,12 @@ export class PermissionController {
   @RequirePermissions('user:role:update')
   @Patch('users/:userId/role')
   @ApiOperation({ description: 'Đổi vai trò cho một người dùng. Không đổi được vai trò của chính mình.' })
-  assignRole(@Param('userId') userId: string, @Body() dto: AssignRoleRequest, @CurrentUser() user: JwtUser) {
+  assignRole(
+    // Cột `users.id` là uuid: id sai định dạng phải trả 400, nếu không Prisma ném P2023 thành 500.
+    @Param('userId', new ParseUUIDPipe()) userId: string,
+    @Body() dto: AssignRoleRequest,
+    @CurrentUser() user: JwtUser,
+  ) {
     return this.permissionService.assignRole(userId, dto.roleCode, user.userId);
   }
 }

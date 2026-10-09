@@ -24,4 +24,24 @@ export class UserRepository extends PrismaBaseRepository<User> {
   async findByIdWithRole(id: string): Promise<(User & { role: Role }) | null> {
     return this.prisma.user.findFirst({ where: { id, isDeleted: false }, include: { role: true } });
   }
+
+  /**
+   * Đổi `roleCode` thành `roleId` để lọc được bằng base repository — `BaseWhere` chỉ nhận tên
+   * cột, không nhận điều kiện trên quan hệ.
+   */
+  async findRoleIdByCode(code: string): Promise<string | null> {
+    const role = await this.prisma.role.findFirst({
+      where: { code, isDeleted: false },
+      select: { id: true },
+    });
+    return role?.id ?? null;
+  }
+
+  /** Chi tiết người dùng kèm vai trò và chi nhánh. */
+  findByIdWithRoleAndBranch(id: string) {
+    return this.prisma.user.findFirst({
+      where: { id, isDeleted: false },
+      include: { role: true, branch: true },
+    });
+  }
 }

@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { AuthzModule } from '../authz/authz.module';
 import { UserModule } from '../user/user.module';
 import { PermissionService } from './permission.service';
@@ -10,7 +10,7 @@ import { RolePermissionRepository } from './repositories/role-permission.reposit
 
 @Module({
   // AuthzModule để lấy AuthzGuard (đặt trước PermissionGuard trên route) và SessionTransactions.
-  imports: [AuthzModule, UserModule],
+  imports: [forwardRef(() => AuthzModule), forwardRef(() => UserModule)],
   controllers: [PermissionController],
   providers: [PermissionService, PermissionGuard, RoleRepository, PermissionRepository, RolePermissionRepository],
   exports: [PermissionService, PermissionGuard, RoleRepository],

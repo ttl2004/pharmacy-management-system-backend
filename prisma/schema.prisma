@@ -3,61 +3,109 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id           String    @id @default(uuid())
-  isDeleted    Boolean   @default(false)
-  createdAt    DateTime  @default(now())
-  createdBy    String?
-  updatedAt    DateTime?
-  updatedBy    String?
-  phoneNumber  String?
-  email        String    @unique
-  address      String?
-  fullName     String
-  age          String?
-  gender       String?
-  status       String    @default("active")
-  roleId       String
-  role         Role      @relation(fields: [roleId], references: [id])
+// Hai điểm lệch thiết kế có chủ đích so với docs/thiet-ke-csdl-dbml.md:
+// 1. Khoá chính dùng `@default(uuid())` — Prisma sinh ở client, không phải DEFAULT gen_random_uuid()
+//    phía DB. Hệ quả: INSERT thô bằng SQL phải tự cấp `id`.
+// 2. `createdBy`/`updatedBy` là uuid nên KHÔNG được ghi chuỗi tự do; tác nhân hệ thống dùng
+//    hằng SYSTEM_ACTOR_ID trong src/common/constants/app.constant.ts.
 
-  auths         Auth[]
+enum RecordStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  LOCKED
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+model Branch {
+  id           String       @id @default(uuid()) @db.Uuid
+  isDeleted    Boolean      @default(false)
+  createdAt    DateTime     @default(now()) @db.Timestamptz(3)
+  createdBy    String?      @db.Uuid
+  updatedAt    DateTime?    @db.Timestamptz(3)
+  updatedBy    String?      @db.Uuid
+  code         String       @unique @db.VarChar(20)
+  name         String       @db.VarChar(200)
+  phone        String       @db.VarChar(20)
+  email        String?      @db.VarChar(150)
+  address      String       @db.Text
+  openingHours String?      @db.VarChar(100)
+  status       RecordStatus @default(ACTIVE)
+
+  users User[]
+
+  @@map("branches")
+}
+
+model User {
+  id          String     @id @default(uuid()) @db.Uuid
+  isDeleted   Boolean    @default(false)
+  createdAt   DateTime   @default(now()) @db.Timestamptz(3)
+  createdBy   String?    @db.Uuid
+  updatedAt   DateTime?  @db.Timestamptz(3)
+  updatedBy   String?    @db.Uuid
+  phoneNumber String?    @unique @db.VarChar(15)
+  email       String?    @unique @db.VarChar(150)
+  address     String?    @db.Text
+  fullName    String     @db.VarChar(150)
+  dateOfBirth DateTime?  @db.Date
+  gender      Gender?
+  status      UserStatus @default(ACTIVE)
+  roleId      String     @db.Uuid
+  branchId    String?    @db.Uuid
+
+  role          Role           @relation(fields: [roleId], references: [id])
+  branch        Branch?        @relation(fields: [branchId], references: [id])
+  auth          Auth?
   refreshTokens RefreshToken[]
 
   @@map("users")
 }
 
 model Auth {
-  id        String    @id @default(uuid())
-  isDeleted Boolean   @default(false)
-  createdAt DateTime  @default(now())
-  createdBy String?
-  updatedAt DateTime?
-  updatedBy String?
-  password  String
-  username  String    @unique
-  userId    String
-  user      User      @relation(fields: [userId], references: [id])
+  id                    String    @id @default(uuid()) @db.Uuid
+  isDeleted             Boolean   @default(false)
+  createdAt             DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy             String?   @db.Uuid
+  updatedAt             DateTime? @db.Timestamptz(3)
+  updatedBy             String?   @db.Uuid
+  password              String    @db.VarChar(100)
+  username              String    @unique @db.VarChar(50)
+  lastChangedPasswordAt DateTime? @db.Timestamptz(3)
+  userId                String    @unique @db.Uuid
+
+  user User @relation(fields: [userId], references: [id])
 
   @@map("auths")
 }
 
 model RefreshToken {
-  id           String    @id @default(uuid())
-  userId       String
-  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sid          String
-  tokenHash    String    @unique
-  expiresAt    DateTime
-  revokedAt    DateTime?
-  replacedById String?
-  userAgent    String?
-  ip           String?
-  createdAt    DateTime  @default(now())
-  lastUsedAt   DateTime?
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @db.Uuid
+  sid          String    @db.VarChar(50)
+  tokenHash    String    @unique @db.VarChar(100)
+  expiresAt    DateTime  @db.Timestamptz(3)
+  revokedAt    DateTime? @db.Timestamptz(3)
+  replacedById String?   @db.VarChar(100)
+  userAgent    String?   @db.VarChar(300)
+  ip           String?   @db.VarChar(45)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  lastUsedAt   DateTime? @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, sid])
   @@index([sid])
@@ -65,17 +113,17 @@ model RefreshToken {
 }
 
 model Role {
-  id          String   @id @default(uuid())
-  isDeleted   Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  createdBy   String?
-  updatedAt   DateTime?
-  updatedBy   String?
-  code        String   @unique
-  name        String
-  description String?
+  id          String    @id @default(uuid()) @db.Uuid
+  isDeleted   Boolean   @default(false)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy   String?   @db.Uuid
+  updatedAt   DateTime? @db.Timestamptz(3)
+  updatedBy   String?   @db.Uuid
+  code        String    @unique @db.VarChar(50)
+  name        String    @db.VarChar(150)
+  description String?   @db.VarChar(300)
   level       Int
-  isSystem    Boolean  @default(true)
+  isSystem    Boolean   @default(true)
 
   rolePermissions RolePermission[]
   users           User[]
@@ -84,16 +132,16 @@ model Role {
 }
 
 model Permission {
-  id          String   @id @default(uuid())
-  isDeleted   Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  createdBy   String?
-  updatedAt   DateTime?
-  updatedBy   String?
-  code        String   @unique
-  name        String
-  module      String
-  sortOrder   Int      @default(0)
+  id        String    @id @default(uuid()) @db.Uuid
+  isDeleted Boolean   @default(false)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy String?   @db.Uuid
+  updatedAt DateTime? @db.Timestamptz(3)
+  updatedBy String?   @db.Uuid
+  code      String    @unique @db.VarChar(100)
+  name      String    @db.VarChar(200)
+  module    String    @db.VarChar(50)
+  sortOrder Int       @default(0)
 
   rolePermissions RolePermission[]
 
@@ -102,16 +150,17 @@ model Permission {
 }
 
 model RolePermission {
-  id           String   @id @default(uuid())
-  isDeleted    Boolean  @default(false)
-  createdAt    DateTime @default(now())
-  createdBy    String?
-  updatedAt    DateTime?
-  updatedBy    String?
-  roleId       String
-  permissionId String
-  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
-  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  id           String    @id @default(uuid()) @db.Uuid
+  isDeleted    Boolean   @default(false)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy    String?   @db.Uuid
+  updatedAt    DateTime? @db.Timestamptz(3)
+  updatedBy    String?   @db.Uuid
+  roleId       String    @db.Uuid
+  permissionId String    @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
 
   @@unique([roleId, permissionId])
   @@index([roleId])

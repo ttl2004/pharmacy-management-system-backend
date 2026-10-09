@@ -3,14 +3,14 @@ import { ConfigService } from '@nestjs/config';
 import { TokenService, TokenMetadata } from './token.service';
 import { authError } from './auth.error';
 import * as bcrypt from 'bcrypt';
-import { AuthRole, RecordStatusEnum } from 'src/common/types/common.enum';
+import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { UserRepository } from '../user/repositories/user.repository';
 import { LoginRequest } from './dtos/login.request';
 
-import { Auth } from '@prisma/client';
+import { Auth, Gender, UserStatus } from '@prisma/client';
 import { JwtUser } from './types/authz.types';
 import { AuthzRepository } from './repositories/authz.repository';
 import { PrismaService } from 'src/common/databases/prisma.service';
@@ -46,8 +46,8 @@ export class AuthzService extends AbstractBaseService<Auth> {
     const fullName = this.configService.get<string>('superAdmin.fullName');
     const phoneNumber = this.configService.get<string>('superAdmin.phoneNumber');
     const address = this.configService.get<string>('superAdmin.address');
-    const age = this.configService.get<string>('superAdmin.age');
-    const gender = this.configService.get<string>('superAdmin.gender');
+    const dateOfBirth = this.configService.get<string>('superAdmin.dateOfBirth');
+    const gender = this.configService.get<Gender>('superAdmin.gender');
 
     this.authzLogger.log('Đang khởi tạo quản trị viên cấp cao...');
     const existingSuperAdmin = await this.userRepository.findByEmailIgnoringSoftDelete(email);
@@ -68,12 +68,15 @@ export class AuthzService extends AbstractBaseService<Auth> {
       const superAdmin = await this.userRepository.create({
         email,
         fullName,
-        phoneNumber,
-        address,
-        age,
-        gender,
+        // `phoneNumber` là UNIQUE: chuỗi rỗng sẽ khiến bản ghi thứ hai vi phạm ràng buộc.
+        // Gửi `undefined` để base repository bỏ hẳn khoá, cột giữ NULL (Postgres cho nhiều NULL).
+        phoneNumber: phoneNumber || undefined,
+        address: address || undefined,
+        // `@db.Date`: dựng mốc theo UTC, nếu không sẽ lùi một ngày ở múi giờ UTC+7.
+        dateOfBirth: dateOfBirth ? new Date(`${dateOfBirth}T00:00:00.000Z`) : undefined,
+        gender: gender ?? undefined,
         roleId: superAdminRole.id,
-        status: RecordStatusEnum.ACTIVE,
+        status: UserStatus.ACTIVE,
       });
 
       await this.authzRepository.create({
@@ -93,7 +96,7 @@ export class AuthzService extends AbstractBaseService<Auth> {
     // Trả cùng thông báo và đều so sánh bcrypt khi tên đăng nhập không tồn tại hoặc mật khẩu sai.
     const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
     const valid = await bcrypt.compare(dto.password, authz?.password ?? dummyHash);
-    if (!authz || !valid || !authz.user || authz.user.isDeleted || authz.user.status !== RecordStatusEnum.ACTIVE) {
+    if (!authz || !valid || !authz.user || authz.user.isDeleted || authz.user.status !== UserStatus.ACTIVE) {
       throw authError(ErrorCode.LOGIN_INVALID);
     }
     return this.tokens.login(authz, metadata);

@@ -35,7 +35,7 @@ export default () => {
       fullName: env.SUPER_ADMIN_FULL_NAME,
       phoneNumber: env.SUPER_ADMIN_PHONE_NUMBER,
       address: env.SUPER_ADMIN_ADDRESS,
-      age: env.SUPER_ADMIN_AGE,
+      dateOfBirth: env.SUPER_ADMIN_DATE_OF_BIRTH,
       gender: env.SUPER_ADMIN_GENDER,
     },
   };

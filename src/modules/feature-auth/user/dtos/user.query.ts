@@ -1,13 +1,15 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { UserStatus } from '@prisma/client';
-import { IsEnum, IsOptional, IsString, IsUUID } from 'class-validator';
+import { IsEnum, IsOptional, IsUUID } from 'class-validator';
+import { AuthRole } from 'src/common/types/common.enum';
 import { AbstractBaseQuery } from 'src/providers/abstract-base/abstract-base.query';
 
 export class UserQuery extends AbstractBaseQuery {
+  /** Chặn ở DTO để mã vai trò rác trả 400 rõ ràng, thay vì lặng lẽ ra danh sách rỗng. */
   @IsOptional()
-  @IsString()
-  @ApiPropertyOptional({ example: 'SALES_STAFF', description: 'Lọc theo mã vai trò' })
-  roleCode?: string;
+  @IsEnum(AuthRole)
+  @ApiPropertyOptional({ enum: AuthRole, example: 'SALES_STAFF', description: 'Lọc theo mã vai trò' })
+  roleCode?: AuthRole;
 
   @IsOptional()
   @IsUUID()

@@ -39,6 +39,21 @@ describe('UserService — danh sách người dùng', () => {
       expect.objectContaining({ searchFields: ['phoneNumber', 'fullName', 'email'] }),
     );
   });
+
+  it('roleCode không tồn tại thì trả danh sách rỗng, không chạm cột uuid', async () => {
+    // Cột `users.roleId` là uuid: nhét một chuỗi không phải UUID vào đó sẽ ném lỗi ở tầng CSDL
+    // và bộ lọc ngoại lệ biến thành 500 — trái với ý định "bộ lọc không tìm ra thì trả rỗng".
+    const findManyWithPagination = jest.fn();
+    const service = makeService({
+      findRoleIdByCode: jest.fn().mockResolvedValue(null),
+      findManyWithPagination,
+    });
+
+    const result = await service.list({ roleCode: 'KHONGCO', page: 2, limit: 10 } as never);
+
+    expect(result).toEqual({ hits: [], total: 0, page: 2, totalPages: 0, limit: 10 });
+    expect(findManyWithPagination).not.toHaveBeenCalled();
+  });
 });
 
 describe('UserService — tạo người dùng', () => {

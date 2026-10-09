@@ -6,6 +6,7 @@ import { ErrorCode } from 'src/common/types/error-code';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { SessionTransactions } from '../authz/session.store';
 import { UserRepository } from '../user/repositories/user.repository';
+import { UserService } from '../user/user.service';
 import type { JwtUser } from '../authz/types/authz.types';
 import { PERMISSION_CATALOG, PERMISSION_CODES, PermissionCode } from './permission.constant';
 import { DEFAULT_ROLE_GRANTS, ROLE_CATALOG, RoleCode } from './role.constant';
@@ -24,6 +25,7 @@ export class PermissionService {
     private readonly rolePermissions: RolePermissionRepository,
     private readonly users: UserRepository,
     private readonly transactions: SessionTransactions,
+    private readonly userService: UserService,
   ) {}
 
   /** Quyền đang có của một vai trò. Guard gọi hàm này ở mỗi request. */
@@ -97,6 +99,16 @@ export class PermissionService {
     if (userId === actorId) throw permissionError(ErrorCode.CANNOT_CHANGE_OWN_ROLE);
 
     const role = await this.requireRole(roleCode);
+    const target = await this.users.findByIdWithRole(userId);
+    if (!target) {
+      throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+    }
+
+    // Luật 10 phải áp cho MỌI đường đổi vai trò, không chỉ tạo/sửa hồ sơ. Đây là đường DUY NHẤT
+    // đổi được vai trò, nên bỏ sót ở đây là tạo ra bản ghi vi phạm bất biến mà `UserService`
+    // vừa thi hành — ví dụ gán PHARMACY_MANAGER cho người đang có `branchId = null`.
+    await this.userService.assertBranchRule(role.code, target.branchId);
+
     const updated = await this.users.update({ id: userId }, { roleId: role.id });
     if (!updated) {
       throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });

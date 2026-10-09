@@ -8,7 +8,7 @@ import { PrismaService } from 'src/common/databases/prisma.service';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { SessionStore, SessionTransactions } from '../authz/session.store';
-import { CreateUserRequest } from './dtos/user.request';
+import { CreateUserRequest, UpdateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserRepository } from './repositories/user.repository';
 
@@ -169,6 +169,47 @@ export class UserService extends AbstractBaseService<User> {
         code: ErrorCode.INVALID_REFERENCE,
         message: 'Chi nhánh không tồn tại',
       });
+    }
+  }
+
+  /**
+   * Luật 14 + 15 + ràng buộc `branchId` theo vai trò. KHÔNG đổi vai trò — việc đó đi qua
+   * `PATCH /permission/users/:userId/role` với quyền `user:role:update`.
+   */
+  async update(id: string, dto: UpdateUserRequest, callerId: string): Promise<User> {
+    await this.assertNotSuperAdminTarget(id);
+    this.assertNotSelf(callerId, id, dto.status !== undefined);
+
+    const current = await this.userRepository.findByIdWithRole(id);
+    if (!current) {
+      throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+    }
+
+    // Chỉ kiểm luật chi nhánh khi client thực sự gửi trường đó; không gửi thì giữ nguyên giá trị cũ.
+    if (dto.branchId !== undefined) {
+      await this.assertBranchRule(current.role.code, dto.branchId);
+    }
+
+    const data: Partial<User> = { updatedBy: callerId };
+    if (dto.fullName !== undefined) data.fullName = dto.fullName;
+    if (dto.email !== undefined) data.email = dto.email;
+    if (dto.address !== undefined) data.address = dto.address;
+    if (dto.phoneNumber !== undefined) data.phoneNumber = dto.phoneNumber;
+    if (dto.dateOfBirth !== undefined) {
+      data.dateOfBirth = dto.dateOfBirth ? new Date(`${dto.dateOfBirth}T00:00:00.000Z`) : null;
+    }
+    if (dto.gender !== undefined) data.gender = dto.gender;
+    if (dto.status !== undefined) data.status = dto.status;
+    if (dto.branchId !== undefined) data.branchId = dto.branchId ?? null;
+
+    try {
+      const updated = await this.userRepository.update({ id }, data);
+      if (!updated) {
+        throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+      }
+      return updated;
+    } catch (error) {
+      this.rethrowDuplicate(error);
     }
   }
 

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
@@ -6,7 +6,7 @@ import { AuthzGuard } from '../authz/guards/auth.guard';
 import type { JwtUser } from '../authz/types/authz.types';
 import { RequirePermissions } from '../permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../permission/guards/permission.guard';
-import { CreateUserRequest } from './dtos/user.request';
+import { CreateUserRequest, UpdateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserService } from './user.service';
 
@@ -45,5 +45,19 @@ export class UserController {
   })
   create(@Body() dto: CreateUserRequest, @CurrentUser() user: JwtUser) {
     return this.userService.create(dto, user.userId);
+  }
+
+  @RequirePermissions('user:update')
+  @Patch(':id')
+  @ApiOperation({
+    description:
+      'Sửa hồ sơ, chi nhánh, trạng thái. Không đổi vai trò — dùng PATCH /permission/users/:userId/role.',
+  })
+  update(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: UpdateUserRequest,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.userService.update(id, dto, user.userId);
   }
 }

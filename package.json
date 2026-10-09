@@ -15,6 +15,7 @@
     "seed:super-admin": "ts-node -r tsconfig-paths/register src/scripts/seed-super-admin.ts",
     "seed:permissions": "ts-node -r tsconfig-paths/register src/scripts/seed-permissions.ts",
     "seed:catalog": "ts-node -r tsconfig-paths/register src/scripts/seed-catalog.ts",
+    "seed:users": "ts-node -r tsconfig-paths/register src/scripts/seed-users.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",

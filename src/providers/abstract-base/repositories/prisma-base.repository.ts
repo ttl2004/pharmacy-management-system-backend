@@ -241,10 +241,7 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
     return rows.map((row) => this.toPlain(row));
   }
 
-  async findManyWithPagination(
-    filter: BaseWhere<T> = {},
-    options?: BaseFindOptions,
-  ): Promise<PaginationResult<T>> {
+  async findManyWithPagination(filter: BaseWhere<T> = {}, options?: BaseFindOptions): Promise<PaginationResult<T>> {
     const finalOptions = this.parseOptions(options);
     const page = options?.page || 1;
     const { relations, sort, limit, search, searchFields, ranges } = finalOptions;

@@ -28,18 +28,13 @@ export class CreateUserRequest {
   gender: string;
 
   @IsString()
-  @ApiProperty({ enum: AuthRole })
-  role: AuthRole;
+  @ApiProperty({ enum: AuthRole, example: 'SALES_STAFF' })
+  roleCode: AuthRole;
 
   @IsString()
   @ApiProperty({ enum: RecordStatusEnum })
   @IsOptional()
   status: RecordStatusEnum;
-
-  @IsString()
-  @ApiProperty()
-  @IsOptional()
-  permissionId: string;
 }
 
 export class UpdateUserRequest extends PartialType(CreateUserRequest) {}

@@ -4,8 +4,9 @@ export enum RecordStatusEnum {
 }
 
 export enum AuthRole {
-  MEMBER = 'MEMBER',
-  CUSTOMER = 'CUSTOMER',
-  ADMIN = 'ADMIN',
   SUPER_ADMIN = 'SUPER_ADMIN',
+  ADMIN = 'ADMIN',
+  PHARMACY_MANAGER = 'PHARMACY_MANAGER',
+  SALES_STAFF = 'SALES_STAFF',
+  CUSTOMER = 'CUSTOMER',
 }

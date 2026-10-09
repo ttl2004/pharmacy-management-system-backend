@@ -129,7 +129,7 @@ npm run db:generate   # sinh lại Prisma Client
 npm run db:studio     # mở giao diện xem dữ liệu
 ```
 
-Thiết lập máy mới: `npm install` → `cp .env.example .env` → `npm run db:deploy` → `npm run seed:super-admin`.
+Thiết lập máy mới: `npm install` → `cp .env.example .env` → `npm run db:deploy` → `npm run seed:permissions` → `npm run seed:super-admin`.
 
 Xem cấu hình tại: `src/common/configs/configuration.ts` và `src/common/databases/prisma.service.ts`.
 
@@ -149,7 +149,43 @@ Xem `src/scripts/seed-super-admin.ts` và `AuthzService.seedSuperAdmin()`.
 
 ---
 
-## 8. Test
+## 8. Phân quyền
+
+Hệ thống dùng RBAC: 5 vai trò cố định (`SUPER_ADMIN`, `ADMIN`, `PHARMACY_MANAGER`, `SALES_STAFF`,
+`CUSTOMER`) nằm trong bảng `roles`; danh mục quyền khai báo trong
+`src/modules/feature-auth/permission/permission.constant.ts` rồi seed xuống bảng `permissions`;
+bảng `role_permissions` là ma trận quyền của từng vai trò.
+
+```bash
+npm run seed:permissions   # đồng bộ danh mục vai trò + quyền, cấp quyền mặc định lần đầu
+```
+
+Chạy lại nhiều lần vẫn an toàn: vai trò và quyền được upsert theo `code`, còn quyền mặc định chỉ
+được cấp cho vai trò chưa từng có bản ghi cấp quyền nào — nên cấu hình đã chỉnh trên hệ thống không
+bị ghi đè.
+
+Thêm nghiệp vụ mới: thêm một dòng vào `PERMISSION_CATALOG` rồi chạy lại `npm run seed:permissions`.
+
+API quản trị nằm dưới `/permission`: `GET /permission/me`, `GET /permission/catalog`,
+`GET /permission/roles`, `GET /permission/roles/:code/permissions`,
+`PUT /permission/roles/:code/permissions`, `PATCH /permission/users/:userId/role`.
+
+Trên route, khai báo quyền bằng decorator:
+
+```ts
+@RequirePermissions('product:update')
+@UseGuards(AuthzGuard, PermissionGuard)
+@Patch('product/:id')
+update() { ... }
+```
+
+`PermissionGuard` chặn mọi route không khai báo quyền, kể cả khi đã gắn guard — muốn route chỉ cần
+đăng nhập thì ghi rõ `@AnyAuthenticated()`. `SUPER_ADMIN` bỏ qua toàn bộ kiểm tra quyền. Module
+nghiệp vụ muốn dùng guard phải `imports: [PermissionModule, AuthzModule]`.
+
+---
+
+## 9. Test
 
 ```bash
 # Unit test
@@ -167,7 +203,7 @@ npm run test:e2e
 
 ---
 
-## 9. Lint & Format
+## 10. Lint & Format
 
 ```bash
 npm run lint           # eslint (type-aware)
@@ -176,13 +212,13 @@ npm run format         # prettier cho src/ và test/
 
 ---
 
-## 10. Logging
+## 11. Logging
 
 Dự án đang dùng `Logger` mặc định của NestJS — log được in ra **stdout/stderr** của terminal nơi bạn chạy lệnh. Chưa có cơ chế ghi file log. Nếu cần giữ log lâu dài, có thể cân nhắc tích hợp `nestjs-pino` hoặc `nest-winston`.
 
 ---
 
-## 11. Công nghệ sử dụng
+## 12. Công nghệ sử dụng
 
 - **NestJS 11** (Fastify adapter)
 - **Prisma 6** + **SQLite**
@@ -194,6 +230,6 @@ Dự án đang dùng `Logger` mặc định của NestJS — log được in ra 
 
 ---
 
-## 12. License
+## 13. License
 
 UNLICENSED — dự án nội bộ.

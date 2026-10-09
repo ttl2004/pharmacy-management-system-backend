@@ -13,6 +13,7 @@ import { LoginRequest } from './dtos/login.request';
 import { Auth } from '@prisma/client';
 import { JwtUser } from './types/authz.types';
 import { AuthzRepository } from './repositories/authz.repository';
+import { PrismaService } from 'src/common/databases/prisma.service';
 
 @Injectable()
 export class AuthzService extends AbstractBaseService<Auth> {
@@ -23,6 +24,9 @@ export class AuthzService extends AbstractBaseService<Auth> {
     private readonly userRepository: UserRepository,
     private readonly tokens: TokenService,
     private readonly configService: ConfigService,
+    // Đọc thẳng qua Prisma thay vì dùng RoleRepository: PermissionModule import AuthzModule,
+    // nên AuthzModule không được phép import ngược lại.
+    private readonly prisma: PrismaService,
   ) {
     super(authzRepository);
   }
@@ -48,6 +52,16 @@ export class AuthzService extends AbstractBaseService<Auth> {
     this.authzLogger.log('Đang khởi tạo quản trị viên cấp cao...');
     const existingSuperAdmin = await this.userRepository.findByEmailIgnoringSoftDelete(email);
 
+    const superAdminRole = await this.prisma.role.findFirst({
+      where: { code: AuthRole.SUPER_ADMIN, isDeleted: false },
+    });
+    if (!superAdminRole) {
+      throw new ErrorException({
+        code: ErrorCode.ROLE_NOT_FOUND,
+        message: 'Chưa có vai trò SUPER_ADMIN trong DB. Chạy "npm run seed:permissions" trước.',
+      });
+    }
+
     if (!existingSuperAdmin) {
       this.authzLogger.log('Chưa có quản trị viên cấp cao, đang tạo...');
 
@@ -58,7 +72,7 @@ export class AuthzService extends AbstractBaseService<Auth> {
         address,
         age,
         gender,
-        role: AuthRole.SUPER_ADMIN,
+        roleId: superAdminRole.id,
         status: RecordStatusEnum.ACTIVE,
       });
 

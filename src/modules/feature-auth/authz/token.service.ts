@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Cron } from '@nestjs/schedule';
-import { Auth, Prisma, User } from '@prisma/client';
+import { Auth, Prisma, Role, User } from '@prisma/client';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import { AuthConfig } from './auth.config';
 import { authError, AuthErrorCode } from './auth.error';
@@ -18,6 +18,8 @@ export interface TokenPair {
   refreshToken: string;
 }
 
+type UserWithRole = User & { role: Role };
+
 @Injectable()
 export class TokenService {
   constructor(
@@ -31,7 +33,7 @@ export class TokenService {
     return createHash('sha256').update(token).digest('hex');
   }
 
-  private async issue(tx: Prisma.TransactionClient, user: User, sid: string, metadata: TokenMetadata) {
+  private async issue(tx: Prisma.TransactionClient, user: UserWithRole, sid: string, metadata: TokenMetadata) {
     const raw = randomBytes(64).toString('base64url');
     await tx.refreshToken.create({
       data: {
@@ -46,7 +48,7 @@ export class TokenService {
         ip: metadata.ip ?? null,
       },
     });
-    const accessToken = await this.jwt.signAsync({ sub: user.id, role: user.role, sid, jti: randomUUID() });
+    const accessToken = await this.jwt.signAsync({ sub: user.id, role: user.role.code, sid, jti: randomUUID() });
     return { accessToken, refreshToken: raw };
   }
 
@@ -58,6 +60,7 @@ export class TokenService {
       const current = await tx.auth.findFirst({ where: { id: auth.id, isDeleted: false } });
       const user = await tx.user.findFirst({
         where: { id: auth.userId, isDeleted: false, status: RecordStatusEnum.ACTIVE },
+        include: { role: true },
       });
       if (!current || current.password !== auth.password || !user) throw authError(ErrorCode.LOGIN_INVALID);
       const oldTokens = await tx.refreshToken.findMany({
@@ -89,6 +92,7 @@ export class TokenService {
         const now = new Date();
         const user = await tx.user.findFirst({
           where: { id: token.userId, isDeleted: false, status: RecordStatusEnum.ACTIVE },
+          include: { role: true },
         });
         if (!user) {
           await tx.refreshToken.updateMany({
@@ -101,7 +105,7 @@ export class TokenService {
         // Không tạo bản ghi, không đổi hash, sid hoặc mốc hết hạn của RT.
         const accessToken = await this.jwt.signAsync({
           sub: user.id,
-          role: user.role,
+          role: user.role.code,
           sid: token.sid,
           jti: randomUUID(),
         });

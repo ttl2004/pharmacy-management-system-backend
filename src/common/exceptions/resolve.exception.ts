@@ -60,8 +60,7 @@ export class ResolveExceptionFilter implements ExceptionFilter {
     } else if (exception instanceof HttpException) {
       statusCode = exception.getStatus();
       const body = exception.getResponse();
-      const details =
-        typeof body === 'object' ? (body as { code?: unknown; message?: string | string[] }) : undefined;
+      const details = typeof body === 'object' ? (body as { code?: unknown; message?: string | string[] }) : undefined;
       message = Array.isArray(details?.message) ? details.message.join('; ') : (details?.message ?? exception.message);
       errorCode = this.getErrorCodeFromHttpException(exception);
       // Exception tự mang mã lỗi riêng (ví dụ authError) thì mã đó thắng mã suy ra từ loại HTTP.

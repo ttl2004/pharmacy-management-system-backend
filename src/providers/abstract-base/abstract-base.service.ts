@@ -27,10 +27,7 @@ export abstract class AbstractBaseService<T extends BaseRecord> {
     return this.repository.findMany(filter, options);
   }
 
-  async getRecordsWithPagination(
-    filter: BaseWhere<T> = {},
-    options?: BaseFindOptions,
-  ): Promise<PaginationResult<T>> {
+  async getRecordsWithPagination(filter: BaseWhere<T> = {}, options?: BaseFindOptions): Promise<PaginationResult<T>> {
     this.logger.log('[getRecordsWithPagination] START');
     const result = await this.repository.findManyWithPagination(filter, options);
     this.logger.log('[getRecordsWithPagination] END');

@@ -4,6 +4,7 @@ import { LoggerModule } from 'nestjs-pino';
 import configuration from './common/configs/configuration';
 import { validateEnv } from './common/configs/env.validation';
 import { FeatureAuthzModule } from './modules/feature-auth/feature-auth.module';
+import { BranchModule } from './modules/feature-branch/branch.module';
 import { DatabaseModule } from './common/databases/database.module';
 import { ScheduleModule } from '@nestjs/schedule';
 
@@ -42,6 +43,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 
     //- Module chính
     FeatureAuthzModule,
+    BranchModule,
 
     // MailerModule,
   ],

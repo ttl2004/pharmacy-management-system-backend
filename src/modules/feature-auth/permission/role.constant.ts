@@ -47,5 +47,16 @@ export type RoleCode = (typeof ROLE_CATALOG)[number]['code'];
 export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCode[]>> = {
   // `user:create` cố ý KHÔNG có mặt: tài khoản các vai trò nội bộ chỉ super admin tạo.
   // Xem spec mục 4.5 — cùng nhóm với `permission:update` và `user:role:update`.
-  [AuthRole.ADMIN]: ['permission:read', 'user:read', 'user:update', 'user:delete'],
+  [AuthRole.ADMIN]: [
+    'permission:read',
+    'branch:read',
+    'branch:create',
+    'branch:update',
+    'branch:delete',
+    'user:read',
+    'user:update',
+    'user:delete',
+  ],
+  [AuthRole.PHARMACY_MANAGER]: ['branch:read'],
+  [AuthRole.SALES_STAFF]: ['branch:read'],
 };

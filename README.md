@@ -140,7 +140,10 @@ npm run db:generate   # sinh lại Prisma Client
 npm run db:studio     # mở giao diện xem dữ liệu
 ```
 
-Thiết lập máy mới: `npm install` → `cp .env.example .env` → `npm run db:deploy` → `npm run seed:permissions` → `npm run seed:super-admin`.
+Thiết lập máy mới: `npm install` → `cp .env.example .env` → `npm run db:deploy` → `npm run seed:permissions` → `npm run seed:catalog` → `npm run seed:users` → `npm run seed:super-admin`.
+
+Thứ tự này không tuỳ tiện: `seed:users` cần vai trò (do `seed:permissions` tạo) và chi nhánh (do
+`seed:catalog` tạo), còn `seed:super-admin` cần vai trò `SUPER_ADMIN` đã tồn tại.
 
 Xem cấu hình tại: `src/common/configs/configuration.ts` và `src/common/databases/prisma.service.ts`.
 
@@ -169,17 +172,31 @@ bảng `role_permissions` là ma trận quyền của từng vai trò.
 
 ```bash
 npm run seed:permissions   # đồng bộ danh mục vai trò + quyền, cấp quyền mặc định lần đầu
+npm run seed:catalog       # 3 chi nhánh mẫu (đơn vị tính, nhóm thuốc, sản phẩm sẽ bổ sung sau)
+npm run seed:users         # tài khoản mẫu: admin, quanly, nhanvien
 ```
 
 Chạy lại nhiều lần vẫn an toàn: vai trò và quyền được upsert theo `code`, còn quyền mặc định chỉ
 được cấp cho vai trò chưa từng có bản ghi cấp quyền nào — nên cấu hình đã chỉnh trên hệ thống không
 bị ghi đè.
 
+Hai script sau chỉ là **dữ liệu mẫu để thử phân quyền**, không bắt buộc khi dựng môi trường thật.
+`seed:users` tạo một tài khoản cho mỗi vai trò nội bộ, kèm dòng `auths` để đăng nhập được; tài khoản
+`CUSTOMER` cố ý không seed vì chưa có luồng tạo khách hàng.
+
 Thêm nghiệp vụ mới: thêm một dòng vào `PERMISSION_CATALOG` rồi chạy lại `npm run seed:permissions`.
 
 API quản trị nằm dưới `/permission`: `GET /permission/me`, `GET /permission/catalog`,
 `GET /permission/roles`, `GET /permission/roles/:code/permissions`,
 `PUT /permission/roles/:code/permissions`, `PATCH /permission/users/:userId/role`.
+
+API người dùng nằm dưới `/user`: `GET /user`, `GET /user/:id`, `POST /user`, `PATCH /user/:id`,
+`DELETE /user/:id`. Quyền tương ứng là `user:read` · `user:create` · `user:update` · `user:delete`.
+`user:create` **cố ý không cấp cho vai trò nào** — tài khoản của các vai trò nội bộ chỉ `SUPER_ADMIN`
+tạo được. `PATCH /user/:id` không đổi vai trò; việc đó đi qua
+`PATCH /permission/users/:userId/role`. Hai luật bảo vệ ở tầng service, áp cho mọi vai trò gọi:
+không sửa/xoá được tài khoản `SUPER_ADMIN` (1604), và không tự xoá mình hay tự đổi trạng thái của
+mình (1605).
 
 Trên route, khai báo quyền bằng decorator:
 
@@ -193,6 +210,11 @@ update() { ... }
 `PermissionGuard` chặn mọi route không khai báo quyền, kể cả khi đã gắn guard — muốn route chỉ cần
 đăng nhập thì ghi rõ `@AnyAuthenticated()`. `SUPER_ADMIN` bỏ qua toàn bộ kiểm tra quyền. Module
 nghiệp vụ muốn dùng guard phải `imports: [PermissionModule, AuthzModule]`.
+
+> **Cẩn thận vòng lặp module:** `AuthzModule` và `PermissionModule` đều import `UserModule` để lấy
+> `UserRepository`. Nên module nào vừa cung cấp repository cho chúng, vừa cần guard của chúng — như
+> `UserModule` — sẽ tạo vòng lặp, và phải bọc `forwardRef(() => ...)` ở **cả hai đầu** của mỗi cạnh.
+> Module nghiệp vụ mới chỉ cần guard mà không bị chúng import thì import thẳng, không cần `forwardRef`.
 
 ---
 

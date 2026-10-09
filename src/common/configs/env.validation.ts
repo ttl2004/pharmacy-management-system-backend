@@ -25,10 +25,7 @@ export const envSchema = z
 
     //- Cơ sở dữ liệu
     DB_LOGGING: boolStr('false'),
-    DATABASE_URL: z
-      .string()
-      .min(1, 'DATABASE_URL không được để trống')
-      .default('file:../data/pos-ndm.sqlite'),
+    DATABASE_URL: z.string().min(1, 'DATABASE_URL không được để trống').default('file:../data/pos-ndm.sqlite'),
 
     //- Xác thực
     JWT_ACCESS_SECRET: z

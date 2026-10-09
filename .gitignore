@@ -44,6 +44,7 @@ lerna-debug.log*
 /.codegraph/
 /.claude/
 /.codex
+/.codex_tmp/
 /.superpower/
 /.superpowers/
 
@@ -54,6 +55,11 @@ lerna-debug.log*
 # temp directory
 .temp
 .tmp
+/tmp/
+
+# Output của công cụ sinh tài liệu (SRS, báo cáo, xlsx...)
+/output/
+/outputs/
 
 # Runtime data
 pids

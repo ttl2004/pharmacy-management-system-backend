@@ -5,6 +5,10 @@
  * Không có API tạo quyền vì một quyền không gắn endpoint nào là quyền chết.
  */
 export const PERMISSION_CATALOG = [
+  { code: 'branch:read', name: 'Xem chi nhánh', module: 'branch', sortOrder: 1 },
+  { code: 'branch:create', name: 'Tạo chi nhánh', module: 'branch', sortOrder: 2 },
+  { code: 'branch:update', name: 'Sửa chi nhánh', module: 'branch', sortOrder: 3 },
+  { code: 'branch:delete', name: 'Xoá chi nhánh', module: 'branch', sortOrder: 4 },
   { code: 'permission:read', name: 'Xem ma trận phân quyền', module: 'permission', sortOrder: 1 },
   { code: 'permission:update', name: 'Sửa ma trận phân quyền', module: 'permission', sortOrder: 2 },
   { code: 'user:role:update', name: 'Đổi vai trò người dùng', module: 'user', sortOrder: 1 },

@@ -1,9 +1,12 @@
-import { Controller, Get, Param, ParseUUIDPipe, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
+import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { AuthzGuard } from '../authz/guards/auth.guard';
+import type { JwtUser } from '../authz/types/authz.types';
 import { RequirePermissions } from '../permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../permission/guards/permission.guard';
+import { CreateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserService } from './user.service';
 
@@ -33,5 +36,14 @@ export class UserController {
   @ApiOperation({ description: 'Chi tiết người dùng kèm vai trò và chi nhánh.' })
   detail(@Param('id', new ParseUUIDPipe()) id: string) {
     return this.userService.getDetail(id);
+  }
+
+  @RequirePermissions('user:create')
+  @Post()
+  @ApiOperation({
+    description: 'Tạo người dùng. Gửi kèm username/password thì tạo luôn tài khoản đăng nhập.',
+  })
+  create(@Body() dto: CreateUserRequest, @CurrentUser() user: JwtUser) {
+    return this.userService.create(dto, user.userId);
   }
 }

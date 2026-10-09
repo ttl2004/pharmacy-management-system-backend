@@ -40,3 +40,26 @@ describe('UserService — danh sách người dùng', () => {
     );
   });
 });
+
+describe('UserService — tạo người dùng', () => {
+  const baseDto = {
+    fullName: 'Nguyễn Văn A',
+    phoneNumber: '0987654321',
+    roleCode: 'SALES_STAFF',
+    branchId: '11111111-1111-4111-8111-111111111111',
+  };
+
+  it('từ chối khi chỉ có username mà thiếu password', async () => {
+    const service = makeService({});
+    await expect(service.create({ ...baseDto, username: 'abc' } as never, 'caller-id')).rejects.toMatchObject(
+      { errorCode: ErrorCode.HTTP_BAD_REQUEST },
+    );
+  });
+
+  it('từ chối khi chỉ có password mà thiếu username', async () => {
+    const service = makeService({});
+    await expect(
+      service.create({ ...baseDto, password: 'Abc@12345' } as never, 'caller-id'),
+    ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+  });
+});

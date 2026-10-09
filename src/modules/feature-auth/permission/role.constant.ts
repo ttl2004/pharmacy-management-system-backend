@@ -45,5 +45,7 @@ export type RoleCode = (typeof ROLE_CATALOG)[number]['code'];
  * đó. Muốn mở thì phải thêm rào so cấp bậc (`level`) trước — xem mục 7 của spec.
  */
 export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCode[]>> = {
-  [AuthRole.ADMIN]: ['permission:read'],
+  // `user:create` cố ý KHÔNG có mặt: tài khoản các vai trò nội bộ chỉ super admin tạo.
+  // Xem spec mục 4.5 — cùng nhóm với `permission:update` và `user:role:update`.
+  [AuthRole.ADMIN]: ['permission:read', 'user:read', 'user:update', 'user:delete'],
 };

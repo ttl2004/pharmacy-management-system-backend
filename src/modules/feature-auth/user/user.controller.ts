@@ -1,4 +1,15 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
@@ -59,5 +70,12 @@ export class UserController {
     @CurrentUser() user: JwtUser,
   ) {
     return this.userService.update(id, dto, user.userId);
+  }
+
+  @RequirePermissions('user:delete')
+  @Delete(':id')
+  @ApiOperation({ description: 'Xoá mềm người dùng và thu hồi toàn bộ phiên đăng nhập của họ.' })
+  remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentUser() user: JwtUser) {
+    return this.userService.remove(id, user.userId);
   }
 }

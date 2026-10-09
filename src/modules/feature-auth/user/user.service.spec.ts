@@ -112,3 +112,22 @@ describe('UserService — sửa người dùng', () => {
     expect(update.mock.calls[0][1]).not.toHaveProperty('branchId');
   });
 });
+
+describe('UserService — xoá người dùng', () => {
+  it('chặn tự xoá chính mình (1605)', async () => {
+    const service = makeService({});
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    await expect(service.remove('me-id', 'me-id')).rejects.toMatchObject({
+      errorCode: ErrorCode.SELF_OPERATION_FORBIDDEN,
+    });
+  });
+
+  it('xoá thành công thì thu hồi mọi refresh token của người đó', async () => {
+    const revokeAllByUser = jest.fn().mockResolvedValue(undefined);
+    const softDelete = jest.fn().mockResolvedValue(true);
+    const service = makeService({ softDelete }, { revokeAllByUser });
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    await expect(service.remove('other-id', 'me-id')).resolves.toEqual({ success: true });
+    expect(revokeAllByUser).toHaveBeenCalledWith('other-id');
+  });
+});

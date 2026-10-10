@@ -3,63 +3,303 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id           String    @id @default(uuid())
-  isDeleted    Boolean   @default(false)
-  createdAt    DateTime  @default(now())
-  createdBy    String?
-  updatedAt    DateTime?
-  updatedBy    String?
-  phoneNumber  String?
-  email        String    @unique
-  address      String?
-  fullName     String
-  age          String?
-  gender       String?
-  status       String    @default("active")
-  role         String
-  permissionId String?
+// Ba điểm lệch thiết kế có chủ đích so với docs/thiet-ke-csdl-dbml.md:
+// 1. Khoá chính dùng `@default(uuid())` — Prisma sinh ở client, không phải DEFAULT gen_random_uuid()
+//    phía DB. Hệ quả: INSERT thô bằng SQL phải tự cấp `id`.
+// 2. `createdBy`/`updatedBy` là uuid nên KHÔNG được ghi chuỗi tự do; tác nhân hệ thống dùng
+//    hằng SYSTEM_ACTOR_ID trong src/common/constants/app.constant.ts.
+// 3. `products.imageUrls` dùng `String[] @default([])` thay vì `text[] NULL` như từ điển, để client
+//    không phải xử lý null và invariant "luôn là mảng" kiểm được ở tầng DTO.
 
-  auths         Auth[]
+enum RecordStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  LOCKED
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum DosageForm {
+  TABLET
+  CAPSULE
+  SYRUP
+  CREAM
+  OINTMENT
+  DROPS
+  INJECTION
+  SUPPOSITORY
+  POWDER
+  OTHER
+}
+
+model Branch {
+  id           String       @id @default(uuid()) @db.Uuid
+  isDeleted    Boolean      @default(false)
+  createdAt    DateTime     @default(now()) @db.Timestamptz(3)
+  createdBy    String?      @db.Uuid
+  updatedAt    DateTime?    @db.Timestamptz(3)
+  updatedBy    String?      @db.Uuid
+  code         String       @unique @db.VarChar(20)
+  name         String       @db.VarChar(200)
+  phone        String       @db.VarChar(20)
+  email        String?      @db.VarChar(150)
+  address      String       @db.Text
+  openingHours String?      @db.VarChar(100)
+  status       RecordStatus @default(ACTIVE)
+
+  users User[]
+
+  @@map("branches")
+}
+
+model User {
+  id          String     @id @default(uuid()) @db.Uuid
+  isDeleted   Boolean    @default(false)
+  createdAt   DateTime   @default(now()) @db.Timestamptz(3)
+  createdBy   String?    @db.Uuid
+  updatedAt   DateTime?  @db.Timestamptz(3)
+  updatedBy   String?    @db.Uuid
+  phoneNumber String?    @unique @db.VarChar(15)
+  email       String?    @unique @db.VarChar(150)
+  address     String?    @db.Text
+  fullName    String     @db.VarChar(150)
+  dateOfBirth DateTime?  @db.Date
+  gender      Gender?
+  status      UserStatus @default(ACTIVE)
+  roleId      String     @db.Uuid
+  branchId    String?    @db.Uuid
+
+  role          Role           @relation(fields: [roleId], references: [id])
+  branch        Branch?        @relation(fields: [branchId], references: [id])
+  auth          Auth?
   refreshTokens RefreshToken[]
 
   @@map("users")
 }
 
 model Auth {
-  id        String    @id @default(uuid())
-  isDeleted Boolean   @default(false)
-  createdAt DateTime  @default(now())
-  createdBy String?
-  updatedAt DateTime?
-  updatedBy String?
-  password  String
-  username  String    @unique
-  userId    String
-  user      User      @relation(fields: [userId], references: [id])
+  id                    String    @id @default(uuid()) @db.Uuid
+  isDeleted             Boolean   @default(false)
+  createdAt             DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy             String?   @db.Uuid
+  updatedAt             DateTime? @db.Timestamptz(3)
+  updatedBy             String?   @db.Uuid
+  password              String    @db.VarChar(100)
+  username              String    @unique @db.VarChar(50)
+  lastChangedPasswordAt DateTime? @db.Timestamptz(3)
+  userId                String    @unique @db.Uuid
+
+  user User @relation(fields: [userId], references: [id])
 
   @@map("auths")
 }
 
 model RefreshToken {
-  id           String    @id @default(uuid())
-  userId       String
-  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sid          String
-  tokenHash    String    @unique
-  expiresAt    DateTime
-  revokedAt    DateTime?
-  replacedById String?
-  userAgent    String?
-  ip           String?
-  createdAt    DateTime  @default(now())
-  lastUsedAt   DateTime?
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @db.Uuid
+  sid          String    @db.VarChar(50)
+  tokenHash    String    @unique @db.VarChar(100)
+  expiresAt    DateTime  @db.Timestamptz(3)
+  revokedAt    DateTime? @db.Timestamptz(3)
+  replacedById String?   @db.VarChar(100)
+  userAgent    String?   @db.VarChar(300)
+  ip           String?   @db.VarChar(45)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  lastUsedAt   DateTime? @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, sid])
   @@index([sid])
   @@map("refresh_tokens")
+}
+
+model Role {
+  id          String    @id @default(uuid()) @db.Uuid
+  isDeleted   Boolean   @default(false)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy   String?   @db.Uuid
+  updatedAt   DateTime? @db.Timestamptz(3)
+  updatedBy   String?   @db.Uuid
+  code        String    @unique @db.VarChar(50)
+  name        String    @db.VarChar(150)
+  description String?   @db.VarChar(300)
+  level       Int
+  isSystem    Boolean   @default(true)
+
+  rolePermissions RolePermission[]
+  users           User[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id        String    @id @default(uuid()) @db.Uuid
+  isDeleted Boolean   @default(false)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy String?   @db.Uuid
+  updatedAt DateTime? @db.Timestamptz(3)
+  updatedBy String?   @db.Uuid
+  code      String    @unique @db.VarChar(100)
+  name      String    @db.VarChar(200)
+  module    String    @db.VarChar(50)
+  sortOrder Int       @default(0)
+
+  rolePermissions RolePermission[]
+
+  @@index([module, sortOrder])
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String    @id @default(uuid()) @db.Uuid
+  isDeleted    Boolean   @default(false)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy    String?   @db.Uuid
+  updatedAt    DateTime? @db.Timestamptz(3)
+  updatedBy    String?   @db.Uuid
+  roleId       String    @db.Uuid
+  permissionId String    @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+  @@map("role_permissions")
+}
+
+model Category {
+  id        String       @id @default(uuid()) @db.Uuid
+  isDeleted Boolean      @default(false)
+  createdAt DateTime     @default(now()) @db.Timestamptz(3)
+  createdBy String?      @db.Uuid
+  updatedAt DateTime?    @db.Timestamptz(3)
+  updatedBy String?      @db.Uuid
+  code      String?      @unique @db.VarChar(30)
+  name      String       @db.VarChar(200)
+  parentId  String?      @db.Uuid
+  sortOrder Int          @default(0)
+  status    RecordStatus @default(ACTIVE)
+
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children Category[] @relation("CategoryTree")
+  products Product[]
+
+  @@index([parentId])
+  @@index([status, sortOrder])
+  @@map("categories")
+}
+
+model Manufacturer {
+  id        String       @id @default(uuid()) @db.Uuid
+  isDeleted Boolean      @default(false)
+  createdAt DateTime     @default(now()) @db.Timestamptz(3)
+  createdBy String?      @db.Uuid
+  updatedAt DateTime?    @db.Timestamptz(3)
+  updatedBy String?      @db.Uuid
+  code      String?      @unique @db.VarChar(30)
+  name      String       @db.VarChar(200)
+  country   String?      @db.VarChar(100)
+  address   String?      @db.Text
+  note      String?      @db.Text
+  status    RecordStatus @default(ACTIVE)
+
+  products Product[]
+
+  @@index([status])
+  @@map("manufacturers")
+}
+
+model Unit {
+  id        String    @id @default(uuid()) @db.Uuid
+  isDeleted Boolean   @default(false)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy String?   @db.Uuid
+  updatedAt DateTime? @db.Timestamptz(3)
+  updatedBy String?   @db.Uuid
+  code      String    @unique @db.VarChar(20)
+  name      String    @db.VarChar(50)
+  note      String?   @db.Text
+
+  baseProducts Product[]     @relation("BaseUnit")
+  productUnits ProductUnit[]
+
+  @@map("units")
+}
+
+model Product {
+  id                   String       @id @default(uuid()) @db.Uuid
+  isDeleted            Boolean      @default(false)
+  createdAt            DateTime     @default(now()) @db.Timestamptz(3)
+  createdBy            String?      @db.Uuid
+  updatedAt            DateTime?    @db.Timestamptz(3)
+  updatedBy            String?      @db.Uuid
+  code                 String       @unique @db.VarChar(30)
+  barcode              String?      @unique @db.VarChar(50)
+  name                 String       @db.VarChar(250)
+  imageUrls            String[]     @default([])
+  categoryId           String       @db.Uuid
+  manufacturerId       String?      @db.Uuid
+  baseUnitId           String       @db.Uuid
+  activeIngredient     String?      @db.VarChar(250)
+  strength             String?      @db.VarChar(100)
+  dosageForm           DosageForm?
+  packagingSpec        String?      @db.VarChar(150)
+  requiresPrescription Boolean      @default(false)
+  indications          String?      @db.Text
+  dosageNote           String?      @db.Text
+  storageNote          String?      @db.Text
+  minStockLevel        Int          @default(0)
+  status               RecordStatus @default(ACTIVE)
+
+  category     Category      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  manufacturer Manufacturer? @relation(fields: [manufacturerId], references: [id], onDelete: Restrict)
+  baseUnit     Unit          @relation("BaseUnit", fields: [baseUnitId], references: [id], onDelete: Restrict)
+  units        ProductUnit[]
+
+  @@index([categoryId])
+  @@index([manufacturerId])
+  @@index([baseUnitId])
+  @@index([status])
+  @@index([requiresPrescription])
+  @@map("products")
+}
+
+model ProductUnit {
+  id             String       @id @default(uuid()) @db.Uuid
+  isDeleted      Boolean      @default(false)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  createdBy      String?      @db.Uuid
+  updatedAt      DateTime?    @db.Timestamptz(3)
+  updatedBy      String?      @db.Uuid
+  productId      String       @db.Uuid
+  unitId         String       @db.Uuid
+  conversionRate Int
+  salePrice      Int
+  barcode        String?      @unique @db.VarChar(50)
+  isBaseUnit     Boolean      @default(false)
+  status         RecordStatus @default(ACTIVE)
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  unit    Unit    @relation(fields: [unitId], references: [id], onDelete: Restrict)
+
+  @@unique([productId, unitId])
+  @@index([productId, isDeleted])
+  @@index([unitId])
+  @@index([status])
+  @@map("product_units")
 }

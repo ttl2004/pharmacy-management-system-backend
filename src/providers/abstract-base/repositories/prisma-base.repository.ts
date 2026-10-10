@@ -42,15 +42,42 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
 
   private columns?: Set<string>;
 
-  /** Tên các cột hợp lệ của model, dùng để chặn field lạ lọt vào truy vấn. */
+  /**
+   * Tên các cột ghi được và sắp xếp được: `scalar` **và** `enum`.
+   *
+   * Cột enum phải nằm trong đây, nếu không `pickColumns` sẽ âm thầm bỏ chúng khỏi `create`/`update`
+   * — không báo lỗi, chỉ mất dữ liệu.
+   */
   protected get columnNames(): Set<string> {
     if (!this.columns) {
       const model = Prisma.dmmf.datamodel.models.find((item) => item.name === this.modelName);
       this.columns = new Set(
-        (model?.fields ?? []).filter((field) => field.kind === 'scalar').map((field) => field.name),
+        (model?.fields ?? [])
+          .filter((field) => field.kind === 'scalar' || field.kind === 'enum')
+          .map((field) => field.name),
       );
     }
     return this.columns;
+  }
+
+  private filterColumns?: Set<string>;
+
+  /**
+   * Tên các cột **lọc** được — chỉ `scalar`, cố ý loại enum.
+   *
+   * Hai lý do, cả hai đều là lỗi runtime chứ không phải lỗi biên dịch:
+   * - `searchIds` chèn thẳng `"cột" ILIKE $1` vào SQL thô, mà PostgreSQL không có toán tử `ILIKE`
+   *   cho kiểu enum.
+   * - Prisma không nhận `gte`/`lte` trên enum, nên `ranges` cũng không dùng được.
+   */
+  protected get filterableColumnNames(): Set<string> {
+    if (!this.filterColumns) {
+      const model = Prisma.dmmf.datamodel.models.find((item) => item.name === this.modelName);
+      this.filterColumns = new Set(
+        (model?.fields ?? []).filter((field) => field.kind === 'scalar').map((field) => field.name),
+      );
+    }
+    return this.filterColumns;
   }
 
   protected parseOptions(options?: BaseFindOptions) {
@@ -87,7 +114,7 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
 
     if (ranges) {
       for (const [field, range] of Object.entries(ranges)) {
-        if (!this.columnNames.has(field)) continue;
+        if (!this.filterableColumnNames.has(field)) continue;
 
         const condition: Record<string, unknown> = {};
         if (range.min !== undefined) condition.gte = range.min;
@@ -105,7 +132,7 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
   protected async resolveSearchIds(search?: string, searchFields?: string[]): Promise<string[] | undefined> {
     if (!search) return undefined;
 
-    const fields = (searchFields ?? []).filter((field) => this.columnNames.has(field));
+    const fields = (searchFields ?? []).filter((field) => this.filterableColumnNames.has(field));
     if (!fields.length) return undefined;
 
     return this.searchIds(search, fields);
@@ -114,10 +141,12 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
   /**
    * Id các bản ghi khớp từ khoá tìm kiếm.
    *
-   * Prisma dịch `contains` thành `LIKE ?` **không kèm mệnh đề ESCAPE**, mà SQLite không có
-   * ký tự escape mặc định cho LIKE — nên `%` và `_` do người dùng gõ sẽ thành ký tự đại diện
-   * và không thể vô hiệu hoá ở tầng Prisma. Truy vấn thô dưới đây dùng `LIKE ... ESCAPE '\'`
-   * để từ khoá luôn được hiểu là văn bản thuần.
+   * Prisma dịch `contains` thành `LIKE ?` **không kèm mệnh đề ESCAPE**, nên `%` và `_` do người
+   * dùng gõ sẽ thành ký tự đại diện và không thể vô hiệu hoá ở tầng Prisma. Truy vấn thô dưới đây
+   * dùng `ILIKE ... ESCAPE '\'` để từ khoá luôn được hiểu là văn bản thuần.
+   *
+   * Dùng `ILIKE` chứ không `LIKE` vì PostgreSQL phân biệt hoa/thường với `LIKE` (SQLite thì không)
+   * — tra cứu danh mục phải không phân biệt hoa/thường.
    */
   private async searchIds(search: string, fields: string[]): Promise<string[]> {
     const model = Prisma.dmmf.datamodel.models.find((item) => item.name === this.modelName);
@@ -126,7 +155,7 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
 
     const conditions = fields.map((field) => {
       const column = model?.fields.find((item) => item.name === field)?.dbName ?? field;
-      return Prisma.sql`${Prisma.raw(`"${column}"`)} LIKE ${pattern} ESCAPE '\\'`;
+      return Prisma.sql`${Prisma.raw(`"${column}"`)} ILIKE ${pattern} ESCAPE '\\'`;
     });
 
     const rows = await this.prisma.$queryRaw<{ id: string }[]>(
@@ -241,10 +270,7 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
     return rows.map((row) => this.toPlain(row));
   }
 
-  async findManyWithPagination(
-    filter: BaseWhere<T> = {},
-    options?: BaseFindOptions,
-  ): Promise<PaginationResult<T>> {
+  async findManyWithPagination(filter: BaseWhere<T> = {}, options?: BaseFindOptions): Promise<PaginationResult<T>> {
     const finalOptions = this.parseOptions(options);
     const page = options?.page || 1;
     const { relations, sort, limit, search, searchFields, ranges } = finalOptions;

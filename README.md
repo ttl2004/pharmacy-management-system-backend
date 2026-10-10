@@ -118,7 +118,7 @@ src/
 - Schema khai báo tại `prisma/schema.prisma`; thay đổi schema bằng **Prisma Migrate**, không tự đồng bộ khi khởi động.
 - Khoá chính là **UUID** (`@default(uuid())`, sinh phía client — INSERT thô bằng SQL phải tự cấp `id`).
 - Mọi cột thời gian là `timestamptz`; `createdAt` tự điền khi tạo, `updatedAt` do repository gán khi cập nhật (bản ghi mới có `updatedAt = null`).
-- Cột trạng thái dùng **enum thật của PostgreSQL** (`RecordStatus`, `UserStatus`, `Gender`), giá trị lưu dạng chữ HOA.
+- Cột trạng thái dùng **enum thật của PostgreSQL** (`RecordStatus`, `UserStatus`, `Gender`, `DosageForm`), giá trị lưu dạng chữ HOA.
 - Model đặt trong `prisma/schema.prisma`; type sinh ra được dùng trực tiếp (`User`, `Auth`, `RefreshToken` từ `@prisma/client`).
 - Repository nền: `src/providers/abstract-base/repositories/prisma-base.repository.ts` — mọi filter tự động thêm `isDeleted: false` (soft delete).
 - `createdBy` / `updatedBy` là kiểu `uuid`; thao tác do hệ thống khởi phát dùng hằng `SYSTEM_ACTOR_ID` trong `src/common/constants/app.constant.ts`, **không** ghi chuỗi tự do.
@@ -130,6 +130,10 @@ src/
 >
 > Khi dùng nhà cung cấp có pooler (Supabase, Neon…): migrate cần **session pooler (cổng 5432)**.
 > Cổng 6543 là transaction pooler, không chạy được DDL.
+>
+> Trên Supabase (tài khoản không tạo được database tạm), migration đợt danh mục được sinh bằng
+> `prisma migrate diff --from-schema-datasource prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --script`
+> → lưu vào `prisma/migrations/<timestamp>_<tên>/migration.sql` → `npm run db:deploy`.
 
 Các lệnh thường dùng:
 
@@ -172,7 +176,7 @@ bảng `role_permissions` là ma trận quyền của từng vai trò.
 
 ```bash
 npm run seed:permissions   # đồng bộ danh mục vai trò + quyền, cấp quyền mặc định lần đầu
-npm run seed:catalog       # 3 chi nhánh mẫu (đơn vị tính, nhóm thuốc, sản phẩm sẽ bổ sung sau)
+npm run seed:catalog       # dữ liệu nền: 3 chi nhánh, 5 nhóm sản phẩm, 4 hãng, 6 đơn vị, 10 sản phẩm
 npm run seed:users         # tài khoản mẫu: admin, quanly, nhanvien
 ```
 
@@ -197,6 +201,35 @@ tạo được. `PATCH /user/:id` không đổi vai trò; việc đó đi qua
 `PATCH /permission/users/:userId/role`. Hai luật bảo vệ ở tầng service, áp cho mọi vai trò gọi:
 không sửa/xoá được tài khoản `SUPER_ADMIN` (1604), và không tự xoá mình hay tự đổi trạng thái của
 mình (1605).
+
+API danh mục và sản phẩm nằm dưới `/category`, `/manufacturer`, `/unit`, `/product` (mỗi nhóm 5
+endpoint, tổng 20). Quyền theo hành động: `category:*`, `manufacturer:*`, `unit:*`, `product:*` với
+bốn biến thể `read` · `create` · `update` · `delete`. Ma trận mặc định: `ADMIN` toàn quyền, còn
+`PHARMACY_MANAGER` và `SALES_STAFF` chỉ được `read`.
+
+Ba quy ước bắt buộc nhớ khi gọi API sản phẩm:
+
+- **`units` là replace-all.** Bỏ trống `units` khi `PATCH /product/:id` là giữ nguyên cấu hình đơn vị
+  bán; gửi `units` là **thay toàn bộ** — dòng vắng mặt bị xoá mềm, dòng đã xoá mềm mà được gửi lại sẽ
+  được kích hoạt lại. Mảng rỗng bị từ chối vì sản phẩm luôn phải có đúng một đơn vị cơ bản. Đổi
+  `baseUnitId` bắt buộc gửi kèm `units`.
+- **Bảng `units` không có cột trạng thái.** DTO của `/unit` cố ý không nhận `status`; đơn vị đang được
+  dùng (làm đơn vị cơ bản hoặc có trong cấu hình đơn vị bán) chỉ có thể giữ nguyên, không xoá được.
+- **Xoá mềm vẫn giữ giá trị unique.** `code` và `barcode` của bản ghi đã xoá mềm không được tái sử
+  dụng: tạo lại sẽ trả `DUPLICATE_CODE` (1601). Nhóm sản phẩm, hãng và đơn vị đang được tham chiếu
+  (kể cả bởi bản ghi đã xoá mềm) không xoá được — trả `INVALID_REFERENCE` (1602); nghiệp vụ đúng là
+  chuyển `status = INACTIVE`.
+
+**Bề mặt công khai cho khách (`/storefront`)** — 4 route GET **không cần đăng nhập**:
+`GET /storefront/product`, `GET /storefront/product/:id`, `GET /storefront/category`,
+`GET /storefront/manufacturer`. Đây là đường khách vãng lai xem hàng trước khi đăng nhập:
+
+- Chỉ trả bản đang `ACTIVE`; sản phẩm ngừng bán hoặc đã xoá mềm trả `1600` **như không tồn tại**.
+- Chỉ trả trường công khai: có giá bán theo từng đơn vị, hoạt chất, chỉ định, liều dùng; **không** có
+  `code`/`barcode` (mã nội bộ), `minStockLevel`, `status` hay cột audit.
+- DTO công khai không nhận `status` (gửi vào bị 400), nên khách không lọc được bản ngừng bán.
+- Không gắn `AuthzGuard`/`PermissionGuard` — cố ý: route quản trị vẫn khoá bằng token + quyền như cũ,
+  và nhóm này là chỗ sẽ gắn cache (Redis) sau này vì URL không phụ thuộc người gọi.
 
 Trên route, khai báo quyền bằng decorator:
 
@@ -233,6 +266,12 @@ npm run test:cov
 # End-to-end
 npm run test:e2e
 ```
+
+Unit test chạy trong `src/` (jest `rootDir: src`). E2E dùng cấu hình riêng `test/jest-e2e.json` và
+chạy trên **schema Postgres riêng** `catalog_e2e` trong cùng database: spec tự `prisma migrate deploy`
+lên schema đó, tự dọn dữ liệu, và có chốt chặn `current_schema()` — nếu app lỡ nối vào schema khác thì
+suite dừng ngay trước khi xoá gì. File `test/prisma-base.repository.e2e-spec.ts` là di sản thời SQLite
+(import `RecordStatusEnum` đã bị xoá) nên đang bị loại khỏi `testRegex`; cần dọn ở đợt riêng.
 
 ---
 

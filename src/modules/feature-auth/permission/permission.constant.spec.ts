@@ -56,6 +56,65 @@ describe('Danh mục quyền và mã lỗi', () => {
     expect(granted.filter((code) => code.startsWith('branch:'))).toEqual([]);
   });
 
+  it('có đủ 16 mã quyền của bốn module danh mục và sản phẩm', () => {
+    const catalogCodes = PERMISSION_CODES.filter((code) => /^(category|manufacturer|unit|product):/.test(code));
+    expect([...catalogCodes].sort()).toEqual([
+      'category:create',
+      'category:delete',
+      'category:read',
+      'category:update',
+      'manufacturer:create',
+      'manufacturer:delete',
+      'manufacturer:read',
+      'manufacturer:update',
+      'product:create',
+      'product:delete',
+      'product:read',
+      'product:update',
+      'unit:create',
+      'unit:delete',
+      'unit:read',
+      'unit:update',
+    ]);
+  });
+
+  it('ADMIN được cấp đủ CRUD trên cả bốn nhóm danh mục và sản phẩm', () => {
+    const granted = DEFAULT_ROLE_GRANTS[AuthRole.ADMIN] ?? [];
+    for (const module of ['category', 'manufacturer', 'unit', 'product']) {
+      for (const action of ['read', 'create', 'update', 'delete']) {
+        expect(granted).toContain(`${module}:${action}`);
+      }
+    }
+  });
+
+  it('PHARMACY_MANAGER và SALES_STAFF chỉ được đọc danh mục và sản phẩm', () => {
+    for (const role of [AuthRole.PHARMACY_MANAGER, AuthRole.SALES_STAFF]) {
+      const granted = DEFAULT_ROLE_GRANTS[role] ?? [];
+      for (const module of ['category', 'manufacturer', 'unit', 'product']) {
+        expect(granted).toContain(`${module}:read`);
+        expect(granted).not.toContain(`${module}:create`);
+        expect(granted).not.toContain(`${module}:update`);
+        expect(granted).not.toContain(`${module}:delete`);
+      }
+    }
+  });
+
+  it('CUSTOMER không có quyền danh mục nào', () => {
+    const granted = DEFAULT_ROLE_GRANTS[AuthRole.CUSTOMER] ?? [];
+    expect(granted.filter((code) => /^(category|manufacturer|unit|product):/.test(code))).toEqual([]);
+  });
+
+  it('danh mục quyền không có mã trùng nhau', () => {
+    expect(new Set(PERMISSION_CODES).size).toBe(PERMISSION_CODES.length);
+  });
+
+  it('mọi mã trong DEFAULT_ROLE_GRANTS đều tồn tại trong danh mục quyền', () => {
+    const valid = new Set<string>(PERMISSION_CODES);
+    for (const codes of Object.values(DEFAULT_ROLE_GRANTS)) {
+      for (const code of codes ?? []) expect(valid.has(code)).toBe(true);
+    }
+  });
+
   it('nhóm mã lỗi 16xx có đủ 6 mã', () => {
     expect(ErrorCode.RECORD_NOT_FOUND).toBe(1600);
     expect(ErrorCode.DUPLICATE_CODE).toBe(1601);

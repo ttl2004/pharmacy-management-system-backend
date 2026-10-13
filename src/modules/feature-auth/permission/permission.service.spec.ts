@@ -223,6 +223,22 @@ describe('PermissionService — rào cấp bậc', () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  it('ADMIN không hạ được người đang giữ vai trò ADMIN (1508)', async () => {
+    const update = jest.fn();
+    const service = makeService({
+      roles: { findOne: jest.fn().mockResolvedValue({ id: 'role-ss', code: 'SALES_STAFF', level: 40 }) },
+      users: {
+        findByIdWithRole: jest.fn().mockResolvedValue({ id: 'admin-2', branchId: null, role: ADMIN_ROLE }),
+        update,
+      },
+    });
+
+    await expect(service.assignRole('admin-2', 'SALES_STAFF', ADMIN)).rejects.toMatchObject({
+      response: { code: ErrorCode.ROLE_LEVEL_FORBIDDEN },
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('ADMIN không sửa được ma trận quyền của chính vai trò ADMIN (1508)', async () => {
     const service = makeService({ roles: { findOne: jest.fn().mockResolvedValue(ADMIN_ROLE) } });
 
@@ -264,5 +280,7 @@ describe('PermissionService — rào cấp bậc', () => {
       service.replaceRolePermissions('PHARMACY_MANAGER', ['product:read', 'user:read'], ADMIN),
     ).resolves.toMatchObject({ permissionCodes: ['product:read', 'user:read'] });
     expect(replaceForRole).toHaveBeenCalledTimes(1);
+    // Người ghi nhận là người gọi, không phải id hệ thống hay giá trị rỗng.
+    expect(replaceForRole).toHaveBeenCalledWith(expect.anything(), 'role-pm', expect.any(Array), 'admin-1');
   });
 });

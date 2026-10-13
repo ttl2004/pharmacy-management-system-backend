@@ -277,7 +277,7 @@ tự viết phép kiểm riêng.
 Không ai thay đổi được người dùng hay vai trò **cùng cấp hoặc cao hơn** mình (cấp bậc là `roles.level`:
 SUPER_ADMIN 100 · ADMIN 80 · PHARMACY_MANAGER 60 · SALES_STAFF 40 · CUSTOMER 20) — `ROLE_LEVEL_FORBIDDEN` (1508).
 Áp cho tạo/sửa/xoá người dùng, đổi vai trò (cả người bị đổi lẫn vai trò mới) và sửa ma trận quyền. Tự sửa hồ sơ của
-chính mình vẫn được.
+chính mình vẫn được (trừ tài khoản `SUPER_ADMIN` — tự sửa vẫn bị chặn 1604 theo luật 14).
 
 - Không đổi được vai trò của tài khoản `SUPER_ADMIN` (1604), không gán vai trò `SUPER_ADMIN` qua API (1603).
 - Sửa ma trận quyền chỉ được cấp **thêm** quyền chính mình đang có — `PERMISSION_NOT_GRANTABLE` (1509); thu hồi thì được.

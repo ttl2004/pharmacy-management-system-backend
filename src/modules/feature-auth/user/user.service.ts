@@ -18,6 +18,7 @@ import {
   resolveBranchScope,
   scopedBranchFilter,
 } from '../permission/branch-scope';
+import { assertOutranks } from '../permission/role-hierarchy';
 import { CreateUserRequest, UpdateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserRepository } from './repositories/user.repository';
@@ -96,6 +97,8 @@ export class UserService extends AbstractBaseService<User> {
     assertBranchInScope(scope, branchId);
 
     const role = await this.requireAssignableRole(dto.roleCode);
+    // Rào cấp bậc: chỉ tạo được người có vai trò thấp hơn mình (1508).
+    assertOutranks(caller.roleLevel, role.level);
     await this.assertBranchRule(role.code, branchId);
 
     try {
@@ -183,7 +186,7 @@ export class UserService extends AbstractBaseService<User> {
   }
 
   /**
-   * Luật 14 + 15 + ràng buộc `branchId` theo vai trò + phạm vi chi nhánh. KHÔNG đổi vai trò — việc đó đi qua
+   * Luật 14 + 15 + ràng buộc `branchId` theo vai trò + phạm vi chi nhánh + rào cấp bậc. KHÔNG đổi vai trò — việc đó đi qua
    * `PATCH /permission/users/:userId/role` với quyền `user:role:update`.
    */
   async update(id: string, dto: UpdateUserRequest, caller: JwtUser): Promise<User> {
@@ -200,6 +203,9 @@ export class UserService extends AbstractBaseService<User> {
     if (!current) {
       throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
     }
+    // Rào cấp bậc: không sửa được người cùng cấp hoặc cao hơn (1508). Tự sửa hồ sơ của mình vẫn được — phần
+    // nguy hiểm (tự đổi trạng thái, tự xoá, tự đổi vai trò) đã bị luật 15 và mã 1505 chặn riêng.
+    if (caller.userId !== id) assertOutranks(caller.roleLevel, current.role.level);
 
     // Chỉ kiểm luật chi nhánh khi client thực sự gửi trường đó; không gửi thì giữ nguyên giá trị cũ.
     if (dto.branchId !== undefined) {
@@ -235,6 +241,13 @@ export class UserService extends AbstractBaseService<User> {
     await this.assertTargetInScope(id, scope);
     await this.assertNotSuperAdminTarget(id);
     this.assertNotSelfDelete(caller.userId, id);
+
+    const target = await this.userRepository.findByIdWithRole(id);
+    if (!target) {
+      throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+    }
+    // Rào cấp bậc: không xoá được người cùng cấp hoặc cao hơn (1508).
+    assertOutranks(caller.roleLevel, target.role.level);
 
     const deleted = await this.userRepository.softDelete({ id });
     if (!deleted) {

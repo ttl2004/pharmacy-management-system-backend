@@ -272,6 +272,17 @@ thứ hai ở tầng service, viết một lần trong `src/modules/feature-auth
 Module mới có dữ liệu gắn chi nhánh (kho, đơn hàng…) phải dùng lại các hàm trong `branch-scope.ts`, không
 tự viết phép kiểm riêng.
 
+### Rào cấp bậc
+
+Không ai thay đổi được người dùng hay vai trò **cùng cấp hoặc cao hơn** mình (cấp bậc là `roles.level`:
+SUPER_ADMIN 100 · ADMIN 80 · PHARMACY_MANAGER 60 · SALES_STAFF 40 · CUSTOMER 20) — `ROLE_LEVEL_FORBIDDEN` (1508).
+Áp cho tạo/sửa/xoá người dùng, đổi vai trò (cả người bị đổi lẫn vai trò mới) và sửa ma trận quyền. Tự sửa hồ sơ của
+chính mình vẫn được (trừ tài khoản `SUPER_ADMIN` — tự sửa vẫn bị chặn 1604 theo luật 14).
+
+- Không đổi được vai trò của tài khoản `SUPER_ADMIN` (1604), không gán vai trò `SUPER_ADMIN` qua API (1603).
+- Sửa ma trận quyền chỉ được cấp **thêm** quyền chính mình đang có — `PERMISSION_NOT_GRANTABLE` (1509); thu hồi thì được.
+- Hệ quả: `ADMIN` không sửa/xoá được `ADMIN` khác.
+
 > **Cẩn thận vòng lặp module:** `AuthzModule` và `PermissionModule` đều import `UserModule` để lấy
 > `UserRepository`. Nên module nào vừa cung cấp repository cho chúng, vừa cần guard của chúng — như
 > `UserModule` — sẽ tạo vòng lặp, và phải bọc `forwardRef(() => ...)` ở **cả hai đầu** của mỗi cạnh.

@@ -9,8 +9,17 @@ const CN1 = '11111111-1111-4111-8111-111111111111';
 const CN2 = '22222222-2222-4222-8222-222222222222';
 
 /** Người gọi giả — mặc định ADMIN (phạm vi toàn chuỗi) để các test cũ giữ nguyên ý nghĩa. */
+/** Cấp bậc theo seed `roles.level`. */
+const LEVEL: Record<AuthRole, number> = {
+  [AuthRole.SUPER_ADMIN]: 100,
+  [AuthRole.ADMIN]: 80,
+  [AuthRole.PHARMACY_MANAGER]: 60,
+  [AuthRole.SALES_STAFF]: 40,
+  [AuthRole.CUSTOMER]: 20,
+};
+
 function caller(userId: string, role: AuthRole = AuthRole.ADMIN, branchId: string | null = null): JwtUser {
-  return { userId, sid: 'sid', email: null, role, branchId };
+  return { userId, sid: 'sid', email: null, role, branchId, roleLevel: LEVEL[role] };
 }
 
 const ADMIN = caller('caller-id');
@@ -42,7 +51,7 @@ function makeService(
 ) {
   const repository = {
     findRoleIdByCode: jest.fn(),
-    findByIdWithRole: jest.fn().mockResolvedValue({ id: 'target', role: { code: 'SALES_STAFF' } }),
+    findByIdWithRole: jest.fn().mockResolvedValue({ id: 'target', role: { code: 'SALES_STAFF', level: 40 } }),
     ...repositoryOverrides,
   } as never;
   const prisma = { role: { findFirst: jest.fn() }, branch: { findFirst: jest.fn() }, ...infra.prisma } as never;
@@ -136,14 +145,14 @@ describe('UserService — phạm vi chi nhánh', () => {
     const service = makeService({
       findByIdWithRoleAndBranch: jest
         .fn()
-        .mockResolvedValue({ id: 'u2', branchId: CN2, role: { code: 'SALES_STAFF' }, branch: null }),
+        .mockResolvedValue({ id: 'u2', branchId: CN2, role: { code: 'SALES_STAFF', level: 40 }, branch: null }),
     });
 
     expect(await codeOf(service.getDetail('u2', MANAGER_CN1))).toBe(ErrorCode.USER_NOT_FOUND);
   });
 
   it('PHARMACY_MANAGER xem chi tiết người cùng chi nhánh thì thấy', async () => {
-    const row = { id: 'u1', branchId: CN1, role: { code: 'SALES_STAFF' }, branch: null };
+    const row = { id: 'u1', branchId: CN1, role: { code: 'SALES_STAFF', level: 40 }, branch: null };
     const service = makeService({ findByIdWithRoleAndBranch: jest.fn().mockResolvedValue(row) });
 
     await expect(service.getDetail('u1', MANAGER_CN1)).resolves.toBe(row);
@@ -152,7 +161,9 @@ describe('UserService — phạm vi chi nhánh', () => {
   it('sửa người ngoài chi nhánh — kể cả SUPER_ADMIN — nhận 1200 chứ không phải 1604', async () => {
     const update = jest.fn();
     const service = makeService({
-      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'sa-id', branchId: null, role: { code: 'SUPER_ADMIN' } }),
+      findByIdWithRole: jest
+        .fn()
+        .mockResolvedValue({ id: 'sa-id', branchId: null, role: { code: 'SUPER_ADMIN', level: 100 } }),
       update,
     });
 
@@ -163,7 +174,9 @@ describe('UserService — phạm vi chi nhánh', () => {
   it('chuyển nhân viên sang chi nhánh khác bị chặn 1506', async () => {
     const update = jest.fn();
     const service = makeService({
-      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'ss-id', branchId: CN1, role: { code: 'SALES_STAFF' } }),
+      findByIdWithRole: jest
+        .fn()
+        .mockResolvedValue({ id: 'ss-id', branchId: CN1, role: { code: 'SALES_STAFF', level: 40 } }),
       update,
     });
 
@@ -174,7 +187,9 @@ describe('UserService — phạm vi chi nhánh', () => {
   it('xoá người ngoài chi nhánh nhận 1200, không xoá gì', async () => {
     const softDelete = jest.fn();
     const service = makeService({
-      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'u2', branchId: CN2, role: { code: 'SALES_STAFF' } }),
+      findByIdWithRole: jest
+        .fn()
+        .mockResolvedValue({ id: 'u2', branchId: CN2, role: { code: 'SALES_STAFF', level: 40 } }),
       softDelete,
     });
 
@@ -194,7 +209,7 @@ describe('UserService — phạm vi chi nhánh', () => {
       auth: { create: jest.fn() },
     };
     const prisma = {
-      role: { findFirst: jest.fn().mockResolvedValue({ id: 'role-ss', code: 'SALES_STAFF' }) },
+      role: { findFirst: jest.fn().mockResolvedValue({ id: 'role-ss', code: 'SALES_STAFF', level: 40 }) },
       branch: { findFirst: jest.fn().mockResolvedValue({ id: CN1 }) },
     };
     const service = makeService({}, {}, { prisma, tx });
@@ -266,7 +281,7 @@ describe('UserService — sửa người dùng', () => {
   it('SUPER_ADMIN tự sửa chính mình vẫn bị chặn (1604)', async () => {
     // Luật 14 đứng trước luật 15, nên chính chủ cũng không sửa được tài khoản tối cao.
     const service = makeService({
-      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'sa-id', role: { code: 'SUPER_ADMIN' } }),
+      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'sa-id', role: { code: 'SUPER_ADMIN', level: 100 } }),
     });
     await expect(
       service.update('sa-id', { fullName: 'Tên mới' }, caller('sa-id', AuthRole.SUPER_ADMIN)),
@@ -275,7 +290,7 @@ describe('UserService — sửa người dùng', () => {
 
   it('gửi branchId null cho vai trò bắt buộc có chi nhánh thì bị từ chối (1602)', async () => {
     const service = makeService({
-      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'pm-id', role: { code: 'PHARMACY_MANAGER' } }),
+      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'pm-id', role: { code: 'PHARMACY_MANAGER', level: 60 } }),
     });
     jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
     await expect(service.update('pm-id', { branchId: null }, ADMIN)).rejects.toMatchObject({
@@ -292,7 +307,7 @@ describe('UserService — sửa người dùng', () => {
       return Promise.resolve({ id: 'pm-id' });
     });
     const service = makeService({
-      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'pm-id', role: { code: 'PHARMACY_MANAGER' } }),
+      findByIdWithRole: jest.fn().mockResolvedValue({ id: 'pm-id', role: { code: 'PHARMACY_MANAGER', level: 60 } }),
       update,
     });
     jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
@@ -319,5 +334,59 @@ describe('UserService — xoá người dùng', () => {
     jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
     await expect(service.remove('other-id', caller('me-id'))).resolves.toEqual({ success: true });
     expect(revokeAllByUser).toHaveBeenCalledWith('other-id');
+  });
+});
+
+describe('UserService — rào cấp bậc', () => {
+  const OTHER_ADMIN = { id: 'admin-2', branchId: null, role: { code: 'ADMIN', level: 80 } };
+
+  it('ADMIN không sửa được ADMIN khác (1508)', async () => {
+    const update = jest.fn();
+    const service = makeService({ findByIdWithRole: jest.fn().mockResolvedValue(OTHER_ADMIN), update });
+
+    expect(await codeOf(service.update('admin-2', { fullName: 'Tên mới' }, ADMIN))).toBe(
+      ErrorCode.ROLE_LEVEL_FORBIDDEN,
+    );
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('ADMIN không xoá được ADMIN khác (1508)', async () => {
+    const softDelete = jest.fn();
+    const service = makeService({ findByIdWithRole: jest.fn().mockResolvedValue(OTHER_ADMIN), softDelete });
+
+    expect(await codeOf(service.remove('admin-2', ADMIN))).toBe(ErrorCode.ROLE_LEVEL_FORBIDDEN);
+    expect(softDelete).not.toHaveBeenCalled();
+  });
+
+  it('tự sửa hồ sơ của chính mình vẫn được dù cùng cấp', async () => {
+    const update = jest.fn().mockResolvedValue({ id: 'caller-id' });
+    const service = makeService({
+      findByIdWithRole: jest
+        .fn()
+        .mockResolvedValue({ id: 'caller-id', branchId: null, role: { code: 'ADMIN', level: 80 } }),
+      update,
+    });
+
+    await expect(service.update('caller-id', { fullName: 'Tên mới' }, ADMIN)).resolves.toBeDefined();
+    expect(update).toHaveBeenCalled();
+  });
+
+  it('không tạo được người có vai trò cùng cấp (1508), trước cả luật chi nhánh', async () => {
+    const branchLookup = jest.fn();
+    const prisma = {
+      role: { findFirst: jest.fn().mockResolvedValue({ id: 'role-pm', code: 'PHARMACY_MANAGER', level: 60 }) },
+      branch: { findFirst: branchLookup },
+    };
+    const service = makeService({}, {}, { prisma });
+
+    expect(
+      await codeOf(
+        service.create(
+          { fullName: 'Quản lý', phoneNumber: '0987000003', roleCode: AuthRole.PHARMACY_MANAGER },
+          MANAGER_CN1,
+        ),
+      ),
+    ).toBe(ErrorCode.ROLE_LEVEL_FORBIDDEN);
+    expect(branchLookup).not.toHaveBeenCalled();
   });
 });

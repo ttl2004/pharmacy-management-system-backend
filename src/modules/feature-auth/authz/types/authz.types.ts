@@ -20,4 +20,9 @@ export interface JwtUser {
    * lực ngay request kế tiếp. `null` với SUPER_ADMIN, ADMIN, CUSTOMER.
    */
   branchId: string | null;
+  /**
+   * Cấp bậc của vai trò (`roles.level`: SUPER_ADMIN 100 · ADMIN 80 · PHARMACY_MANAGER 60 · SALES_STAFF 40 ·
+   * CUSTOMER 20), đọc từ DB mỗi request. Dùng để chặn thao tác lên người/vai trò cùng cấp hoặc cao hơn.
+   */
+  roleLevel: number;
 }

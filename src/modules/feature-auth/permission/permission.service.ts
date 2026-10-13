@@ -12,6 +12,7 @@ import { PERMISSION_CATALOG, PERMISSION_CODES, PermissionCode } from './permissi
 import { DEFAULT_ROLE_GRANTS, ROLE_CATALOG, RoleCode } from './role.constant';
 import { permissionError } from './permission.error';
 import { branchScopeKindOf, isInBranchScope, resolveBranchScope } from './branch-scope';
+import { assertGrantable, assertOutranks } from './role-hierarchy';
 import { RoleRepository } from './repositories/role.repository';
 import { PermissionRepository } from './repositories/permission.repository';
 import { RolePermissionRepository } from './repositories/role-permission.repository';
@@ -66,10 +67,12 @@ export class PermissionService {
     return { role: this.toRoleView(role), permissionCodes: await this.rolePermissions.findGrantedCodes(role.id) };
   }
 
-  async replaceRolePermissions(roleCode: string, codes: PermissionCode[], actorId: string) {
+  async replaceRolePermissions(roleCode: string, codes: PermissionCode[], caller: JwtUser) {
     const role = await this.requireRole(roleCode);
     // SUPER_ADMIN luôn có mọi quyền nhờ bỏ qua kiểm tra, bản ghi cấp quyền cho nó là vô nghĩa.
     if ((role.code as AuthRole) === AuthRole.SUPER_ADMIN) throw permissionError(ErrorCode.ROLE_NOT_EDITABLE);
+    // Rào cấp bậc: chỉ sửa được ma trận của vai trò thấp hơn mình (1508) — kể cả vai trò của chính mình.
+    assertOutranks(caller.roleLevel, role.level);
 
     const catalog = await this.permissions.findAllOrdered();
     const idByCode = new Map(catalog.map((permission) => [permission.code, permission.id]));
@@ -81,9 +84,14 @@ export class PermissionService {
       throw permissionError(ErrorCode.PERMISSION_NOT_FOUND);
     }
 
+    // Chỉ được cấp thêm quyền chính mình đang có (1509), nếu không ai có `permission:update` cũng tự leo thang được.
+    const current = new Set(await this.rolePermissions.findGrantedCodes(role.id));
+    const callerCodes = caller.role === AuthRole.SUPER_ADMIN ? null : await this.getGrantedCodes(caller.role);
+    assertGrantable(wanted, current, callerCodes);
+
     const permissionIds = wanted.map((code) => idByCode.get(code) as string);
     await this.transactions.write(async (tx) => {
-      await this.rolePermissions.replaceForRole(tx, role.id, permissionIds, actorId);
+      await this.rolePermissions.replaceForRole(tx, role.id, permissionIds, caller.userId);
     });
 
     return { role: this.toRoleView(role), permissionCodes: wanted };
@@ -112,6 +120,24 @@ export class PermissionService {
     if (!target || !isInBranchScope(scope, target.branchId)) {
       throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
     }
+
+    // Luật 14 cũng áp cho đường đổi vai trò: không ai đổi được vai trò của tài khoản SUPER_ADMIN (1604).
+    if ((target.role.code as AuthRole) === AuthRole.SUPER_ADMIN) {
+      throw new ErrorException({
+        code: ErrorCode.SUPER_ADMIN_PROTECTED,
+        message: 'Không thể thay đổi tài khoản quản trị tối cao',
+      });
+    }
+    // Luật 11 cũng áp ở đây: SUPER_ADMIN chỉ sinh ra từ seed, không gán qua API (1603).
+    if ((role.code as AuthRole) === AuthRole.SUPER_ADMIN) {
+      throw new ErrorException({
+        code: ErrorCode.ROLE_NOT_ASSIGNABLE,
+        message: 'Không thể gán vai trò SUPER_ADMIN qua API',
+      });
+    }
+    // Rào cấp bậc: người bị đổi và vai trò mới đều phải thấp hơn người gọi (1508).
+    assertOutranks(caller.roleLevel, target.role.level);
+    assertOutranks(caller.roleLevel, role.level);
 
     // Luật 10 phải áp cho MỌI đường đổi vai trò, không chỉ tạo/sửa hồ sơ. Đây là đường DUY NHẤT
     // đổi được vai trò, nên bỏ sót ở đây là tạo ra bản ghi vi phạm bất biến mà `UserService`

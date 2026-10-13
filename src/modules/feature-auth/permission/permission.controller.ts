@@ -15,9 +15,14 @@ import { AssignRoleRequest, ReplaceRolePermissionsRequest } from './dtos/permiss
 @ApiResponse({
   status: 403,
   description:
-    'Thiếu quyền. Các mã lỗi: PERMISSION_DENIED (1500), PERMISSION_NOT_DECLARED (1501), ROLE_NOT_EDITABLE (1504), CANNOT_CHANGE_OWN_ROLE (1505), BRANCH_ACCESS_DENIED (1506), BRANCH_NOT_ASSIGNED (1507)',
+    'Thiếu quyền. Các mã lỗi: PERMISSION_DENIED (1500), PERMISSION_NOT_DECLARED (1501), ROLE_NOT_EDITABLE (1504), CANNOT_CHANGE_OWN_ROLE (1505), BRANCH_ACCESS_DENIED (1506), BRANCH_NOT_ASSIGNED (1507), ROLE_LEVEL_FORBIDDEN (1508), PERMISSION_NOT_GRANTABLE (1509)',
 })
 @ApiResponse({ status: 404, description: 'Không tìm thấy. Mã lỗi: ROLE_NOT_FOUND (1502), USER_NOT_FOUND (1200)' })
+@ApiResponse({
+  status: 400,
+  description:
+    'Yêu cầu không hợp lệ. Mã lỗi: INVALID_REFERENCE (1602), ROLE_NOT_ASSIGNABLE (1603), SUPER_ADMIN_PROTECTED (1604)',
+})
 @UseGuards(AuthzGuard, PermissionGuard)
 export class PermissionController {
   constructor(private readonly permissionService: PermissionService) {}
@@ -64,7 +69,7 @@ export class PermissionController {
     @Body() dto: ReplaceRolePermissionsRequest,
     @CurrentUser() user: JwtUser,
   ) {
-    return this.permissionService.replaceRolePermissions(code, dto.permissionCodes, user.userId);
+    return this.permissionService.replaceRolePermissions(code, dto.permissionCodes, user);
   }
 
   @RequirePermissions('user:role:update')

@@ -49,6 +49,7 @@ export class AuthzStrategy extends PassportStrategy(Strategy, AUTH_JWT) {
       role: user.role.code as AuthRole,
       // Cùng lý do với `role`: chi nhánh đọc từ DB để đổi chi nhánh có hiệu lực ngay.
       branchId: user.branchId,
+      roleLevel: user.role.level,
     };
   }
 }

@@ -29,6 +29,15 @@ describe('Danh mục quyền và mã lỗi', () => {
     expect(all).not.toContain('user:role:update');
   });
 
+  it('PHARMACY_MANAGER được đọc người dùng nhưng không tạo/sửa/xoá; SALES_STAFF không được đọc', () => {
+    const manager = DEFAULT_ROLE_GRANTS[AuthRole.PHARMACY_MANAGER] ?? [];
+    expect(manager).toContain('user:read');
+    for (const code of ['user:create', 'user:update', 'user:delete', 'user:role:update']) {
+      expect(manager).not.toContain(code);
+    }
+    expect(DEFAULT_ROLE_GRANTS[AuthRole.SALES_STAFF] ?? []).not.toContain('user:read');
+  });
+
   it('có đủ 4 mã quyền của module branch', () => {
     const branchCodes = PERMISSION_CODES.filter((code) => code.startsWith('branch:'));
     expect([...branchCodes].sort()).toEqual(['branch:create', 'branch:delete', 'branch:read', 'branch:update']);

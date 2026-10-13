@@ -15,7 +15,7 @@ import { AssignRoleRequest, ReplaceRolePermissionsRequest } from './dtos/permiss
 @ApiResponse({
   status: 403,
   description:
-    'Thiếu quyền. Các mã lỗi: PERMISSION_DENIED (1500), PERMISSION_NOT_DECLARED (1501), ROLE_NOT_EDITABLE (1504), CANNOT_CHANGE_OWN_ROLE (1505)',
+    'Thiếu quyền. Các mã lỗi: PERMISSION_DENIED (1500), PERMISSION_NOT_DECLARED (1501), ROLE_NOT_EDITABLE (1504), CANNOT_CHANGE_OWN_ROLE (1505), BRANCH_ACCESS_DENIED (1506), BRANCH_NOT_ASSIGNED (1507)',
 })
 @ApiResponse({ status: 404, description: 'Không tìm thấy. Mã lỗi: ROLE_NOT_FOUND (1502), USER_NOT_FOUND (1200)' })
 @UseGuards(AuthzGuard, PermissionGuard)
@@ -24,7 +24,10 @@ export class PermissionController {
 
   @AnyAuthenticated()
   @Get('me')
-  @ApiOperation({ description: 'Quyền của chính mình, để giao diện ẩn/hiện nút theo vai trò.' })
+  @ApiOperation({
+    description:
+      'Quyền của chính mình kèm phạm vi chi nhánh (branchId, branchScope: ALL | BRANCH | NONE), để giao diện ẩn/hiện nút và ô chọn chi nhánh.',
+  })
   me(@CurrentUser() user: JwtUser) {
     return this.permissionService.getMyPermissions(user);
   }
@@ -66,13 +69,16 @@ export class PermissionController {
 
   @RequirePermissions('user:role:update')
   @Patch('users/:userId/role')
-  @ApiOperation({ description: 'Đổi vai trò cho một người dùng. Không đổi được vai trò của chính mình.' })
+  @ApiOperation({
+    description:
+      'Đổi vai trò cho một người dùng. Không đổi được vai trò của chính mình; người ngoài phạm vi chi nhánh trả 1200.',
+  })
   assignRole(
     // Cột `users.id` là uuid: id sai định dạng phải trả 400, nếu không Prisma ném P2023 thành 500.
     @Param('userId', new ParseUUIDPipe()) userId: string,
     @Body() dto: AssignRoleRequest,
     @CurrentUser() user: JwtUser,
   ) {
-    return this.permissionService.assignRole(userId, dto.roleCode, user.userId);
+    return this.permissionService.assignRole(userId, dto.roleCode, user);
   }
 }

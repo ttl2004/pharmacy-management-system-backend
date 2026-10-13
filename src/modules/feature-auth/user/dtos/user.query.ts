@@ -13,7 +13,9 @@ export class UserQuery extends AbstractBaseQuery {
 
   @IsOptional()
   @IsUUID()
-  @ApiPropertyOptional({ description: 'Lọc theo chi nhánh' })
+  @ApiPropertyOptional({
+    description: 'Lọc theo chi nhánh. Nhân viên chi nhánh bỏ trống = chi nhánh của mình; chi nhánh khác trả 1506.',
+  })
   branchId?: string;
 
   @IsOptional()

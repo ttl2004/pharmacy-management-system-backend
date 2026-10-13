@@ -31,9 +31,30 @@ export class RolePermissionRepository extends PrismaBaseRepository<RolePermissio
     return counts;
   }
 
-  /** Vai trò đã từng được cấu hình quyền chưa, **kể cả** bản ghi đã xoá mềm. Seed dùng để không ghi đè cấu hình đã chỉnh. */
-  async hasAnyGrant(roleId: string): Promise<boolean> {
-    return (await this.prisma.rolePermission.count({ where: { roleId } })) > 0;
+  /**
+   * Cấp các quyền **chưa từng có bản ghi** cho vai trò — bản ghi đã xoá mềm cũng tính là "đã có".
+   *
+   * Bản ghi xoá mềm nghĩa là quyền đó từng bị thu hồi trên giao diện, nên seed giữ nguyên quyết định ấy thay
+   * vì cấp lại. Nhờ vậy thêm mã vào `DEFAULT_ROLE_GRANTS` rồi chạy lại seed là vai trò cũ nhận được mã mới,
+   * còn cấu hình đã chỉnh tay không bị ghi đè. Trả về số quyền vừa cấp.
+   */
+  async grantMissing(
+    tx: Prisma.TransactionClient,
+    roleId: string,
+    permissionIds: string[],
+    actorId: string,
+  ): Promise<number> {
+    const existing = await tx.rolePermission.findMany({ where: { roleId }, select: { permissionId: true } });
+    const known = new Set(existing.map((row) => row.permissionId));
+    const toCreate = [...new Set(permissionIds)].filter((permissionId) => !known.has(permissionId));
+
+    if (toCreate.length) {
+      await tx.rolePermission.createMany({
+        data: toCreate.map((permissionId) => ({ roleId, permissionId, createdBy: actorId })),
+      });
+    }
+
+    return toCreate.length;
   }
 
   /**

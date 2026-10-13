@@ -11,6 +11,7 @@ import type { JwtUser } from '../authz/types/authz.types';
 import { PERMISSION_CATALOG, PERMISSION_CODES, PermissionCode } from './permission.constant';
 import { DEFAULT_ROLE_GRANTS, ROLE_CATALOG, RoleCode } from './role.constant';
 import { permissionError } from './permission.error';
+import { branchScopeKindOf, isInBranchScope, resolveBranchScope } from './branch-scope';
 import { RoleRepository } from './repositories/role.repository';
 import { PermissionRepository } from './repositories/permission.repository';
 import { RolePermissionRepository } from './repositories/role-permission.repository';
@@ -88,19 +89,27 @@ export class PermissionService {
     return { role: this.toRoleView(role), permissionCodes: wanted };
   }
 
-  /** Quyền của chính người đang đăng nhập — giao diện dùng để ẩn/hiện nút. */
+  /** Quyền của chính người đang đăng nhập — giao diện dùng để ẩn/hiện nút và ô chọn chi nhánh. */
   async getMyPermissions(user: JwtUser) {
     const isSuperAdmin = user.role === AuthRole.SUPER_ADMIN;
     const permissions = isSuperAdmin ? [...PERMISSION_CODES] : [...(await this.getGrantedCodes(user.role))];
-    return { role: user.role, isSuperAdmin, permissions };
+    return {
+      role: user.role,
+      isSuperAdmin,
+      permissions,
+      branchId: user.branchId,
+      branchScope: branchScopeKindOf(user.role),
+    };
   }
 
-  async assignRole(userId: string, roleCode: string, actorId: string) {
-    if (userId === actorId) throw permissionError(ErrorCode.CANNOT_CHANGE_OWN_ROLE);
+  async assignRole(userId: string, roleCode: string, caller: JwtUser) {
+    if (userId === caller.userId) throw permissionError(ErrorCode.CANNOT_CHANGE_OWN_ROLE);
+    const scope = resolveBranchScope(caller);
 
     const role = await this.requireRole(roleCode);
     const target = await this.users.findByIdWithRole(userId);
-    if (!target) {
+    // Ngoài phạm vi chi nhánh thì coi như không tồn tại — cùng luật với UserService (BS-05).
+    if (!target || !isInBranchScope(scope, target.branchId)) {
       throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
     }
 
@@ -109,7 +118,7 @@ export class PermissionService {
     // vừa thi hành — ví dụ gán PHARMACY_MANAGER cho người đang có `branchId = null`.
     await this.userService.assertBranchRule(role.code, target.branchId);
 
-    const updated = await this.users.update({ id: userId }, { roleId: role.id });
+    const updated = await this.users.update({ id: userId }, { roleId: role.id, updatedBy: caller.userId });
     if (!updated) {
       throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
     }
@@ -147,10 +156,13 @@ export class PermissionService {
   }
 
   /**
-   * Chỉ cấp quyền mặc định cho vai trò chưa từng có bản ghi cấp quyền nào (kể cả bản ghi đã xoá
-   * mềm), để chạy lại seed không ghi đè cấu hình đã chỉnh trên hệ thống.
+   * Cấp quyền mặc định theo **từng cặp (vai trò, quyền)** chưa từng có bản ghi — xem
+   * `RolePermissionRepository.grantMissing`. Chạy lại nhiều lần vẫn an toàn, và không cấp lại quyền đã bị thu
+   * hồi trên giao diện.
    */
   private async applyDefaultGrants(): Promise<void> {
+    const catalog = await this.permissions.findAllOrdered();
+    const idByCode = new Map(catalog.map((permission) => [permission.code, permission.id]));
     const entries = Object.entries(DEFAULT_ROLE_GRANTS) as [RoleCode, readonly PermissionCode[] | undefined][];
 
     for (const [roleCode, codes] of entries) {
@@ -158,16 +170,13 @@ export class PermissionService {
 
       const role = await this.roles.findOne({ code: roleCode });
       if (!role) continue;
-      if (await this.rolePermissions.hasAnyGrant(role.id)) continue;
 
-      const catalog = await this.permissions.findAllOrdered();
-      const idByCode = new Map(catalog.map((permission) => [permission.code, permission.id]));
       const permissionIds = codes.map((code) => idByCode.get(code)).filter((id): id is string => Boolean(id));
-
-      await this.transactions.write(async (tx) => {
-        // `createdBy`/`updatedBy` là cột uuid, không được ghi chuỗi tự do.
-        await this.rolePermissions.replaceForRole(tx, role.id, permissionIds, SYSTEM_ACTOR_ID);
-      });
+      // `createdBy`/`updatedBy` là cột uuid, không được ghi chuỗi tự do.
+      const granted = await this.transactions.write((tx) =>
+        this.rolePermissions.grantMissing(tx, role.id, permissionIds, SYSTEM_ACTOR_ID),
+      );
+      if (granted) this.logger.log(`Đã cấp ${granted} quyền mặc định mới cho ${roleCode}`);
     }
   }
 

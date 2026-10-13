@@ -19,7 +19,7 @@ describe('AuthzStrategy.validate — chi nhánh của người gọi', () => {
       email: null,
       status: UserStatus.ACTIVE,
       branchId: CN1,
-      role: { code: 'SALES_STAFF' },
+      role: { code: 'SALES_STAFF', level: 40 },
     });
 
     await expect(strategy.validate(payload as never)).resolves.toEqual({
@@ -28,6 +28,7 @@ describe('AuthzStrategy.validate — chi nhánh của người gọi', () => {
       email: null,
       role: 'SALES_STAFF',
       branchId: CN1,
+      roleLevel: 40,
     });
   });
 
@@ -37,9 +38,13 @@ describe('AuthzStrategy.validate — chi nhánh của người gọi', () => {
       email: 'admin@pos-ndm.local',
       status: UserStatus.ACTIVE,
       branchId: null,
-      role: { code: 'ADMIN' },
+      role: { code: 'ADMIN', level: 80 },
     });
 
-    await expect(strategy.validate(payload as never)).resolves.toMatchObject({ role: 'ADMIN', branchId: null });
+    await expect(strategy.validate(payload as never)).resolves.toMatchObject({
+      role: 'ADMIN',
+      branchId: null,
+      roleLevel: 80,
+    });
   });
 });

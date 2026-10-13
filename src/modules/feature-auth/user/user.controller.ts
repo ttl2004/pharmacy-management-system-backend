@@ -21,7 +21,7 @@ import { UserService } from './user.service';
 @ApiResponse({
   status: 403,
   description:
-    'Mã lỗi: PERMISSION_DENIED (1500), BRANCH_ACCESS_DENIED (1506 — lọc hoặc ghi chi nhánh khác), BRANCH_NOT_ASSIGNED (1507 — nhân viên chưa được gán chi nhánh)',
+    'Mã lỗi: PERMISSION_DENIED (1500), BRANCH_ACCESS_DENIED (1506 — lọc hoặc ghi chi nhánh khác), BRANCH_NOT_ASSIGNED (1507 — nhân viên chưa được gán chi nhánh), ROLE_LEVEL_FORBIDDEN (1508 — người dùng/vai trò cùng cấp hoặc cao hơn)',
 })
 @UseGuards(AuthzGuard, PermissionGuard)
 export class UserController {

@@ -180,9 +180,10 @@ npm run seed:catalog       # dữ liệu nền: 3 chi nhánh, 5 nhóm sản ph�
 npm run seed:users         # tài khoản mẫu: admin, quanly, nhanvien
 ```
 
-Chạy lại nhiều lần vẫn an toàn: vai trò và quyền được upsert theo `code`, còn quyền mặc định chỉ
-được cấp cho vai trò chưa từng có bản ghi cấp quyền nào — nên cấu hình đã chỉnh trên hệ thống không
-bị ghi đè.
+Chạy lại nhiều lần vẫn an toàn: vai trò và quyền được upsert theo `code`; quyền mặc định được cấp theo
+**từng cặp (vai trò, quyền) chưa từng có bản ghi**. Thêm mã mới vào `DEFAULT_ROLE_GRANTS` rồi chạy lại
+seed là vai trò đã có ma trận cũng nhận được, còn quyền đã bị thu hồi trên giao diện (bản ghi xoá mềm)
+thì không bị cấp lại.
 
 Hai script sau chỉ là **dữ liệu mẫu để thử phân quyền**, không bắt buộc khi dựng môi trường thật.
 `seed:users` tạo một tài khoản cho mỗi vai trò nội bộ, kèm dòng `auths` để đăng nhập được; tài khoản
@@ -196,6 +197,8 @@ API quản trị nằm dưới `/permission`: `GET /permission/me`, `GET /permis
 
 API người dùng nằm dưới `/user`: `GET /user`, `GET /user/:id`, `POST /user`, `PATCH /user/:id`,
 `DELETE /user/:id`. Quyền tương ứng là `user:read` · `user:create` · `user:update` · `user:delete`.
+`PHARMACY_MANAGER` có `user:read` nhưng chỉ thấy người dùng thuộc chi nhánh của mình (xem *Phạm vi chi
+nhánh* bên dưới).
 `user:create` **cố ý không cấp cho vai trò nào** — tài khoản của các vai trò nội bộ chỉ `SUPER_ADMIN`
 tạo được. `PATCH /user/:id` không đổi vai trò; việc đó đi qua
 `PATCH /permission/users/:userId/role`. Hai luật bảo vệ ở tầng service, áp cho mọi vai trò gọi:
@@ -243,6 +246,31 @@ update() { ... }
 `PermissionGuard` chặn mọi route không khai báo quyền, kể cả khi đã gắn guard — muốn route chỉ cần
 đăng nhập thì ghi rõ `@AnyAuthenticated()`. `SUPER_ADMIN` bỏ qua toàn bộ kiểm tra quyền. Module
 nghiệp vụ muốn dùng guard phải `imports: [PermissionModule, AuthzModule]`.
+
+### Phạm vi chi nhánh
+
+`PermissionGuard` chỉ trả lời "vai trò này được gọi API này không". Dữ liệu gắn chi nhánh còn qua lớp
+thứ hai ở tầng service, viết một lần trong `src/modules/feature-auth/permission/branch-scope.ts`:
+
+| Vai trò | Phạm vi |
+|---|---|
+| `SUPER_ADMIN`, `ADMIN` | Mọi chi nhánh |
+| `PHARMACY_MANAGER`, `SALES_STAFF` | Chỉ chi nhánh của mình (`users.branchId`, đọc từ DB ở mỗi request) |
+| `CUSTOMER` | Không có phạm vi chi nhánh |
+
+- Lọc hoặc ghi vào chi nhánh khác: `BRANCH_ACCESS_DENIED` (1506, HTTP 403). Không gửi chi nhánh thì
+  nhân viên được tự điền chi nhánh của mình.
+- Nhân viên chưa được gán chi nhánh: `BRANCH_NOT_ASSIGNED` (1507, HTTP 403) — không bao giờ được hiểu
+  thành "mọi chi nhánh".
+- Đọc/sửa/xoá theo id một bản ghi ngoài phạm vi: trả mã "không tồn tại" như bản ghi không có thật.
+- Danh mục, sản phẩm, đơn vị, hãng, storefront và danh sách chi nhánh là dữ liệu dùng chung, không áp
+  phạm vi.
+- Phạm vi vẫn giữ dù ma trận quyền bị chỉnh trên giao diện. Hiện áp cho `/user` và
+  `PATCH /permission/users/:userId/role`; `GET /permission/me` trả thêm `branchId` và `branchScope`
+  (`ALL` · `BRANCH` · `NONE`).
+
+Module mới có dữ liệu gắn chi nhánh (kho, đơn hàng…) phải dùng lại các hàm trong `branch-scope.ts`, không
+tự viết phép kiểm riêng.
 
 > **Cẩn thận vòng lặp module:** `AuthzModule` và `PermissionModule` đều import `UserModule` để lấy
 > `UserRepository`. Nên module nào vừa cung cấp repository cho chúng, vừa cần guard của chúng — như

@@ -33,7 +33,9 @@ export const ROLE_CATALOG = [
 export type RoleCode = (typeof ROLE_CATALOG)[number]['code'];
 
 /**
- * Quyền cấp sẵn ở lần seed đầu tiên.
+ * Quyền mặc định của từng vai trò. Seed cấp theo từng cặp (vai trò, quyền) chưa từng có bản ghi: thêm mã vào
+ * đây rồi chạy lại `npm run seed:permissions` là vai trò đã có ma trận cũng nhận được; quyền đã bị thu hồi trên
+ * giao diện thì không bị cấp lại.
  *
  * SUPER_ADMIN không có mặt vì luôn bỏ qua mọi kiểm tra quyền. `permission:update` và
  * `user:role:update` cố ý không cấp cho ai: SUPER_ADMIN vẫn làm được nhờ luật bỏ qua, còn
@@ -75,6 +77,8 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
   ],
   [AuthRole.PHARMACY_MANAGER]: [
     'branch:read',
+    // Chỉ thấy người dùng thuộc chi nhánh mình — phạm vi do branch-scope.ts ép ở tầng service.
+    'user:read',
     'category:read',
     'manufacturer:read',
     'unit:read',

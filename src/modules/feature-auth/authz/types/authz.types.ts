@@ -15,4 +15,9 @@ export interface JwtUser {
   /** Nullable: khách mua tại quầy không có email. */
   email: string | null;
   role: AuthRole;
+  /**
+   * Chi nhánh của người gọi, đọc từ bảng `users` ở mỗi request (không lấy từ token) — đổi chi nhánh có hiệu
+   * lực ngay request kế tiếp. `null` với SUPER_ADMIN, ADMIN, CUSTOMER.
+   */
+  branchId: string | null;
 }

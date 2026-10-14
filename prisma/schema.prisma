@@ -62,6 +62,15 @@ model Branch {
 
   users User[]
 
+  goodsReceipts    GoodsReceipt[]
+  stockBatches     StockBatch[]
+  stockMovements   StockMovement[]
+  transfersOut     StockTransfer[]   @relation("TransferFromBranch")
+  transfersIn      StockTransfer[]   @relation("TransferToBranch")
+  stockAdjustments StockAdjustment[]
+  branchProducts   BranchProduct[]
+  auditLogs        AuditLog[]
+
   @@map("branches")
 }
 
@@ -86,6 +95,36 @@ model User {
   branch        Branch?        @relation(fields: [branchId], references: [id])
   auth          Auth?
   refreshTokens RefreshToken[]
+
+  // Quan hệ ngược của các cột người thao tác nhóm kho — chỉ để Prisma tạo FK, không dùng để truy vấn.
+  suppliersCreated            Supplier[]            @relation("SupplierCreatedBy")
+  suppliersUpdated            Supplier[]            @relation("SupplierUpdatedBy")
+  goodsReceiptsCreated        GoodsReceipt[]        @relation("GoodsReceiptCreatedBy")
+  goodsReceiptsUpdated        GoodsReceipt[]        @relation("GoodsReceiptUpdatedBy")
+  goodsReceiptsConfirmed      GoodsReceipt[]        @relation("GoodsReceiptConfirmedBy")
+  goodsReceiptsCancelled      GoodsReceipt[]        @relation("GoodsReceiptCancelledBy")
+  goodsReceiptItemsCreated    GoodsReceiptItem[]    @relation("GoodsReceiptItemCreatedBy")
+  goodsReceiptItemsUpdated    GoodsReceiptItem[]    @relation("GoodsReceiptItemUpdatedBy")
+  stockBatchesCreated         StockBatch[]          @relation("StockBatchCreatedBy")
+  stockBatchesUpdated         StockBatch[]          @relation("StockBatchUpdatedBy")
+  stockBatchesBlocked         StockBatch[]          @relation("StockBatchBlockedBy")
+  stockMovementsCreated       StockMovement[]       @relation("StockMovementCreatedBy")
+  stockTransfersCreated       StockTransfer[]       @relation("StockTransferCreatedBy")
+  stockTransfersUpdated       StockTransfer[]       @relation("StockTransferUpdatedBy")
+  stockTransfersShipped       StockTransfer[]       @relation("StockTransferShippedBy")
+  stockTransfersReceived      StockTransfer[]       @relation("StockTransferReceivedBy")
+  stockTransfersCancelled     StockTransfer[]       @relation("StockTransferCancelledBy")
+  stockTransferItemsCreated   StockTransferItem[]   @relation("StockTransferItemCreatedBy")
+  stockTransferItemsUpdated   StockTransferItem[]   @relation("StockTransferItemUpdatedBy")
+  stockAdjustmentsCreated     StockAdjustment[]     @relation("StockAdjustmentCreatedBy")
+  stockAdjustmentsUpdated     StockAdjustment[]     @relation("StockAdjustmentUpdatedBy")
+  stockAdjustmentsConfirmed   StockAdjustment[]     @relation("StockAdjustmentConfirmedBy")
+  stockAdjustmentsCancelled   StockAdjustment[]     @relation("StockAdjustmentCancelledBy")
+  stockAdjustmentItemsCreated StockAdjustmentItem[] @relation("StockAdjustmentItemCreatedBy")
+  stockAdjustmentItemsUpdated StockAdjustmentItem[] @relation("StockAdjustmentItemUpdatedBy")
+  branchProductsCreated       BranchProduct[]       @relation("BranchProductCreatedBy")
+  branchProductsUpdated       BranchProduct[]       @relation("BranchProductUpdatedBy")
+  auditLogs                   AuditLog[]            @relation("AuditLogActor")
 
   @@map("users")
 }
@@ -271,6 +310,13 @@ model Product {
   baseUnit     Unit          @relation("BaseUnit", fields: [baseUnitId], references: [id], onDelete: Restrict)
   units        ProductUnit[]
 
+  goodsReceiptItems    GoodsReceiptItem[]
+  stockBatches         StockBatch[]
+  stockMovements       StockMovement[]
+  stockTransferItems   StockTransferItem[]
+  stockAdjustmentItems StockAdjustmentItem[]
+  branchProducts       BranchProduct[]
+
   @@index([categoryId])
   @@index([manufacturerId])
   @@index([baseUnitId])
@@ -297,9 +343,409 @@ model ProductUnit {
   product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
   unit    Unit    @relation(fields: [unitId], references: [id], onDelete: Restrict)
 
+  goodsReceiptItems GoodsReceiptItem[]
+
   @@unique([productId, unitId])
   @@index([productId, isDeleted])
   @@index([unitId])
   @@index([status])
   @@map("product_units")
+}
+
+// ============================================================
+//  NHÓM KHO + NHẬT KÝ THAO TÁC — thiết kế: docs/thiet-ke-csdl-dbml.md (31 bảng)
+//  - Mọi số lượng theo ĐƠN VỊ CƠ BẢN; đơn giá Int (đồng); mọi cột TỔNG TIỀN phiếu nhập là BigInt (K2).
+//  - Mọi cột người thao tác (createdBy, updatedBy, …By) là FK → users (quy ước nhóm kho).
+//  - CHECK và SEQUENCE nằm trong SQL thô của migration — Prisma không khai được nhưng cũng không xoá chúng.
+//  - KHÔNG dùng partial index: Prisma không biểu diễn được và migration sau sẽ tự sinh lệnh DROP INDEX.
+// ============================================================
+
+enum PaymentStatus {
+  UNPAID
+  PARTIAL
+  PAID
+  REFUNDED
+}
+
+enum ReceiptStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+}
+
+enum AdjustmentType {
+  STOCK_TAKE
+  DISPOSE
+  RETURN_TO_SUPPLIER
+  OTHER
+}
+
+enum BatchStatus {
+  AVAILABLE
+  QUARANTINE
+  RECALLED
+}
+
+enum TransferStatus {
+  PENDING
+  IN_TRANSIT
+  RECEIVED
+  CANCELLED
+}
+
+enum StockMovementType {
+  IMPORT
+  SALE
+  TRANSFER_OUT
+  TRANSFER_IN
+  ADJUST
+  DISPOSE
+  RETURN_IN
+  RETURN_OUT
+}
+
+enum StockRefType {
+  GOODS_RECEIPT
+  ORDER
+  STOCK_TRANSFER
+  STOCK_ADJUSTMENT
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  STATUS_CHANGE
+}
+
+model Supplier {
+  id          String       @id @default(uuid()) @db.Uuid
+  isDeleted   Boolean      @default(false)
+  createdAt   DateTime     @default(now()) @db.Timestamptz(3)
+  createdBy   String?      @db.Uuid
+  updatedAt   DateTime?    @db.Timestamptz(3)
+  updatedBy   String?      @db.Uuid
+  code        String       @unique @db.VarChar(30)
+  name        String       @db.VarChar(200)
+  phone       String       @db.VarChar(20)
+  email       String?      @db.VarChar(150)
+  address     String?      @db.Text
+  taxCode     String?      @db.VarChar(20)
+  contactName String?      @db.VarChar(150)
+  note        String?      @db.Text
+  status      RecordStatus @default(ACTIVE)
+
+  createdByUser User? @relation("SupplierCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser User? @relation("SupplierUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+
+  goodsReceipts    GoodsReceipt[]
+  stockBatches     StockBatch[]
+  stockAdjustments StockAdjustment[]
+
+  @@index([status])
+  @@map("suppliers")
+}
+
+model GoodsReceipt {
+  id                  String        @id @default(uuid()) @db.Uuid
+  isDeleted           Boolean       @default(false)
+  createdAt           DateTime      @default(now()) @db.Timestamptz(3)
+  createdBy           String?       @db.Uuid
+  updatedAt           DateTime?     @db.Timestamptz(3)
+  updatedBy           String?       @db.Uuid
+  code                String        @unique @db.VarChar(20)
+  branchId            String        @db.Uuid
+  supplierId          String        @db.Uuid
+  status              ReceiptStatus @default(DRAFT)
+  receivedAt          DateTime?     @db.Timestamptz(3)
+  subtotalAmount      BigInt        @default(0)
+  discountAmount      BigInt        @default(0)
+  vatAmount           BigInt        @default(0)
+  totalAmount         BigInt        @default(0)
+  paidAmount          BigInt        @default(0)
+  paymentStatus       PaymentStatus @default(UNPAID)
+  supplierInvoiceNo   String?       @db.VarChar(50)
+  supplierInvoiceDate DateTime?     @db.Date
+  confirmedAt         DateTime?     @db.Timestamptz(3)
+  confirmedBy         String?       @db.Uuid
+  cancelledAt         DateTime?     @db.Timestamptz(3)
+  cancelledBy         String?       @db.Uuid
+  cancelReason        String?       @db.Text
+  note                String?       @db.Text
+
+  branch          Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  supplier        Supplier           @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  createdByUser   User?              @relation("GoodsReceiptCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser   User?              @relation("GoodsReceiptUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  confirmedByUser User?              @relation("GoodsReceiptConfirmedBy", fields: [confirmedBy], references: [id], onDelete: Restrict)
+  cancelledByUser User?              @relation("GoodsReceiptCancelledBy", fields: [cancelledBy], references: [id], onDelete: Restrict)
+  items           GoodsReceiptItem[]
+
+  @@index([branchId, status, createdAt])
+  @@index([supplierId])
+  @@map("goods_receipts")
+}
+
+model GoodsReceiptItem {
+  id                String    @id @default(uuid()) @db.Uuid
+  isDeleted         Boolean   @default(false)
+  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy         String?   @db.Uuid
+  updatedAt         DateTime? @db.Timestamptz(3)
+  updatedBy         String?   @db.Uuid
+  receiptId         String    @db.Uuid
+  productId         String    @db.Uuid
+  productUnitId     String    @db.Uuid
+  quantity          Int
+  conversionRate    Int
+  baseQuantity      Int
+  importPrice       Int
+  totalPrice        BigInt
+  batchNumber       String    @db.VarChar(50)
+  manufacturingDate DateTime? @db.Date
+  expiryDate        DateTime  @db.Date
+
+  receipt       GoodsReceipt @relation(fields: [receiptId], references: [id], onDelete: Restrict)
+  product       Product      @relation(fields: [productId], references: [id], onDelete: Restrict)
+  productUnit   ProductUnit  @relation(fields: [productUnitId], references: [id], onDelete: Restrict)
+  createdByUser User?        @relation("GoodsReceiptItemCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser User?        @relation("GoodsReceiptItemUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  batches       StockBatch[]
+
+  @@index([receiptId])
+  @@index([productId])
+  @@map("goods_receipt_items")
+}
+
+model StockBatch {
+  id                 String      @id @default(uuid()) @db.Uuid
+  isDeleted          Boolean     @default(false)
+  createdAt          DateTime    @default(now()) @db.Timestamptz(3)
+  createdBy          String?     @db.Uuid
+  updatedAt          DateTime?   @db.Timestamptz(3)
+  updatedBy          String?     @db.Uuid
+  branchId           String      @db.Uuid
+  productId          String      @db.Uuid
+  batchNumber        String      @db.VarChar(50)
+  manufacturingDate  DateTime?   @db.Date
+  expiryDate         DateTime    @db.Date
+  quantityOnHand     Int         @default(0)
+  reservedQuantity   Int         @default(0)
+  importPrice        Int
+  supplierId         String?     @db.Uuid
+  goodsReceiptItemId String?     @db.Uuid
+  status             BatchStatus @default(AVAILABLE)
+  blockedReason      String?     @db.Text
+  blockedAt          DateTime?   @db.Timestamptz(3)
+  blockedBy          String?     @db.Uuid
+
+  branch           Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  product          Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
+  supplier         Supplier?         @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  goodsReceiptItem GoodsReceiptItem? @relation(fields: [goodsReceiptItemId], references: [id], onDelete: Restrict)
+  createdByUser    User?             @relation("StockBatchCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser    User?             @relation("StockBatchUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  blockedByUser    User?             @relation("StockBatchBlockedBy", fields: [blockedBy], references: [id], onDelete: Restrict)
+
+  movements        StockMovement[]
+  transferItemsOut StockTransferItem[]   @relation("TransferFromBatch")
+  transferItemsIn  StockTransferItem[]   @relation("TransferToBatch")
+  adjustmentItems  StockAdjustmentItem[]
+
+  @@unique([branchId, productId, batchNumber])
+  @@index([branchId, productId, expiryDate])
+  @@index([expiryDate])
+  @@index([productId, batchNumber])
+  @@map("stock_batches")
+}
+
+/// Sổ kho — BẤT BIẾN: không isDeleted, không updatedAt. Chỉ StockLedgerService được ghi.
+model StockMovement {
+  id           String            @id @default(uuid()) @db.Uuid
+  createdAt    DateTime          @default(now()) @db.Timestamptz(3)
+  createdBy    String?           @db.Uuid
+  branchId     String            @db.Uuid
+  productId    String            @db.Uuid
+  batchId      String            @db.Uuid
+  type         StockMovementType
+  quantity     Int
+  balanceAfter Int
+  unitCost     Int?
+  refType      StockRefType
+  refId        String            @db.Uuid
+  refItemId    String?           @db.Uuid
+  note         String?           @db.Text
+
+  branch        Branch     @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  product       Product    @relation(fields: [productId], references: [id], onDelete: Restrict)
+  batch         StockBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  createdByUser User?      @relation("StockMovementCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+
+  @@index([branchId, productId, createdAt])
+  @@index([branchId, createdAt, id])
+  @@index([refType, refId])
+  @@index([batchId, createdAt])
+  @@map("stock_movements")
+}
+
+model StockTransfer {
+  id           String         @id @default(uuid()) @db.Uuid
+  isDeleted    Boolean        @default(false)
+  createdAt    DateTime       @default(now()) @db.Timestamptz(3)
+  createdBy    String?        @db.Uuid
+  updatedAt    DateTime?      @db.Timestamptz(3)
+  updatedBy    String?        @db.Uuid
+  code         String         @unique @db.VarChar(20)
+  fromBranchId String         @db.Uuid
+  toBranchId   String         @db.Uuid
+  status       TransferStatus @default(PENDING)
+  shippedAt    DateTime?      @db.Timestamptz(3)
+  shippedBy    String?        @db.Uuid
+  receivedAt   DateTime?      @db.Timestamptz(3)
+  receivedBy   String?        @db.Uuid
+  cancelledAt  DateTime?      @db.Timestamptz(3)
+  cancelledBy  String?        @db.Uuid
+  cancelReason String?        @db.Text
+  note         String?        @db.Text
+
+  fromBranch      Branch              @relation("TransferFromBranch", fields: [fromBranchId], references: [id], onDelete: Restrict)
+  toBranch        Branch              @relation("TransferToBranch", fields: [toBranchId], references: [id], onDelete: Restrict)
+  createdByUser   User?               @relation("StockTransferCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser   User?               @relation("StockTransferUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  shippedByUser   User?               @relation("StockTransferShippedBy", fields: [shippedBy], references: [id], onDelete: Restrict)
+  receivedByUser  User?               @relation("StockTransferReceivedBy", fields: [receivedBy], references: [id], onDelete: Restrict)
+  cancelledByUser User?               @relation("StockTransferCancelledBy", fields: [cancelledBy], references: [id], onDelete: Restrict)
+  items           StockTransferItem[]
+
+  @@index([fromBranchId, status, createdAt])
+  @@index([toBranchId, status, createdAt])
+  @@map("stock_transfers")
+}
+
+model StockTransferItem {
+  id         String    @id @default(uuid()) @db.Uuid
+  isDeleted  Boolean   @default(false)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy  String?   @db.Uuid
+  updatedAt  DateTime? @db.Timestamptz(3)
+  updatedBy  String?   @db.Uuid
+  transferId String    @db.Uuid
+  productId  String    @db.Uuid
+  batchId    String    @db.Uuid
+  toBatchId  String?   @db.Uuid
+  quantity   Int
+  note       String?   @db.Text
+
+  transfer      StockTransfer @relation(fields: [transferId], references: [id], onDelete: Restrict)
+  product       Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+  batch         StockBatch    @relation("TransferFromBatch", fields: [batchId], references: [id], onDelete: Restrict)
+  toBatch       StockBatch?   @relation("TransferToBatch", fields: [toBatchId], references: [id], onDelete: Restrict)
+  createdByUser User?         @relation("StockTransferItemCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser User?         @relation("StockTransferItemUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+
+  @@unique([transferId, batchId])
+  @@index([batchId])
+  @@map("stock_transfer_items")
+}
+
+model StockAdjustment {
+  id           String         @id @default(uuid()) @db.Uuid
+  isDeleted    Boolean        @default(false)
+  createdAt    DateTime       @default(now()) @db.Timestamptz(3)
+  createdBy    String?        @db.Uuid
+  updatedAt    DateTime?      @db.Timestamptz(3)
+  updatedBy    String?        @db.Uuid
+  code         String         @unique @db.VarChar(20)
+  branchId     String         @db.Uuid
+  type         AdjustmentType
+  status       ReceiptStatus  @default(DRAFT)
+  supplierId   String?        @db.Uuid
+  reason       String         @db.Text
+  confirmedAt  DateTime?      @db.Timestamptz(3)
+  confirmedBy  String?        @db.Uuid
+  cancelledAt  DateTime?      @db.Timestamptz(3)
+  cancelledBy  String?        @db.Uuid
+  cancelReason String?        @db.Text
+  note         String?        @db.Text
+
+  branch          Branch                @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  supplier        Supplier?             @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  createdByUser   User?                 @relation("StockAdjustmentCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser   User?                 @relation("StockAdjustmentUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  confirmedByUser User?                 @relation("StockAdjustmentConfirmedBy", fields: [confirmedBy], references: [id], onDelete: Restrict)
+  cancelledByUser User?                 @relation("StockAdjustmentCancelledBy", fields: [cancelledBy], references: [id], onDelete: Restrict)
+  items           StockAdjustmentItem[]
+
+  @@index([branchId, status, createdAt])
+  @@map("stock_adjustments")
+}
+
+model StockAdjustmentItem {
+  id             String    @id @default(uuid()) @db.Uuid
+  isDeleted      Boolean   @default(false)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy      String?   @db.Uuid
+  updatedAt      DateTime? @db.Timestamptz(3)
+  updatedBy      String?   @db.Uuid
+  adjustmentId   String    @db.Uuid
+  batchId        String    @db.Uuid
+  productId      String    @db.Uuid
+  systemQuantity Int?
+  actualQuantity Int?
+  quantity       Int
+  unitCost       Int
+  reason         String?   @db.Text
+
+  adjustment    StockAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Restrict)
+  batch         StockBatch      @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  product       Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  createdByUser User?           @relation("StockAdjustmentItemCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser User?           @relation("StockAdjustmentItemUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+
+  @@unique([adjustmentId, batchId])
+  @@index([batchId])
+  @@map("stock_adjustment_items")
+}
+
+model BranchProduct {
+  id            String    @id @default(uuid()) @db.Uuid
+  isDeleted     Boolean   @default(false)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy     String?   @db.Uuid
+  updatedAt     DateTime? @db.Timestamptz(3)
+  updatedBy     String?   @db.Uuid
+  branchId      String    @db.Uuid
+  productId     String    @db.Uuid
+  minStockLevel Int       @default(0)
+
+  branch        Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  product       Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  createdByUser User?   @relation("BranchProductCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser User?   @relation("BranchProductUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+
+  @@unique([branchId, productId])
+  @@map("branch_products")
+}
+
+/// Nhật ký thao tác — BẤT BIẾN, chỉ thêm. Ghi trong CÙNG transaction với thao tác nghiệp vụ.
+model AuditLog {
+  id         String      @id @default(uuid()) @db.Uuid
+  createdAt  DateTime    @default(now()) @db.Timestamptz(3)
+  actorId    String      @db.Uuid
+  action     AuditAction
+  entityType String      @db.VarChar(50)
+  entityId   String      @db.Uuid
+  branchId   String?     @db.Uuid
+  before     Json?       @db.JsonB
+  after      Json?       @db.JsonB
+  reason     String?     @db.Text
+  ipAddress  String?     @db.VarChar(45)
+
+  actor  User    @relation("AuditLogActor", fields: [actorId], references: [id], onDelete: Restrict)
+  branch Branch? @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@index([entityType, entityId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([branchId, createdAt])
+  @@map("audit_logs")
 }

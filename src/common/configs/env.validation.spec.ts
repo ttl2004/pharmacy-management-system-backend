@@ -9,9 +9,7 @@ describe('validateEnv', () => {
   it('biến optional để trống trong .env.example không làm chết ứng dụng', () => {
     // `dotenv` nạp dòng `SUPER_ADMIN_GENDER=` thành chuỗi rỗng, mà `.optional()` chỉ bỏ qua
     // `undefined` — nên nếu không chuẩn hoá, người dựng máy mới theo README sẽ không khởi động được.
-    expect(() =>
-      validateEnv({ ...base, SUPER_ADMIN_GENDER: '', SUPER_ADMIN_DATE_OF_BIRTH: '' }),
-    ).not.toThrow();
+    expect(() => validateEnv({ ...base, SUPER_ADMIN_GENDER: '', SUPER_ADMIN_DATE_OF_BIRTH: '' })).not.toThrow();
   });
 
   it('giá trị rỗng được coi như không khai báo, không phải chuỗi rỗng', () => {
@@ -26,6 +24,20 @@ describe('validateEnv', () => {
 
   it('biến bắt buộc để trống vẫn bị từ chối', () => {
     expect(() => validateEnv({ ...base, DATABASE_URL: '' })).toThrow(/DATABASE_URL/);
+  });
+
+  it('CORS_ORIGINS: tách theo dấu phẩy, bỏ khoảng trắng; để trống là danh sách rỗng', () => {
+    expect(validateEnv({ ...base, CORS_ORIGINS: ' http://localhost:5173 , https://app.vn ' }).CORS_ORIGINS).toEqual([
+      'http://localhost:5173',
+      'https://app.vn',
+    ]);
+    expect(validateEnv({ ...base, CORS_ORIGINS: '' }).CORS_ORIGINS).toEqual([]);
+  });
+
+  it('CORS_ORIGINS sai dạng (thiếu giao thức, có / cuối, dấu *) bị từ chối', () => {
+    for (const value of ['localhost:5173', 'https://app.vn/', '*']) {
+      expect(() => validateEnv({ ...base, CORS_ORIGINS: value })).toThrow(/CORS_ORIGINS/);
+    }
   });
 
   it('ô có giá trị mặc định nhận mặc định khi để trống', () => {

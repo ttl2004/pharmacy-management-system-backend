@@ -32,14 +32,18 @@ async function bootstrap() {
     encodings: ['gzip', 'deflate', 'br'],
   });
 
+  const configService = app.get(ConfigService);
+
+  // Chỉ origin được khai báo mới được gọi kèm cookie: `/auth/refresh` trả access token trong body, phản chiếu mọi
+  // origin thì trang lạ nào trình duyệt chịu gửi cookie tới (cùng site, hoặc mọi nơi khi SameSite=none) đọc được token.
+  const corsOrigins = configService.get<string[]>('CORS_ORIGINS') ?? [];
   await app.register(cors, {
-    origin: true,
+    origin: corsOrigins.length ? corsOrigins : false,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
   });
 
-  const configService = app.get(ConfigService);
   await app.register(cookie);
 
   const pinoLogger = app.get(Logger);

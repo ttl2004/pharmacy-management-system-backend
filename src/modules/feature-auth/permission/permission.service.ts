@@ -1,10 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import { SYSTEM_ACTOR_ID } from 'src/common/constants/app.constant';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import { ErrorException } from 'src/common/exceptions/error.exception';
-import { SessionTransactions } from '../authz/session.store';
+import { lockAdvisoryKeys } from 'src/common/databases/advisory-lock';
+import { PrismaService } from 'src/common/databases/prisma.service';
 import { UserRepository } from '../user/repositories/user.repository';
 import { UserService } from '../user/user.service';
 import type { JwtUser } from '../authz/types/authz.types';
@@ -34,7 +35,7 @@ export class PermissionService {
     private readonly permissions: PermissionRepository,
     private readonly rolePermissions: RolePermissionRepository,
     private readonly users: UserRepository,
-    private readonly transactions: SessionTransactions,
+    private readonly prisma: PrismaService,
     private readonly userService: UserService,
   ) {}
 
@@ -104,9 +105,9 @@ export class PermissionService {
 
     const permissionIds = wanted.map((code) => idByCode.get(code) as string);
     try {
-      await this.transactions.write(async (tx) => {
-        await this.rolePermissions.replaceForRole(tx, role.id, permissionIds, caller.userId);
-      });
+      await this.writeRolePermissions(role.id, (tx) =>
+        this.rolePermissions.replaceForRole(tx, role.id, permissionIds, caller.userId),
+      );
     } finally {
       // Xoá cả khi lỗi: không biết chắc transaction đã commit tới đâu.
       this.grantCache.clear();
@@ -221,11 +222,23 @@ export class PermissionService {
 
       const permissionIds = codes.map((code) => idByCode.get(code)).filter((id): id is string => Boolean(id));
       // `createdBy`/`updatedBy` là cột uuid, không được ghi chuỗi tự do.
-      const granted = await this.transactions.write((tx) =>
+      const granted = await this.writeRolePermissions(role.id, (tx) =>
         this.rolePermissions.grantMissing(tx, role.id, permissionIds, SYSTEM_ACTOR_ID),
       );
       if (granted) this.logger.log(`Đã cấp ${granted} quyền mặc định mới cho ${roleCode}`);
     }
+  }
+
+  /**
+   * Ghi quyền của một vai trò. Cả `replaceForRole` lẫn `grantMissing` đều đọc quyền đang có rồi mới `createMany` phần
+   * thiếu: hai lần ghi cùng vai trò chen nhau (vd. hai instance khởi động cùng lúc, hoặc lúc đang lưu ma trận quyền)
+   * sẽ cùng chèn một cặp (vai trò, quyền) và lỗi trùng khoá — nên khoá theo vai trò cho chạy nối tiếp.
+   */
+  private writeRolePermissions<T>(roleId: string, work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+    return this.prisma.$transaction(async (tx) => {
+      await lockAdvisoryKeys(tx, [`role-permissions:${roleId}`]);
+      return work(tx);
+    });
   }
 
   private async requireRole(code: string): Promise<Role> {

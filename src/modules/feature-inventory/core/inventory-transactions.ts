@@ -13,8 +13,8 @@ export interface InventoryTxContext {
 }
 
 /**
- * Transaction dành riêng cho kho — KHÔNG đi qua hàng đợi `SessionTransactions`: đúng đắn của kho dựa vào khoá dòng
- * và câu lệnh có điều kiện ở DB, nên chạy song song được và chạy đúng cả khi có nhiều instance.
+ * Transaction dành riêng cho kho: đúng đắn của kho dựa vào khoá dòng và câu lệnh có điều kiện ở DB, nên chạy song
+ * song được và chạy đúng cả khi có nhiều instance.
  *
  * - `timeout` tường minh thay cho mặc định 5 s của Prisma.
  * - Không gọi I/O ngoài (HTTP, RabbitMQ, Redis) bên trong `work` — đăng ký qua `afterCommit`.

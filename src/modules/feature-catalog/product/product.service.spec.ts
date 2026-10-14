@@ -26,7 +26,7 @@ function makeService(
     ...repositoryOverrides,
   } as never;
   const transactions = {
-    write: jest.fn().mockImplementation((work: (tx: unknown) => unknown) => work({})),
+    write: jest.fn().mockImplementation((_locks: string[], work: (tx: unknown) => unknown) => work({})),
     ...transactionOverrides,
   } as never;
   return new ProductService(repository, transactions);
@@ -355,13 +355,22 @@ describe('ProductService — cập nhật', () => {
     const service = makeService(
       { findDetailWith },
       {
-        write: jest.fn().mockImplementation((work: (client: unknown) => unknown) => work(tx)),
+        write: jest.fn().mockImplementation((_locks: string[], work: (client: unknown) => unknown) => work(tx)),
       },
     );
 
     await service.update('product-id', { name: 'Tên mới' }, 'caller-id');
 
     expect(findDetailWith).toHaveBeenCalledWith(tx, 'product-id');
+  });
+
+  it('khoá hẹp: chỉ chính sản phẩm và các mã vạch định dùng, không khoá cả bảng', async () => {
+    const write = jest.fn().mockImplementation((_locks: string[], work: (client: unknown) => unknown) => work({}));
+    const service = makeService({ findDetailWith: jest.fn().mockResolvedValue(existingProduct) }, { write });
+
+    await service.update('product-id', { barcode: '8930001' }, 'caller-id');
+
+    expect(write).toHaveBeenCalledWith(['product:product-id', 'barcode:8930001'], expect.any(Function));
   });
 
   it('sản phẩm vừa bị xoá mềm thì không ghi gì và báo RECORD_NOT_FOUND', async () => {

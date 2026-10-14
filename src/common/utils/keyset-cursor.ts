@@ -15,10 +15,13 @@ export function encodeCursor(cursor: KeysetCursor): string {
   return Buffer.from(`${cursor.createdAt.toISOString()}|${cursor.id}`, 'utf8').toString('base64url');
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function decodeCursor(raw: string): KeysetCursor {
   const [iso, id] = Buffer.from(raw, 'base64url').toString('utf8').split('|');
   const createdAt = new Date(iso ?? '');
-  if (!id || Number.isNaN(createdAt.getTime())) {
+  // id phải là UUID: cursor tự chế với id lạ sẽ lọt xuống cột uuid của Postgres thành lỗi 500 thay vì 1002.
+  if (!id || !UUID_PATTERN.test(id) || Number.isNaN(createdAt.getTime())) {
     throw new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message: 'cursor không hợp lệ' });
   }
   return { createdAt, id };

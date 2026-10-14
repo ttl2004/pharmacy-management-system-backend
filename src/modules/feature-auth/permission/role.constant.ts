@@ -82,6 +82,10 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'goods-receipt:create',
     'goods-receipt:confirm',
     'goods-receipt:cancel',
+    'stock:read',
+    'branch-product:read',
+    'branch-product:update',
+    'audit-log:read',
   ],
   [AuthRole.PHARMACY_MANAGER]: [
     'branch:read',
@@ -97,6 +101,10 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'goods-receipt:create',
     'goods-receipt:confirm',
     'goods-receipt:cancel',
+    'stock:read',
+    'branch-product:read',
+    'branch-product:update',
+    'audit-log:read',
   ],
   // Dược sĩ chỉ ĐỌC dữ liệu kho của chi nhánh mình; mọi thao tác ghi kho là của PM hoặc ADMIN (K9, K10).
   [AuthRole.SALES_STAFF]: [
@@ -107,5 +115,7 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'product:read',
     'supplier:read',
     'goods-receipt:read',
+    'stock:read',
+    'branch-product:read',
   ],
 };

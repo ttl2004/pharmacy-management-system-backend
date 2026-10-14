@@ -151,7 +151,19 @@ describe('Danh mục quyền và mã lỗi', () => {
     });
 
     it('CUSTOMER không đụng dữ liệu kho', () => {
-      expect(grants(AuthRole.CUSTOMER).filter((code) => /^(supplier|goods-receipt):/.test(code))).toEqual([]);
+      expect(
+        grants(AuthRole.CUSTOMER).filter((code) =>
+          /^(supplier|goods-receipt|stock|branch-product|audit-log):/.test(code),
+        ),
+      ).toEqual([]);
+    });
+
+    it('tồn kho + ngưỡng + nhật ký: PM đọc/đặt ngưỡng/xem nhật ký; SALES_STAFF chỉ đọc tồn và ngưỡng', () => {
+      expect(grants(AuthRole.PHARMACY_MANAGER)).toEqual(
+        expect.arrayContaining(['stock:read', 'branch-product:read', 'branch-product:update', 'audit-log:read']),
+      );
+      const staff = grants(AuthRole.SALES_STAFF).filter((code) => /^(stock|branch-product|audit-log):/.test(code));
+      expect(staff.sort()).toEqual(['branch-product:read', 'stock:read']);
     });
   });
 

@@ -10,6 +10,7 @@ function makeService(repositoryOverrides: Record<string, jest.Mock> = {}) {
     update: jest.fn(),
     softDelete: jest.fn(),
     countReferencingUsers: jest.fn().mockResolvedValue(0),
+    hasOpenInventory: jest.fn().mockResolvedValue(false),
     ...repositoryOverrides,
   } as never;
   return new BranchService(repository);
@@ -78,7 +79,10 @@ describe('BranchService — tạo', () => {
     const create = jest.fn().mockImplementation((data: unknown) => Promise.resolve(data));
     const service = makeService({ create });
 
-    await service.create({ code: 'CN004', name: 'Quận 7', phone: '0900000004', address: 'Quận 7' } as never, 'caller-id');
+    await service.create(
+      { code: 'CN004', name: 'Quận 7', phone: '0900000004', address: 'Quận 7' } as never,
+      'caller-id',
+    );
 
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -156,6 +160,18 @@ describe('BranchService — xoá', () => {
     const service = makeService({
       findOne: jest.fn().mockResolvedValue({ id: 'id' }),
       countReferencingUsers: jest.fn().mockResolvedValue(2),
+      softDelete,
+    });
+
+    await expect(service.remove('id')).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
+    expect(softDelete).not.toHaveBeenCalled();
+  });
+
+  it('còn hàng trong kho hoặc chứng từ kho đang mở thì báo INVALID_REFERENCE và không xoá', async () => {
+    const softDelete = jest.fn();
+    const service = makeService({
+      findOne: jest.fn().mockResolvedValue({ id: 'id' }),
+      hasOpenInventory: jest.fn().mockResolvedValue(true),
       softDelete,
     });
 

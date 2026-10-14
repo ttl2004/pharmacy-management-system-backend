@@ -88,6 +88,12 @@ export class BranchService extends AbstractBaseService<Branch> {
         message: 'Không thể xoá chi nhánh đang được người dùng tham chiếu',
       });
     }
+    if (await this.branchRepository.hasOpenInventory(id)) {
+      throw new ErrorException({
+        code: ErrorCode.INVALID_REFERENCE,
+        message: 'Chi nhánh còn hàng trong kho hoặc chứng từ kho chưa xong, không thể xoá',
+      });
+    }
 
     const deleted = await this.branchRepository.softDelete({ id });
     if (!deleted) throw this.notFound();

@@ -21,6 +21,8 @@ function makeService(
     updateUnit: jest.fn().mockResolvedValue(undefined),
     softDeleteUnits: jest.fn().mockResolvedValue(undefined),
     softDeleteProduct: jest.fn().mockResolvedValue(undefined),
+    hasInventoryHistory: jest.fn().mockResolvedValue(false),
+    hasOpenInventory: jest.fn().mockResolvedValue(false),
     ...repositoryOverrides,
   } as never;
   const transactions = {
@@ -653,6 +655,43 @@ describe('ProductService — cập nhật', () => {
         'caller-id',
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+  });
+});
+
+describe('ProductService — rào kho', () => {
+  it('đổi đơn vị cơ bản khi sản phẩm đã phát sinh kho → 1709, không ghi gì', async () => {
+    const updateProduct = jest.fn();
+    const service = makeService({
+      findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+      hasInventoryHistory: jest.fn().mockResolvedValue(true),
+      updateProduct,
+    });
+
+    await expect(
+      service.update(
+        'product-id',
+        {
+          baseUnitId: 'unit-vi',
+          units: [{ unitId: 'unit-vi', conversionRate: 1, salePrice: 4500, isBaseUnit: true }],
+        } as never,
+        'caller-id',
+      ),
+    ).rejects.toMatchObject({ errorCode: ErrorCode.PRODUCT_HAS_STOCK });
+    expect(updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('xoá sản phẩm còn tồn hoặc chứng từ kho đang mở → 1709, không xoá', async () => {
+    const softDeleteProduct = jest.fn();
+    const service = makeService({
+      findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+      hasOpenInventory: jest.fn().mockResolvedValue(true),
+      softDeleteProduct,
+    });
+
+    await expect(service.remove('product-id', 'caller-id')).rejects.toMatchObject({
+      errorCode: ErrorCode.PRODUCT_HAS_STOCK,
+    });
+    expect(softDeleteProduct).not.toHaveBeenCalled();
   });
 });
 

@@ -144,10 +144,14 @@ npm run db:generate   # sinh lại Prisma Client
 npm run db:studio     # mở giao diện xem dữ liệu
 ```
 
-Thiết lập máy mới: `npm install` → `cp .env.example .env` → `npm run db:deploy` → `npm run seed:permissions` → `npm run seed:catalog` → `npm run seed:users` → `npm run seed:super-admin`.
+Thiết lập máy mới: `npm install` → `cp .env.example .env` → `npm run db:deploy` → `npm run seed:permissions` → `npm run seed:catalog` → `npm run seed:users` → `npm run seed:super-admin` → `npm run seed:inventory`.
 
 Thứ tự này không tuỳ tiện: `seed:users` cần vai trò (do `seed:permissions` tạo) và chi nhánh (do
 `seed:catalog` tạo), còn `seed:super-admin` cần vai trò `SUPER_ADMIN` đã tồn tại.
+
+`seed:inventory` tạo 3 nhà cung cấp mẫu và tồn đầu kỳ cho CN001–CN003 bằng cách lập rồi xác nhận phiếu nhập qua
+`GoodsReceiptService` — sổ kho, giá vốn và nhật ký mẫu nhất quán như dữ liệu thật. Chạy lại an toàn (bỏ qua chi nhánh
+đã có phiếu ghi chú `SEED_OPENING_STOCK`). Cần chạy sau `seed:permissions` và `seed:catalog`.
 
 `seed:permissions` còn tạo **tác nhân hệ thống**: dòng `users` mang đúng id `SYSTEM_ACTOR_ID`
 (`src/common/constants/app.constant.ts`), tên "Hệ thống", trạng thái INACTIVE, không có tài khoản đăng nhập. Seed

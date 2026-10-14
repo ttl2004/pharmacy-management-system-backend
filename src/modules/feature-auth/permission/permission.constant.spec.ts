@@ -113,6 +113,48 @@ describe('Danh mục quyền và mã lỗi', () => {
     expect(granted.filter((code) => /^(category|manufacturer|unit|product):/.test(code))).toEqual([]);
   });
 
+  describe('ma trận quyền kho (duyệt 2026-10-14) — nhà cung cấp và phiếu nhập', () => {
+    const grants = (role: AuthRole) => [...(DEFAULT_ROLE_GRANTS[role] ?? [])] as string[];
+
+    it('ADMIN có đủ CRUD nhà cung cấp và mọi quyền phiếu nhập', () => {
+      expect(grants(AuthRole.ADMIN)).toEqual(
+        expect.arrayContaining([
+          'supplier:read',
+          'supplier:create',
+          'supplier:update',
+          'supplier:delete',
+          'goods-receipt:read',
+          'goods-receipt:create',
+          'goods-receipt:confirm',
+          'goods-receipt:cancel',
+        ]),
+      );
+    });
+
+    it('PHARMACY_MANAGER chỉ đọc nhà cung cấp, làm được trọn vòng phiếu nhập (phạm vi chi nhánh do service ép)', () => {
+      const granted = grants(AuthRole.PHARMACY_MANAGER);
+      expect(granted).toContain('supplier:read');
+      expect(granted.filter((code) => /^supplier:(create|update|delete)$/.test(code))).toEqual([]);
+      expect(granted).toEqual(
+        expect.arrayContaining([
+          'goods-receipt:read',
+          'goods-receipt:create',
+          'goods-receipt:confirm',
+          'goods-receipt:cancel',
+        ]),
+      );
+    });
+
+    it('SALES_STAFF chỉ đọc (K9: không lập, không xác nhận phiếu nhập)', () => {
+      const kho = grants(AuthRole.SALES_STAFF).filter((code) => /^(supplier|goods-receipt):/.test(code));
+      expect(kho.sort()).toEqual(['goods-receipt:read', 'supplier:read']);
+    });
+
+    it('CUSTOMER không đụng dữ liệu kho', () => {
+      expect(grants(AuthRole.CUSTOMER).filter((code) => /^(supplier|goods-receipt):/.test(code))).toEqual([]);
+    });
+  });
+
   it('danh mục quyền không có mã trùng nhau', () => {
     expect(new Set(PERMISSION_CODES).size).toBe(PERMISSION_CODES.length);
   });

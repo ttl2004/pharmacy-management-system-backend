@@ -39,6 +39,8 @@ function makeIntake(lockedRows: LockedBatch[]) {
     insertSkipExisting: jest.fn().mockResolvedValue({ count: 0 }),
     lockByKey: jest.fn().mockResolvedValue(lockedRows),
     updateCosts: jest.fn(),
+    findWithNonImportMovements: jest.fn().mockResolvedValue(new Set<string>()),
+    resetDates: jest.fn(),
   };
   const ledger = { apply: jest.fn().mockResolvedValue([]) };
   const ctx: InventoryTxContext = { tx: {} as never, afterCommit: jest.fn() };
@@ -86,6 +88,43 @@ describe('StockIntakeService', () => {
       errorCode: ErrorCode.BATCH_EXPIRY_MISMATCH,
     });
     expect(ledger.apply).not.toHaveBeenCalled();
+  });
+
+  it('lô trống chỉ từng nhận hàng từ phiếu đã huỷ (nhập nhầm hạn) → nhận hạn mới, nhập bình thường', async () => {
+    const rows = [locked({ quantityOnHand: 0, expiryDate: parseDateOnly('2027-01-15') })];
+    const { intake, batches, ledger, ctx } = makeIntake(rows);
+
+    await intake.intake(ctx, request([line()]));
+
+    expect(batches.findWithNonImportMovements).toHaveBeenCalledWith({}, ['b1']);
+    expect(batches.resetDates).toHaveBeenCalledWith(
+      {},
+      [{ id: 'b1', expiryDate: '2028-01-31', manufacturingDate: null }],
+      'actor',
+    );
+    expect(batches.updateCosts).toHaveBeenCalledWith({}, [{ id: 'b1', importPrice: 1300 }], 'actor');
+    expect(ledger.apply).toHaveBeenCalled();
+  });
+
+  it('lô trống nhưng từng bán/chuyển/điều chỉnh → hạn đã có thật, vẫn 1703', async () => {
+    const { intake, batches, ledger, ctx } = makeIntake([
+      locked({ quantityOnHand: 0, expiryDate: parseDateOnly('2027-01-15') }),
+    ]);
+    batches.findWithNonImportMovements.mockResolvedValue(new Set(['b1']));
+
+    await expect(intake.intake(ctx, request([line()]))).rejects.toMatchObject({
+      errorCode: ErrorCode.BATCH_EXPIRY_MISMATCH,
+    });
+    expect(batches.resetDates).not.toHaveBeenCalled();
+    expect(ledger.apply).not.toHaveBeenCalled();
+  });
+
+  it('lô còn hàng mà khác hạn → 1703, không cần hỏi lịch sử lô', async () => {
+    const { intake, batches, ctx } = makeIntake([locked({ expiryDate: parseDateOnly('2028-02-01') })]);
+    await expect(intake.intake(ctx, request([line()]))).rejects.toMatchObject({
+      errorCode: ErrorCode.BATCH_EXPIRY_MISMATCH,
+    });
+    expect(batches.findWithNonImportMovements).not.toHaveBeenCalled();
   });
 
   it.each([BatchStatus.QUARANTINE, BatchStatus.RECALLED])('lô %s → 1704', async (status) => {

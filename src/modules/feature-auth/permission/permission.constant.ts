@@ -32,6 +32,19 @@ export const PERMISSION_CATALOG = [
   { code: 'product:create', name: 'Tạo sản phẩm', module: 'product', sortOrder: 2 },
   { code: 'product:update', name: 'Sửa sản phẩm', module: 'product', sortOrder: 3 },
   { code: 'product:delete', name: 'Xoá sản phẩm', module: 'product', sortOrder: 4 },
+  { code: 'supplier:read', name: 'Xem nhà cung cấp', module: 'supplier', sortOrder: 1 },
+  { code: 'supplier:create', name: 'Tạo nhà cung cấp', module: 'supplier', sortOrder: 2 },
+  { code: 'supplier:update', name: 'Sửa nhà cung cấp', module: 'supplier', sortOrder: 3 },
+  { code: 'supplier:delete', name: 'Xoá nhà cung cấp', module: 'supplier', sortOrder: 4 },
+  { code: 'goods-receipt:read', name: 'Xem phiếu nhập kho', module: 'goods-receipt', sortOrder: 1 },
+  { code: 'goods-receipt:create', name: 'Lập và sửa phiếu nhập nháp', module: 'goods-receipt', sortOrder: 2 },
+  {
+    code: 'goods-receipt:confirm',
+    name: 'Xác nhận phiếu nhập, cập nhật thanh toán',
+    module: 'goods-receipt',
+    sortOrder: 3,
+  },
+  { code: 'goods-receipt:cancel', name: 'Huỷ phiếu nhập', module: 'goods-receipt', sortOrder: 4 },
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CATALOG)[number]['code'];

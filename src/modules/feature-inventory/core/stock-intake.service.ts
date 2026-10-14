@@ -6,6 +6,7 @@ import { toDateOnlyString } from 'src/common/utils/date-only.util';
 import { inventoryError } from './inventory.error';
 import type { InventoryTxContext } from './inventory-transactions';
 import { StockBatchRepository } from './stock-batch.repository';
+import type { LockedBatch } from './stock-ledger.repository';
 import { AppliedMovement, StockLedgerService } from './stock-ledger.service';
 
 /** Một dòng hàng đưa vào kho, số lượng theo đơn vị cơ bản. */
@@ -45,6 +46,7 @@ export interface IntakeResult {
  *
  * Luật K3 nằm DUY NHẤT ở đây: cùng số lô khác hạn dùng → 1703; lô đang khoá/thu hồi → 1704; cùng số lô khác giá →
  * gộp, giá vốn bình quân gia quyền. Số câu lệnh cố định: tạo (1) + khoá (1) + giá vốn (1) + sổ kho (2).
+ * Lô trống chỉ từng nhận hàng từ phiếu đã huỷ thì được nhận hạn mới (sửa sai nhập liệu) — xem `reconcileExpiry`.
  * Caller phải đảm bảo mỗi (sản phẩm, số lô) chỉ xuất hiện một lần trong `lines`.
  */
 @Injectable()
@@ -79,18 +81,13 @@ export class StockIntakeService {
       request.lines.map((line) => ({ productId: line.productId, batchNumber: line.batchNumber })),
     );
     const batchByKey = new Map(locked.map((batch) => [`${batch.productId}|${batch.batchNumber}`, batch]));
+    await this.reconcileExpiry(tx, request, batchByKey);
 
     const costs: { id: string; importPrice: number }[] = [];
     const batchIdByRefItem = new Map<string, string>();
     const entries = request.lines.map((line) => {
       const batch = batchByKey.get(`${line.productId}|${line.batchNumber}`);
       if (!batch) throw new Error(`Không khoá được lô ${line.batchNumber} vừa tạo`);
-      if (toDateOnlyString(batch.expiryDate) !== toDateOnlyString(line.expiryDate)) {
-        throw inventoryError(
-          ErrorCode.BATCH_EXPIRY_MISMATCH,
-          `lô ${line.batchNumber} đang có hạn ${toDateOnlyString(batch.expiryDate)}`,
-        );
-      }
       if (batch.status !== BatchStatus.AVAILABLE) {
         throw inventoryError(ErrorCode.BATCH_NOT_AVAILABLE, `lô ${line.batchNumber} đang ${batch.status}`);
       }
@@ -113,6 +110,48 @@ export class StockIntakeService {
     await this.batches.updateCosts(tx, costs, request.actorId);
     const movements = await this.ledger.apply(ctx, entries, request.actorId, { preLocked: locked });
     return { batchIdByRefItem, movements };
+  }
+
+  /**
+   * K3 — cùng số lô khác hạn dùng → 1703. Ngoại lệ duy nhất là sửa sai nhập liệu: lô đang trống và CHỈ từng nhận hàng
+   * từ phiếu nhập (mọi phiếu đó đã huỷ, tồn về 0) thì hạn cũ chưa từng "có thật" — nhận hạn/NSX của lần nhập này.
+   * Lô từng bán, chuyển hay điều chỉnh giữ nguyên hạn đã ghi. Thêm tối đa 2 câu lệnh, chỉ khi có dòng lệch hạn.
+   */
+  private async reconcileExpiry(
+    tx: InventoryTxContext['tx'],
+    request: IntakeRequest,
+    batchByKey: Map<string, LockedBatch>,
+  ): Promise<void> {
+    const mismatched = request.lines.flatMap((line) => {
+      const batch = batchByKey.get(`${line.productId}|${line.batchNumber}`);
+      return batch && toDateOnlyString(batch.expiryDate) !== toDateOnlyString(line.expiryDate) ? [{ line, batch }] : [];
+    });
+    if (!mismatched.length) return;
+
+    const reject = ({ line, batch }: (typeof mismatched)[number]) =>
+      inventoryError(
+        ErrorCode.BATCH_EXPIRY_MISMATCH,
+        `lô ${line.batchNumber} đang có hạn ${toDateOnlyString(batch.expiryDate)}`,
+      );
+    const stocked = mismatched.find(({ batch }) => batch.quantityOnHand > 0);
+    if (stocked) throw reject(stocked);
+
+    const used = await this.batches.findWithNonImportMovements(
+      tx,
+      mismatched.map(({ batch }) => batch.id),
+    );
+    const established = mismatched.find(({ batch }) => used.has(batch.id));
+    if (established) throw reject(established);
+
+    await this.batches.resetDates(
+      tx,
+      mismatched.map(({ line, batch }) => ({
+        id: batch.id,
+        expiryDate: toDateOnlyString(line.expiryDate),
+        manufacturingDate: line.manufacturingDate ? toDateOnlyString(line.manufacturingDate) : null,
+      })),
+      request.actorId,
+    );
   }
 }
 

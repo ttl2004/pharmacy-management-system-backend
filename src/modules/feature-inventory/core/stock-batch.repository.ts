@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, StockMovementType } from '@prisma/client';
 import type { LockedBatch } from './stock-ledger.repository';
 
 export interface NewBatchRow {
@@ -49,6 +49,34 @@ export class StockBatchRepository {
       WHERE "branchId" = ${branchId}::uuid AND ("productId", "batchNumber") IN (${pairs}) AND "isDeleted" = false
       ORDER BY "id"
       FOR UPDATE`);
+  }
+
+  /** Lô từng có bút toán KHÁC nhập hàng (bán, chuyển, điều chỉnh…) — hạn dùng của các lô này đã được dùng thật. */
+  async findWithNonImportMovements(tx: Prisma.TransactionClient, batchIds: readonly string[]): Promise<Set<string>> {
+    if (!batchIds.length) return new Set();
+    const rows = await tx.stockMovement.findMany({
+      where: { batchId: { in: [...batchIds] }, type: { not: StockMovementType.IMPORT } },
+      select: { batchId: true },
+      distinct: ['batchId'],
+    });
+    return new Set(rows.map((row) => row.batchId));
+  }
+
+  /** Ghi lại hạn dùng / NSX (chuỗi `YYYY-MM-DD`) cho nhiều lô trong MỘT câu lệnh — chỉ dùng để sửa sai nhập liệu. */
+  async resetDates(
+    tx: Prisma.TransactionClient,
+    rows: readonly { id: string; expiryDate: string; manufacturingDate: string | null }[],
+    actorId: string,
+  ): Promise<void> {
+    if (!rows.length) return;
+    const values = Prisma.join(
+      rows.map((row) => Prisma.sql`(${row.id}::uuid, ${row.expiryDate}::date, ${row.manufacturingDate}::date)`),
+    );
+    await tx.$executeRaw(Prisma.sql`
+      UPDATE "stock_batches" AS b
+      SET "expiryDate" = v."expiry", "manufacturingDate" = v."mfg", "updatedAt" = now(), "updatedBy" = ${actorId}::uuid
+      FROM (VALUES ${values}) AS v("id", "expiry", "mfg")
+      WHERE b."id" = v."id"`);
   }
 
   /** Ghi giá vốn bình quân mới cho nhiều lô trong MỘT câu lệnh. */

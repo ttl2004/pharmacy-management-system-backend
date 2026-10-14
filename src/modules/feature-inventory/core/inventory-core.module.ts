@@ -10,7 +10,8 @@ import { StockLedgerService } from './stock-ledger.service';
 
 /**
  * Hạ tầng dùng chung của mọi module kho. `StockLedgerRepository` cố ý KHÔNG export: module khác chỉ được đi qua
- * `StockLedgerService`.
+ * `StockLedgerService` (chỗ duy nhất đổi tồn). `StockBatchRepository` được export vì không đổi tồn — thu hồi lô dùng
+ * chung khoá số lô với lúc đưa hàng vào.
  */
 @Module({
   imports: [AuditLogModule],
@@ -28,6 +29,7 @@ import { StockLedgerService } from './stock-ledger.service';
     InventoryEvents,
     DocumentCodeService,
     StockLedgerService,
+    StockBatchRepository,
     StockIntakeService,
     AuditLogModule,
   ],

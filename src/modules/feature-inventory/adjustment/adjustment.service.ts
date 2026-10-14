@@ -137,13 +137,16 @@ export class AdjustmentService {
         throw invalidReference('nhà cung cấp không tồn tại');
       }
 
-      const batches = await this.adjustments.findBatches(tx, batchIds);
+      // Kiểm kê khoá lô: hai lần lập cùng lúc trên một lô chạy nối tiếp, lần sau thấy phiếu nháp của lần trước.
+      // Loại phiếu khác không chốt số sổ sách nên chỉ đọc, không giữ khoá làm chậm bán hàng.
+      const isStockTake = dto.type === AdjustmentType.STOCK_TAKE;
+      const batches = isStockTake
+        ? await this.adjustments.lockBatches(tx, branchId, batchIds)
+        : await this.adjustments.findBatches(tx, branchId, batchIds);
       const batchById = new Map(batches.map((batch) => [batch.id, batch]));
       const items = draftLines.map((line, index) => {
         const batch = batchById.get(line.batchId);
-        if (!batch || batch.branchId !== branchId) {
-          throw invalidReference(`dòng ${index + 1}: lô không thuộc chi nhánh`);
-        }
+        if (!batch) throw invalidReference(`dòng ${index + 1}: lô không thuộc chi nhánh`);
         // Giá vốn chốt lúc xác nhận (giá lô lúc đó), nháp để 0.
         return {
           batchId: line.batchId,
@@ -154,6 +157,8 @@ export class AdjustmentService {
           reason: line.reason,
         };
       });
+      // Sau bước kiểm chi nhánh: lô của chi nhánh khác đã bị từ chối (1602), không lộ phiếu nháp của họ.
+      if (isStockTake) await this.assertNoPendingStockTake(tx, batchIds);
 
       const code = await this.codes.next(tx, 'STOCK_ADJUSTMENT');
       const { id } = await this.adjustments.createHeader(tx, {
@@ -304,6 +309,20 @@ export class AdjustmentService {
       throw badRequest(`${label}: huỷ/trả NCC nhập số dương — là số lượng đưa ra khỏi kho`);
     }
     return { ...common, actualQuantity: null, quantity: -item.quantity };
+  }
+
+  /**
+   * Mỗi lô chỉ có MỘT phiếu kiểm kê nháp tại một thời điểm. Chênh lệch chốt lúc lập phiếu, nên hai phiếu nháp cùng
+   * lô (bấm đúp, hai người cùng đếm) mà đều được xác nhận thì chênh lệch bị cộng hai lần.
+   */
+  private async assertNoPendingStockTake(tx: Prisma.TransactionClient, batchIds: readonly string[]): Promise<void> {
+    const pending = await this.adjustments.findPendingStockTake(tx, batchIds);
+    if (pending) {
+      throw inventoryError(
+        ErrorCode.STOCK_TAKE_PENDING,
+        `lô ${pending.batchNumber} đang nằm trong phiếu ${pending.code}`,
+      );
+    }
   }
 
   /** Nhật ký đổi trạng thái phiếu (cùng dạng với phiếu điều chuyển). */

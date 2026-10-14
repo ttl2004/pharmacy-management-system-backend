@@ -12,7 +12,9 @@ export type InventoryErrorCode =
   | ErrorCode.BATCH_ALREADY_MOVED
   | ErrorCode.DOCUMENT_LINE_LIMIT
   | ErrorCode.PRODUCT_HAS_STOCK
-  | ErrorCode.SUPPLIER_INACTIVE;
+  | ErrorCode.SUPPLIER_INACTIVE
+  | ErrorCode.STOCK_TAKE_PENDING
+  | ErrorCode.RECALL_ADMIN_ONLY;
 
 const inventoryMessages: Record<InventoryErrorCode, string> = {
   [ErrorCode.INSUFFICIENT_STOCK]: 'Tồn kho của lô không đủ',
@@ -26,6 +28,8 @@ const inventoryMessages: Record<InventoryErrorCode, string> = {
   [ErrorCode.DOCUMENT_LINE_LIMIT]: 'Chứng từ vượt quá số dòng cho phép',
   [ErrorCode.PRODUCT_HAS_STOCK]: 'Sản phẩm đã phát sinh tồn kho hoặc chứng từ kho',
   [ErrorCode.SUPPLIER_INACTIVE]: 'Nhà cung cấp đã ngừng hợp tác',
+  [ErrorCode.STOCK_TAKE_PENDING]: 'Lô đang có phiếu kiểm kê nháp chưa xác nhận hoặc huỷ',
+  [ErrorCode.RECALL_ADMIN_ONLY]: 'Chỉ ADMIN được mở khoá hoặc hạ mức lô đã thu hồi',
 };
 
 /**

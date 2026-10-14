@@ -21,7 +21,7 @@ import { MAX_BASE_QUANTITY } from '../../core/inventory.constants';
 
 /**
  * Dòng phiếu điều chỉnh, số lượng theo đơn vị cơ bản. Trường cần gửi tuỳ loại phiếu (kiểm ở service):
- * - STOCK_TAKE: `actualQuantity` — số đếm thực tế (>= 0). Chênh lệch tính lúc xác nhận.
+ * - STOCK_TAKE: `actualQuantity` — số đếm thực tế (>= 0). Chênh lệch chốt lúc lập phiếu.
  * - DISPOSE / RETURN_TO_SUPPLIER: `quantity` — số đưa RA khỏi kho (> 0).
  * - OTHER: `quantity` — delta có dấu, khác 0.
  */

@@ -118,6 +118,13 @@ export class ProductService extends AbstractBaseService<Product> {
         if (baseUnitChanged && dto.units === undefined) {
           throw this.badRequest('Phải gửi kèm units chứa đơn vị cơ bản mới khi đổi đơn vị cơ bản');
         }
+        // Tồn và sổ kho đếm theo đơn vị cơ bản — đổi đơn vị khi đã có lô/phiếu nhập là làm sai toàn bộ số liệu kho.
+        if (baseUnitChanged && (await this.productRepository.hasInventoryHistory(tx, id))) {
+          throw new ErrorException({
+            code: ErrorCode.PRODUCT_HAS_STOCK,
+            message: 'Sản phẩm đã phát sinh kho, không thể đổi đơn vị cơ bản',
+          });
+        }
         if (dto.units !== undefined) {
           if (dto.units.length === 0) throw this.badRequest('Sản phẩm phải có ít nhất một đơn vị bán');
           this.assertUnitConfig(dto.units, baseUnitId, dto.barcode ?? null);
@@ -149,6 +156,12 @@ export class ProductService extends AbstractBaseService<Product> {
     await this.transactions.write(async (tx) => {
       const existing = await this.productRepository.findDetailWith(tx, id);
       if (!existing) throw this.notFound();
+      if (await this.productRepository.hasOpenInventory(tx, id)) {
+        throw new ErrorException({
+          code: ErrorCode.PRODUCT_HAS_STOCK,
+          message: 'Sản phẩm còn tồn kho hoặc chứng từ kho chưa xong, không thể xoá',
+        });
+      }
 
       const rows = await this.productRepository.findUnitsForReconcile(tx, id);
       const activeIds = rows.filter((row) => !row.isDeleted).map((row) => row.id);

@@ -54,6 +54,21 @@ export const PERMISSION_CATALOG = [
   { code: 'transfer:ship', name: 'Xuất hàng điều chuyển (chi nhánh gửi)', module: 'transfer', sortOrder: 3 },
   { code: 'transfer:receive', name: 'Nhận hàng điều chuyển (chi nhánh nhận)', module: 'transfer', sortOrder: 4 },
   { code: 'transfer:cancel', name: 'Huỷ phiếu điều chuyển (chi nhánh gửi)', module: 'transfer', sortOrder: 5 },
+  {
+    code: 'stock-adjustment:read',
+    name: 'Xem phiếu kiểm kê, huỷ hàng, trả NCC',
+    module: 'stock-adjustment',
+    sortOrder: 1,
+  },
+  { code: 'stock-adjustment:create', name: 'Lập phiếu điều chỉnh nháp', module: 'stock-adjustment', sortOrder: 2 },
+  {
+    code: 'stock-adjustment:confirm',
+    name: 'Xác nhận phiếu điều chỉnh (ghi sổ kho)',
+    module: 'stock-adjustment',
+    sortOrder: 3,
+  },
+  { code: 'stock-adjustment:cancel', name: 'Huỷ phiếu điều chỉnh nháp', module: 'stock-adjustment', sortOrder: 4 },
+  { code: 'stock-batch:block', name: 'Khoá, mở khoá, thu hồi lô', module: 'stock-batch', sortOrder: 1 },
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CATALOG)[number]['code'];

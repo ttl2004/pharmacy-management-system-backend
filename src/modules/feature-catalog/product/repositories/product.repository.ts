@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, Product, RecordStatus } from '@prisma/client';
+import { Prisma, Product, ReceiptStatus, RecordStatus, TransferStatus } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { BaseWhere, PaginationResult } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { PrismaBaseRepository } from 'src/providers/abstract-base/repositories/prisma-base.repository';
@@ -286,6 +286,42 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
       where: { id },
       data: { isDeleted: true, updatedBy: actorId, updatedAt: new Date() },
     });
+  }
+
+  /**
+   * Sản phẩm đã từng đi vào kho (có lô hoặc dòng phiếu nhập, kể cả đã huỷ). Khi đó đổi đơn vị cơ bản làm sai toàn bộ
+   * tồn và sổ kho đang đếm theo đơn vị cũ.
+   */
+  async hasInventoryHistory(client: Prisma.TransactionClient, productId: string): Promise<boolean> {
+    const [batches, receiptLines] = await Promise.all([
+      client.stockBatch.count({ where: { productId } }),
+      client.goodsReceiptItem.count({ where: { productId } }),
+    ]);
+    return batches + receiptLines > 0;
+  }
+
+  /**
+   * Sản phẩm còn hàng hoặc còn chứng từ kho đang mở (phiếu nhập nháp, điều chuyển chưa xong, điều chỉnh nháp) —
+   * xoá lúc này để lại hàng/chứng từ trỏ vào một sản phẩm "không tồn tại".
+   */
+  async hasOpenInventory(client: Prisma.TransactionClient, productId: string): Promise<boolean> {
+    const [stock, draftReceipts, openTransfers, draftAdjustments] = await Promise.all([
+      client.stockBatch.count({ where: { productId, quantityOnHand: { gt: 0 } } }),
+      client.goodsReceiptItem.count({
+        where: { productId, isDeleted: false, receipt: { status: ReceiptStatus.DRAFT } },
+      }),
+      client.stockTransferItem.count({
+        where: {
+          productId,
+          isDeleted: false,
+          transfer: { status: { in: [TransferStatus.PENDING, TransferStatus.IN_TRANSIT] } },
+        },
+      }),
+      client.stockAdjustmentItem.count({
+        where: { productId, isDeleted: false, adjustment: { status: ReceiptStatus.DRAFT } },
+      }),
+    ]);
+    return stock + draftReceipts + openTransfers + draftAdjustments > 0;
   }
 
   /** Xoá mềm dòng bị loại khỏi payload. Ghi được `updatedBy` nên không dùng `softDeleteMany` của base. */

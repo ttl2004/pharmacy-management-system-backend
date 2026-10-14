@@ -173,6 +173,29 @@ describe('Danh mục quyền và mã lỗi', () => {
       expect(grants(AuthRole.SALES_STAFF).filter((code) => code.startsWith('transfer:'))).toEqual(['transfer:read']);
       expect(grants(AuthRole.CUSTOMER).filter((code) => code.startsWith('transfer:'))).toEqual([]);
     });
+
+    it('điều chỉnh + khoá lô: PM đủ quyền; SALES_STAFF chỉ đọc phiếu điều chỉnh, không khoá lô', () => {
+      const all = [
+        'stock-adjustment:read',
+        'stock-adjustment:create',
+        'stock-adjustment:confirm',
+        'stock-adjustment:cancel',
+        'stock-batch:block',
+      ];
+      expect(grants(AuthRole.ADMIN)).toEqual(expect.arrayContaining(all));
+      expect(grants(AuthRole.PHARMACY_MANAGER)).toEqual(expect.arrayContaining(all));
+      expect(grants(AuthRole.SALES_STAFF).filter((code) => /^stock-(adjustment|batch):/.test(code))).toEqual([
+        'stock-adjustment:read',
+      ]);
+    });
+
+    it('mọi mã quyền kho đều có ít nhất một vai trò được cấp — không có quyền chết', () => {
+      const granted = new Set(Object.values(DEFAULT_ROLE_GRANTS).flat());
+      const inventoryCodes = PERMISSION_CODES.filter((code) =>
+        /^(supplier|goods-receipt|stock|stock-batch|stock-adjustment|branch-product|transfer|audit-log):/.test(code),
+      );
+      expect(inventoryCodes.filter((code) => !granted.has(code))).toEqual([]);
+    });
   });
 
   it('danh mục quyền không có mã trùng nhau', () => {

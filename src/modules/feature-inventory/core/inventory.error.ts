@@ -36,3 +36,34 @@ export function inventoryError(code: InventoryErrorCode, detail?: string): Error
   const base = inventoryMessages[code];
   return new ErrorException({ code, message: detail ? `${base}: ${detail}` : base });
 }
+
+/** "Tham chiếu không hợp lệ" (1602): id trỏ tới bản ghi không có hoặc không thuộc phạm vi thao tác. */
+export function invalidReference(detail: string): ErrorException {
+  return new ErrorException({ code: ErrorCode.INVALID_REFERENCE, message: `Tham chiếu không hợp lệ: ${detail}` });
+}
+
+/** Dữ liệu gửi lên sai (1002) mà DTO không tự kiểm được — vd. bắt buộc tuỳ loại phiếu. */
+export function badRequest(message: string): ErrorException {
+  return new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message });
+}
+
+/** Lỗi chung của một loại chứng từ kho; chỉ khác tên chứng từ trong thông báo "không tồn tại". */
+export function documentErrors(documentName: string) {
+  return {
+    notFound: (): ErrorException =>
+      new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: `${documentName} không tồn tại` }),
+    /** Không có `status`: phiếu vừa bị request khác chiếm (bấm đúp) — điều kiện chuyển trạng thái trả về 0 dòng. */
+    wrongState: (status?: string): ErrorException =>
+      inventoryError(
+        ErrorCode.INVALID_DOCUMENT_STATE,
+        status ? `phiếu đang ở trạng thái ${status}` : 'phiếu vừa được người khác xử lý',
+      ),
+  };
+}
+
+/** Một lô chỉ được xuất hiện một lần trong chứng từ (ledger và intake cần mỗi lô một dòng). */
+export function assertNoDuplicateBatches(batchIds: readonly string[]): void {
+  if (new Set(batchIds).size !== batchIds.length) {
+    throw badRequest('Một lô chỉ được xuất hiện một lần trong phiếu');
+  }
+}

@@ -1,4 +1,5 @@
-import type { BranchScope } from 'src/modules/feature-auth/permission/branch-scope';
+import { assertBranchInScope, type BranchScope } from 'src/modules/feature-auth/permission/branch-scope';
+import { badRequest } from './inventory.error';
 
 /**
  * Điều kiện phạm vi chi nhánh để NHÉT THẲNG vào `where` của truy vấn đọc/ghi theo id — không tải bản ghi về rồi mới
@@ -23,4 +24,21 @@ export function transferWhere(
   if (side === 'from') return { fromBranchId: scope.branchId };
   if (side === 'to') return { toBranchId: scope.branchId };
   return { OR: [{ fromBranchId: scope.branchId }, { toBranchId: scope.branchId }] };
+}
+
+/**
+ * Chi nhánh mà một thao tác GHI nhắm tới. PM/nhân viên: luôn là chi nhánh mình (chỉ định chi nhánh khác → 1506).
+ * ADMIN (toàn chuỗi): bắt buộc chỉ định — không có "chi nhánh mặc định" nào hợp lý.
+ */
+export function resolveWriteBranch(
+  scope: BranchScope,
+  requested: string | undefined,
+  missingMessage = 'Cần chọn chi nhánh (branchId)',
+): string {
+  if (scope.kind === 'BRANCH') {
+    assertBranchInScope(scope, requested ?? scope.branchId);
+    return scope.branchId;
+  }
+  if (!requested) throw badRequest(missingMessage);
+  return requested;
 }

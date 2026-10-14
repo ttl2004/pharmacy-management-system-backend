@@ -9,7 +9,6 @@ import {
   TransferStatus,
 } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
-import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import {
   addDaysToDateOnly,
@@ -19,16 +18,11 @@ import {
   vietnamDayStartUtc,
 } from 'src/common/utils/date-only.util';
 import { permissionError } from 'src/modules/feature-auth/permission/permission.error';
-import {
-  assertBranchInScope,
-  BranchScope,
-  isInBranchScope,
-  resolveBranchScope,
-} from 'src/modules/feature-auth/permission/branch-scope';
+import { BranchScope, isInBranchScope, resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { DocumentCodeService } from '../core/document-code.service';
-import { inventoryError } from '../core/inventory.error';
-import { transferWhere, TransferSide } from '../core/inventory-scope';
+import { assertNoDuplicateBatches, documentErrors, invalidReference, inventoryError } from '../core/inventory.error';
+import { resolveWriteBranch, TransferSide, transferWhere } from '../core/inventory-scope';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { AUDIT_ENTITY, MAX_DOCUMENT_LINES } from '../core/inventory.constants';
 import { StockIntakeService } from '../core/stock-intake.service';
@@ -69,6 +63,8 @@ function sideOf(direction: TransferQuery['direction']): TransferSide {
   return 'either';
 }
 
+const errors = documentErrors('Phiếu điều chuyển');
+
 /**
  * Điều chuyển giữa hai chi nhánh: PENDING → IN_TRANSIT (trừ kho gửi) → RECEIVED (cộng kho nhận) / CANCELLED.
  *
@@ -102,20 +98,20 @@ export class TransferService {
 
   async getDetail(id: string, actor: RequestActor): Promise<TransferDetail> {
     const transfer = await this.transfers.findDetail(id, transferWhere(resolveBranchScope(actor.user), 'either'));
-    if (!transfer) throw this.notFound();
+    if (!transfer) throw errors.notFound();
     return transfer;
   }
 
   async create(dto: CreateTransferRequest, actor: RequestActor): Promise<TransferDetail> {
     const scope = resolveBranchScope(actor.user);
-    const fromBranchId = this.resolveSourceBranch(scope, dto.fromBranchId);
+    const fromBranchId = resolveWriteBranch(scope, dto.fromBranchId, 'Cần chọn chi nhánh gửi (fromBranchId)');
     const actorId = actor.user.userId;
     if (fromBranchId === dto.toBranchId) throw inventoryError(ErrorCode.TRANSFER_SAME_BRANCH);
     if (dto.items.length > MAX_DOCUMENT_LINES) {
       throw inventoryError(ErrorCode.DOCUMENT_LINE_LIMIT, `tối đa ${MAX_DOCUMENT_LINES} dòng`);
     }
     const batchIds = dto.items.map((item) => item.batchId);
-    this.assertNoDuplicateBatches(batchIds);
+    assertNoDuplicateBatches(batchIds);
 
     return this.transactions.run(async ({ tx }) => {
       await this.assertBranchesActive(tx, [fromBranchId, dto.toBranchId]);
@@ -126,7 +122,7 @@ export class TransferService {
       const items = dto.items.map((item, index) => {
         const batch = batchById.get(item.batchId);
         if (!batch || batch.branchId !== fromBranchId) {
-          throw this.invalidReference(`dòng ${index + 1}: lô không thuộc chi nhánh gửi`);
+          throw invalidReference(`dòng ${index + 1}: lô không thuộc chi nhánh gửi`);
         }
         this.assertBatchShippable(batch, today);
         // Kiểm sớm cho người dùng biết ngay; kiểm thật (có khoá) nằm ở lúc xuất hàng.
@@ -172,7 +168,7 @@ export class TransferService {
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
       const head = await this.loadForSide(tx, id, scope, 'from');
-      if (head.status !== TransferStatus.PENDING) throw this.wrongState(head.status);
+      if (head.status !== TransferStatus.PENDING) throw errors.wrongState(head.status);
       // Xuất cần cả hai chi nhánh còn hoạt động: không gửi hàng tới nơi đã ngừng nhận.
       await this.assertBranchesActive(tx, [head.fromBranchId, head.toBranchId]);
 
@@ -185,7 +181,7 @@ export class TransferService {
         updatedAt: now,
         updatedBy: actorId,
       });
-      if (!claimed) throw this.wrongState();
+      if (!claimed) throw errors.wrongState();
 
       const items = await this.transfers.findItems(tx, id);
       const batchIds = items.map((item) => item.batchId);
@@ -227,7 +223,7 @@ export class TransferService {
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
       const head = await this.loadForSide(tx, id, scope, 'to');
-      if (head.status !== TransferStatus.IN_TRANSIT) throw this.wrongState(head.status);
+      if (head.status !== TransferStatus.IN_TRANSIT) throw errors.wrongState(head.status);
       // Chỉ chi nhánh nhận cần hoạt động; chi nhánh gửi đã giao xong hàng từ lúc xuất.
       await this.assertBranchesActive(tx, [head.toBranchId]);
 
@@ -239,7 +235,7 @@ export class TransferService {
         updatedAt: now,
         updatedBy: actorId,
       });
-      if (!claimed) throw this.wrongState();
+      if (!claimed) throw errors.wrongState();
 
       const items = await this.transfers.findItems(tx, id);
       const costs = await this.transfers.findShipCosts(tx, id);
@@ -290,7 +286,7 @@ export class TransferService {
       const { tx } = ctx;
       const head = await this.loadForSide(tx, id, scope, 'from');
       if (head.status !== TransferStatus.PENDING && head.status !== TransferStatus.IN_TRANSIT) {
-        throw this.wrongState(head.status);
+        throw errors.wrongState(head.status);
       }
       const claimed = await this.transfers.transition(tx, id, head.status, {
         status: TransferStatus.CANCELLED,
@@ -300,7 +296,7 @@ export class TransferService {
         updatedAt: now,
         updatedBy: actorId,
       });
-      if (!claimed) throw this.wrongState();
+      if (!claimed) throw errors.wrongState();
 
       // Huỷ không kiểm chi nhánh còn hoạt động: hàng đang đi đường vẫn phải về sổ kể cả khi chi nhánh vừa ngừng.
       if (head.status === TransferStatus.IN_TRANSIT) {
@@ -344,7 +340,7 @@ export class TransferService {
     side: 'from' | 'to',
   ): Promise<TransferHead> {
     const head = await this.transfers.findHead(tx, id, transferWhere(scope, 'either'));
-    if (!head) throw this.notFound();
+    if (!head) throw errors.notFound();
     const branchId = side === 'from' ? head.fromBranchId : head.toBranchId;
     if (!isInBranchScope(scope, branchId)) throw permissionError(ErrorCode.BRANCH_ACCESS_DENIED);
     return head;
@@ -360,24 +356,9 @@ export class TransferService {
     }
   }
 
-  private assertNoDuplicateBatches(batchIds: readonly string[]): void {
-    if (new Set(batchIds).size !== batchIds.length) {
-      throw this.badRequest('Một lô chỉ được xuất hiện một lần trong phiếu');
-    }
-  }
-
-  private resolveSourceBranch(scope: BranchScope, requested: string | undefined): string {
-    if (scope.kind === 'BRANCH') {
-      assertBranchInScope(scope, requested ?? scope.branchId);
-      return scope.branchId;
-    }
-    if (!requested) throw this.badRequest('Cần chọn chi nhánh gửi (fromBranchId)');
-    return requested;
-  }
-
   private async assertBranchesActive(tx: Prisma.TransactionClient, ids: string[]): Promise<void> {
     const branches = await this.transfers.findBranches(tx, ids);
-    if (branches.length !== new Set(ids).size) throw this.invalidReference('chi nhánh không tồn tại');
+    if (branches.length !== new Set(ids).size) throw invalidReference('chi nhánh không tồn tại');
     if (branches.some((branch) => branch.status !== RecordStatus.ACTIVE)) {
       throw inventoryError(ErrorCode.BRANCH_INACTIVE);
     }
@@ -402,26 +383,7 @@ export class TransferService {
 
   private async mustFind(tx: Prisma.TransactionClient, id: string): Promise<TransferDetail> {
     const transfer = await this.transfers.findDetail(id, {}, tx);
-    if (!transfer) throw this.notFound();
+    if (!transfer) throw errors.notFound();
     return transfer;
-  }
-
-  private notFound(): ErrorException {
-    return new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Phiếu điều chuyển không tồn tại' });
-  }
-
-  private wrongState(status?: TransferStatus): ErrorException {
-    return inventoryError(
-      ErrorCode.INVALID_DOCUMENT_STATE,
-      status ? `phiếu đang ở trạng thái ${status}` : 'phiếu vừa được người khác xử lý',
-    );
-  }
-
-  private invalidReference(detail: string): ErrorException {
-    return new ErrorException({ code: ErrorCode.INVALID_REFERENCE, message: `Tham chiếu không hợp lệ: ${detail}` });
-  }
-
-  private badRequest(message: string): ErrorException {
-    return new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message });
   }
 }

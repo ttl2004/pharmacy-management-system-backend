@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
 import { AbstractBaseQuery } from 'src/providers/abstract-base/abstract-base.query';
+import { MAX_BASE_QUANTITY } from '../../core/inventory.constants';
 
 export class UpsertBranchProductRequest {
   @IsOptional()
@@ -14,7 +15,7 @@ export class UpsertBranchProductRequest {
 
   @IsInt()
   @Min(0)
-  @Max(10_000_000)
+  @Max(MAX_BASE_QUANTITY)
   @ApiProperty({ description: 'Ngưỡng cảnh báo sắp hết hàng của chi nhánh, theo đơn vị cơ bản' })
   minStockLevel: number;
 }

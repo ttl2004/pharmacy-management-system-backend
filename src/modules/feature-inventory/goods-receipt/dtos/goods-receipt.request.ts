@@ -15,14 +15,13 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { IsDateOnly } from 'src/common/validators/is-date-only.validator';
+import { trimUpperCase } from 'src/common/utils/string-transform.util';
 
 /** Trần đầu vào — chặn số vô lý trước khi chạm DB (cột `int` tràn ở ~2,1 tỷ). */
 const MAX_QUANTITY = 1_000_000;
 const MAX_UNIT_PRICE = 1_000_000_000;
 /** Tiền cấp phiếu: dưới `Number.MAX_SAFE_INTEGER` rất xa, đủ cho mọi phiếu thật. */
 const MAX_DOCUMENT_AMOUNT = 1_000_000_000_000;
-
-const trimUpper = ({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim().toUpperCase() : value);
 
 /**
  * Một dòng phiếu nhập. KHÔNG có `conversionRate`, `baseQuantity`, `totalPrice`: server tự tính từ `product_units`
@@ -49,7 +48,7 @@ export class GoodsReceiptItemRequest {
   @ApiProperty({ example: 42000, description: 'Giá nhập theo đơn vị nhập, đồng' })
   importPrice: number;
 
-  @Transform(trimUpper)
+  @Transform(trimUpperCase)
   @IsString()
   @IsNotEmpty()
   @MaxLength(50)

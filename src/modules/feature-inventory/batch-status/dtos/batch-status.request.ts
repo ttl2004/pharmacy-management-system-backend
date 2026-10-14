@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { BatchStatus } from '@prisma/client';
 import { Transform } from 'class-transformer';
 import { IsEnum, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { trimUpperCase } from 'src/common/utils/string-transform.util';
 
 export class UpdateBatchStatusRequest {
   @IsEnum(BatchStatus)
@@ -21,7 +22,7 @@ export class RecallBatchRequest {
   @ApiProperty()
   productId: string;
 
-  @Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim().toUpperCase() : value))
+  @Transform(trimUpperCase)
   @IsString()
   @IsNotEmpty()
   @MaxLength(50)

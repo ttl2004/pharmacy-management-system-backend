@@ -4,13 +4,10 @@ import type { RequestActor } from 'src/common/decorators/current-actor.decorator
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
-import {
-  assertBranchInScope,
-  resolveBranchScope,
-  scopedBranchFilter,
-} from 'src/modules/feature-auth/permission/branch-scope';
+import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { AUDIT_ENTITY } from '../core/inventory.constants';
+import { resolveWriteBranch } from '../core/inventory-scope';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { BranchProductQuery, UpsertBranchProductRequest } from './dtos/branch-product.request';
 
@@ -56,7 +53,7 @@ export class BranchProductService {
   }
 
   async upsert(dto: UpsertBranchProductRequest, actor: RequestActor) {
-    const branchId = this.resolveTarget(actor, dto.branchId);
+    const branchId = resolveWriteBranch(resolveBranchScope(actor.user), dto.branchId);
     const actorId = actor.user.userId;
 
     return this.transactions.run(async ({ tx }) => {
@@ -94,7 +91,7 @@ export class BranchProductService {
 
   /** Bỏ ngưỡng riêng — chi nhánh quay về ngưỡng chung của sản phẩm. */
   async remove(productId: string, requestedBranchId: string | undefined, actor: RequestActor) {
-    const branchId = this.resolveTarget(actor, requestedBranchId);
+    const branchId = resolveWriteBranch(resolveBranchScope(actor.user), requestedBranchId);
     const actorId = actor.user.userId;
 
     await this.transactions.run(async ({ tx }) => {
@@ -117,17 +114,6 @@ export class BranchProductService {
       ]);
     });
     return { success: true as const };
-  }
-
-  private resolveTarget(actor: RequestActor, requested: string | undefined): string {
-    const scope = resolveBranchScope(actor.user);
-    if (scope.kind === 'BRANCH') {
-      assertBranchInScope(scope, requested ?? scope.branchId);
-      return scope.branchId;
-    }
-    if (!requested)
-      throw new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message: 'Cần chọn chi nhánh (branchId)' });
-    return requested;
   }
 
   private async assertReferences(tx: Prisma.TransactionClient, branchId: string, productId: string) {

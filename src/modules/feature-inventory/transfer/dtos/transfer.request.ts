@@ -18,6 +18,7 @@ import {
 } from 'class-validator';
 import { IsDateOnly } from 'src/common/validators/is-date-only.validator';
 import { AbstractBaseQuery } from 'src/providers/abstract-base/abstract-base.query';
+import { MAX_BASE_QUANTITY } from '../../core/inventory.constants';
 
 /** Chuyển theo LÔ cụ thể — giữ nguyên số lô và hạn dùng ở chi nhánh nhận. Số lượng theo đơn vị cơ bản. */
 export class TransferItemRequest {
@@ -27,7 +28,7 @@ export class TransferItemRequest {
 
   @IsInt()
   @Min(1)
-  @Max(10_000_000)
+  @Max(MAX_BASE_QUANTITY)
   @ApiProperty({ example: 100 })
   quantity: number;
 

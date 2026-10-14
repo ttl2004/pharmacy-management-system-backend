@@ -2,16 +2,13 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { RecordStatus } from '@prisma/client';
 import { Transform } from 'class-transformer';
 import { IsEmail, IsEnum, IsNotEmpty, IsOptional, IsString, Matches, MaxLength, ValidateIf } from 'class-validator';
+import { trimUpperCase } from 'src/common/utils/string-transform.util';
 
 const CODE_PATTERN = /^[A-Z0-9_-]+$/;
 const CODE_MESSAGE = 'code chỉ nhận chữ in hoa không dấu, chữ số, gạch ngang và gạch dưới';
 
-/** `@Transform` chạy trước class-validator: `ncc001` thành `NCC001` rồi mới qua regex. */
-const normalizeCode = ({ value }: { value: unknown }) =>
-  typeof value === 'string' ? value.trim().toUpperCase() : value;
-
 export class CreateSupplierRequest {
-  @Transform(normalizeCode)
+  @Transform(trimUpperCase)
   @IsString()
   @IsNotEmpty()
   @MaxLength(30)
@@ -71,7 +68,7 @@ export class CreateSupplierRequest {
  */
 export class UpdateSupplierRequest {
   @ValidateIf((_, value) => value !== undefined)
-  @Transform(normalizeCode)
+  @Transform(trimUpperCase)
   @IsString()
   @IsNotEmpty()
   @MaxLength(30)

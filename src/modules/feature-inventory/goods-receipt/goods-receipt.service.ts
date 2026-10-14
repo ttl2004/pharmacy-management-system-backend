@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { AuditAction, Prisma, ReceiptStatus, RecordStatus, StockMovementType, StockRefType } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
-import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import {
   addDaysToDateOnly,
@@ -11,16 +10,11 @@ import {
   todayInVietnam,
   vietnamDayStartUtc,
 } from 'src/common/utils/date-only.util';
-import {
-  assertBranchInScope,
-  BranchScope,
-  resolveBranchScope,
-  scopedBranchFilter,
-} from 'src/modules/feature-auth/permission/branch-scope';
+import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { DocumentCodeService } from '../core/document-code.service';
-import { inventoryError } from '../core/inventory.error';
-import { branchWhere } from '../core/inventory-scope';
+import { badRequest, documentErrors, invalidReference, inventoryError } from '../core/inventory.error';
+import { branchWhere, resolveWriteBranch } from '../core/inventory-scope';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { AUDIT_ENTITY, MAX_DOCUMENT_LINES, NEAR_EXPIRY_WARNING_DAYS } from '../core/inventory.constants';
 import { StockIntakeService } from '../core/stock-intake.service';
@@ -54,6 +48,8 @@ interface PreparedDraft {
 }
 
 const SORTABLE_FIELDS = new Set(['createdAt', 'code', 'totalAmount']);
+
+const errors = documentErrors('Phiếu nhập');
 
 @Injectable()
 export class GoodsReceiptService {
@@ -90,12 +86,16 @@ export class GoodsReceiptService {
   async getDetail(id: string, actor: RequestActor): Promise<GoodsReceiptDetail> {
     const scope = resolveBranchScope(actor.user);
     const receipt = await this.receipts.findDetail(id, branchWhere(scope));
-    if (!receipt) throw this.notFound();
+    if (!receipt) throw errors.notFound();
     return receipt;
   }
 
   async create(dto: CreateGoodsReceiptRequest, actor: RequestActor): Promise<GoodsReceiptView> {
-    const branchId = this.resolveTargetBranch(resolveBranchScope(actor.user), dto.branchId);
+    const branchId = resolveWriteBranch(
+      resolveBranchScope(actor.user),
+      dto.branchId,
+      'Cần chọn chi nhánh nhập kho (branchId)',
+    );
     const actorId = actor.user.userId;
 
     return this.transactions.run(async ({ tx }) => {
@@ -133,8 +133,8 @@ export class GoodsReceiptService {
 
     return this.transactions.run(async ({ tx }) => {
       const head = await this.receipts.findStatus(tx, id, branchWhere(scope));
-      if (!head) throw this.notFound();
-      if (head.status !== ReceiptStatus.DRAFT) throw this.wrongState(head.status);
+      if (!head) throw errors.notFound();
+      if (head.status !== ReceiptStatus.DRAFT) throw errors.wrongState(head.status);
 
       const draft = await this.prepareDraft(tx, head.branchId, dto, { requireActiveSupplier: true });
       const changed = await this.receipts.transition(tx, id, ReceiptStatus.DRAFT, {
@@ -142,7 +142,7 @@ export class GoodsReceiptService {
         updatedAt: new Date(),
         updatedBy: actorId,
       });
-      if (!changed) throw this.wrongState();
+      if (!changed) throw errors.wrongState();
 
       await this.receipts.softDeleteItems(tx, id, actorId);
       await this.receipts.createItems(
@@ -177,8 +177,8 @@ export class GoodsReceiptService {
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
       const head = await this.receipts.findStatus(tx, id, branchWhere(scope));
-      if (!head) throw this.notFound();
-      if (head.status !== ReceiptStatus.DRAFT) throw this.wrongState(head.status);
+      if (!head) throw errors.notFound();
+      if (head.status !== ReceiptStatus.DRAFT) throw errors.wrongState(head.status);
       await this.assertBranchActive(tx, head.branchId);
 
       // Chiếm phiếu trước mọi việc khác: request thứ hai (bấm đúp) dừng ở đây, không bao giờ nhập kho lần hai.
@@ -190,7 +190,7 @@ export class GoodsReceiptService {
         updatedAt: now,
         updatedBy: actorId,
       });
-      if (!claimed) throw this.wrongState();
+      if (!claimed) throw errors.wrongState();
 
       const items = await this.receipts.findItemsForConfirm(tx, id);
       const today = todayInVietnam();
@@ -204,7 +204,7 @@ export class GoodsReceiptService {
           unit.product.isDeleted ||
           unit.product.status !== RecordStatus.ACTIVE
         ) {
-          throw this.invalidReference(`sản phẩm ${unit.product.code} hoặc đơn vị nhập đã ngừng kinh doanh`);
+          throw invalidReference(`sản phẩm ${unit.product.code} hoặc đơn vị nhập đã ngừng kinh doanh`);
         }
         const expiry = toDateOnlyString(item.expiryDate);
         this.checkExpiry(item.batchNumber, expiry, today, warnings);
@@ -215,7 +215,7 @@ export class GoodsReceiptService {
           conversionRate: unit.conversionRate,
           importPrice: item.importPrice,
         });
-        if (!amounts) throw this.badRequest(`Dòng lô ${item.batchNumber}: số lượng quy đổi vượt giới hạn`);
+        if (!amounts) throw badRequest(`Dòng lô ${item.batchNumber}: số lượng quy đổi vượt giới hạn`);
         if (unit.conversionRate !== item.conversionRate) {
           conversions.push({ id: item.id, conversionRate: unit.conversionRate, baseQuantity: amounts.baseQuantity });
           warnings.push(
@@ -274,8 +274,8 @@ export class GoodsReceiptService {
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
       const head = await this.receipts.findStatus(tx, id, branchWhere(scope));
-      if (!head) throw this.notFound();
-      if (head.status === ReceiptStatus.CANCELLED) throw this.wrongState(head.status);
+      if (!head) throw errors.notFound();
+      if (head.status === ReceiptStatus.CANCELLED) throw errors.wrongState(head.status);
 
       const claimed = await this.receipts.transition(tx, id, head.status, {
         status: ReceiptStatus.CANCELLED,
@@ -285,7 +285,7 @@ export class GoodsReceiptService {
         updatedAt: now,
         updatedBy: actorId,
       });
-      if (!claimed) throw this.wrongState();
+      if (!claimed) throw errors.wrongState();
 
       if (head.status === ReceiptStatus.CONFIRMED) {
         const imports = await this.receipts.findImportMovements(tx, id);
@@ -349,11 +349,11 @@ export class GoodsReceiptService {
 
     return this.transactions.run(async ({ tx }) => {
       const head = await this.receipts.findStatus(tx, id, branchWhere(scope));
-      if (!head) throw this.notFound();
-      if (head.status === ReceiptStatus.CANCELLED) throw this.wrongState(head.status);
+      if (!head) throw errors.notFound();
+      if (head.status === ReceiptStatus.CANCELLED) throw errors.wrongState(head.status);
 
       const paidAmount = BigInt(dto.paidAmount);
-      if (paidAmount > head.totalAmount) throw this.badRequest('Số đã trả lớn hơn tổng tiền phiếu');
+      if (paidAmount > head.totalAmount) throw badRequest('Số đã trả lớn hơn tổng tiền phiếu');
       const paymentStatus = paymentStatusOf(paidAmount, head.totalAmount);
 
       const changed = await this.receipts.transition(tx, id, [ReceiptStatus.DRAFT, ReceiptStatus.CONFIRMED], {
@@ -362,7 +362,7 @@ export class GoodsReceiptService {
         updatedAt: new Date(),
         updatedBy: actorId,
       });
-      if (!changed) throw this.wrongState();
+      if (!changed) throw errors.wrongState();
 
       if (paidAmount !== head.paidAmount) {
         await this.audit.record(tx, [
@@ -398,7 +398,7 @@ export class GoodsReceiptService {
 
     await this.assertBranchActive(tx, branchId);
     const supplier = await this.receipts.findSupplier(tx, dto.supplierId);
-    if (!supplier) throw this.invalidReference('nhà cung cấp không tồn tại');
+    if (!supplier) throw invalidReference('nhà cung cấp không tồn tại');
     if (options.requireActiveSupplier && supplier.status !== RecordStatus.ACTIVE) {
       throw inventoryError(ErrorCode.SUPPLIER_INACTIVE);
     }
@@ -413,19 +413,17 @@ export class GoodsReceiptService {
     const items = dto.items.map((item, index) => {
       const unit = unitById.get(item.productUnitId);
       if (!unit || unit.isDeleted || unit.productId !== item.productId) {
-        throw this.invalidReference(`dòng ${index + 1}: đơn vị nhập không thuộc sản phẩm`);
+        throw invalidReference(`dòng ${index + 1}: đơn vị nhập không thuộc sản phẩm`);
       }
       if (
         unit.status !== RecordStatus.ACTIVE ||
         unit.product.isDeleted ||
         unit.product.status !== RecordStatus.ACTIVE
       ) {
-        throw this.invalidReference(
-          `dòng ${index + 1}: sản phẩm ${unit.product.code} hoặc đơn vị nhập đã ngừng kinh doanh`,
-        );
+        throw invalidReference(`dòng ${index + 1}: sản phẩm ${unit.product.code} hoặc đơn vị nhập đã ngừng kinh doanh`);
       }
       if (item.manufacturingDate && item.manufacturingDate >= item.expiryDate) {
-        throw this.badRequest(`Dòng ${index + 1}: ngày sản xuất phải trước hạn dùng`);
+        throw badRequest(`Dòng ${index + 1}: ngày sản xuất phải trước hạn dùng`);
       }
       this.checkExpiry(item.batchNumber, item.expiryDate, today, warnings);
 
@@ -434,7 +432,7 @@ export class GoodsReceiptService {
         conversionRate: unit.conversionRate,
         importPrice: item.importPrice,
       });
-      if (!amounts) throw this.badRequest(`Dòng ${index + 1}: số lượng quy đổi vượt giới hạn`);
+      if (!amounts) throw badRequest(`Dòng ${index + 1}: số lượng quy đổi vượt giới hạn`);
 
       return {
         productId: item.productId,
@@ -454,8 +452,8 @@ export class GoodsReceiptService {
       items.map((item) => item.totalPrice),
       dto,
     );
-    if (totals === 'DISCOUNT_EXCEEDS_SUBTOTAL') throw this.badRequest('Chiết khấu lớn hơn tiền hàng');
-    if (totals === 'PAID_EXCEEDS_TOTAL') throw this.badRequest('Số đã trả lớn hơn tổng tiền phiếu');
+    if (totals === 'DISCOUNT_EXCEEDS_SUBTOTAL') throw badRequest('Chiết khấu lớn hơn tiền hàng');
+    if (totals === 'PAID_EXCEEDS_TOTAL') throw badRequest('Số đã trả lớn hơn tổng tiền phiếu');
 
     return {
       header: {
@@ -485,24 +483,14 @@ export class GoodsReceiptService {
     const seen = new Set<string>();
     for (const item of items) {
       const key = `${item.productId}|${item.batchNumber}`;
-      if (seen.has(key)) throw this.badRequest(`Lô ${item.batchNumber} xuất hiện hai lần — gộp vào một dòng`);
+      if (seen.has(key)) throw badRequest(`Lô ${item.batchNumber} xuất hiện hai lần — gộp vào một dòng`);
       seen.add(key);
     }
   }
 
-  /** PM/nhân viên: luôn là chi nhánh mình (gửi chi nhánh khác → 1506). ADMIN: bắt buộc chỉ định. */
-  private resolveTargetBranch(scope: BranchScope, requested: string | undefined): string {
-    if (scope.kind === 'BRANCH') {
-      assertBranchInScope(scope, requested ?? scope.branchId);
-      return scope.branchId;
-    }
-    if (!requested) throw this.badRequest('Cần chọn chi nhánh nhập kho (branchId)');
-    return requested;
-  }
-
   private async assertBranchActive(tx: Prisma.TransactionClient, branchId: string): Promise<void> {
     const branch = await this.receipts.findBranch(tx, branchId);
-    if (!branch) throw this.invalidReference('chi nhánh không tồn tại');
+    if (!branch) throw invalidReference('chi nhánh không tồn tại');
     if (branch.status !== RecordStatus.ACTIVE) throw inventoryError(ErrorCode.BRANCH_INACTIVE);
   }
 
@@ -517,26 +505,7 @@ export class GoodsReceiptService {
 
   private async mustFind(tx: Prisma.TransactionClient, id: string): Promise<GoodsReceiptDetail> {
     const receipt = await this.receipts.findDetail(id, {}, tx);
-    if (!receipt) throw this.notFound();
+    if (!receipt) throw errors.notFound();
     return receipt;
-  }
-
-  private notFound(): ErrorException {
-    return new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Phiếu nhập không tồn tại' });
-  }
-
-  private wrongState(status?: ReceiptStatus): ErrorException {
-    return inventoryError(
-      ErrorCode.INVALID_DOCUMENT_STATE,
-      status ? `phiếu đang ở trạng thái ${status}` : 'phiếu vừa được người khác xử lý',
-    );
-  }
-
-  private invalidReference(detail: string): ErrorException {
-    return new ErrorException({ code: ErrorCode.INVALID_REFERENCE, message: `Tham chiếu không hợp lệ: ${detail}` });
-  }
-
-  private badRequest(message: string): ErrorException {
-    return new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message });
   }
 }

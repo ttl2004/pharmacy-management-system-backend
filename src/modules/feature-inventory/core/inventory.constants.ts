@@ -2,6 +2,12 @@
 export const MAX_DOCUMENT_LINES = 200;
 
 /**
+ * Số lượng tối đa của một dòng theo ĐƠN VỊ CƠ BẢN (viên, ml…). Gấp 10 lần giới hạn theo đơn vị nhập của phiếu nhập
+ * (1.000.000 hộp) vì một hộp có thể quy ra hàng chục viên; vẫn xa trần `int` của cột số lượng.
+ */
+export const MAX_BASE_QUANTITY = 10_000_000;
+
+/**
  * Hạn chót của một transaction kho. Prisma mặc định 5 s ≈ 45 câu lệnh qua pooler Tokyo (~100 ms/câu); các luồng kho
  * viết theo lô nên mỗi lần xác nhận chỉ tốn số câu lệnh cố định, 20 s là biên an toàn chứ không phải ngân sách.
  */

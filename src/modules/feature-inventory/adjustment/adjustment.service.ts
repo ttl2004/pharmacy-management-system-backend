@@ -9,19 +9,19 @@ import {
   StockRefType,
 } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
-import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { addDaysToDateOnly, vietnamDayStartUtc } from 'src/common/utils/date-only.util';
-import {
-  assertBranchInScope,
-  BranchScope,
-  resolveBranchScope,
-  scopedBranchFilter,
-} from 'src/modules/feature-auth/permission/branch-scope';
+import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { DocumentCodeService } from '../core/document-code.service';
-import { inventoryError } from '../core/inventory.error';
-import { branchWhere } from '../core/inventory-scope';
+import {
+  assertNoDuplicateBatches,
+  badRequest,
+  documentErrors,
+  invalidReference,
+  inventoryError,
+} from '../core/inventory.error';
+import { branchWhere, resolveWriteBranch } from '../core/inventory-scope';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { AUDIT_ENTITY, MAX_DOCUMENT_LINES } from '../core/inventory.constants';
 import { LedgerEntry, StockLedgerService } from '../core/stock-ledger.service';
@@ -77,6 +77,8 @@ interface StatusChange {
   lossValue?: number;
 }
 
+const errors = documentErrors('Phiếu điều chỉnh');
+
 /**
  * Chứng từ cho mọi thay đổi tồn KHÔNG đến từ nhập/bán/điều chuyển: kiểm kê, huỷ hàng, trả NCC, điều chỉnh khác.
  * DRAFT → CONFIRMED (ghi sổ kho) hoặc → CANCELLED. Phiếu đã xác nhận KHÔNG huỷ được — sai thì lập phiếu khác bù lại,
@@ -110,29 +112,29 @@ export class AdjustmentService {
 
   async getDetail(id: string, actor: RequestActor): Promise<AdjustmentDetail> {
     const adjustment = await this.adjustments.findDetail(id, branchWhere(resolveBranchScope(actor.user)));
-    if (!adjustment) throw this.notFound();
+    if (!adjustment) throw errors.notFound();
     return adjustment;
   }
 
   async create(dto: CreateAdjustmentRequest, actor: RequestActor): Promise<AdjustmentDetail> {
-    const branchId = this.resolveTargetBranch(resolveBranchScope(actor.user), dto.branchId);
+    const branchId = resolveWriteBranch(resolveBranchScope(actor.user), dto.branchId);
     const actorId = actor.user.userId;
     if (dto.items.length > MAX_DOCUMENT_LINES) {
       throw inventoryError(ErrorCode.DOCUMENT_LINE_LIMIT, `tối đa ${MAX_DOCUMENT_LINES} dòng`);
     }
     const batchIds = dto.items.map((item) => item.batchId);
-    this.assertNoDuplicateBatches(batchIds);
+    assertNoDuplicateBatches(batchIds);
     const draftLines = dto.items.map((item, index) => this.toDraftLine(dto.type, item, index));
     const isReturn = dto.type === AdjustmentType.RETURN_TO_SUPPLIER;
-    if (isReturn && !dto.supplierId) throw this.badRequest('Phiếu trả hàng phải chọn nhà cung cấp');
-    if (!isReturn && dto.supplierId) throw this.badRequest('Chỉ phiếu trả hàng mới chọn nhà cung cấp');
+    if (isReturn && !dto.supplierId) throw badRequest('Phiếu trả hàng phải chọn nhà cung cấp');
+    if (!isReturn && dto.supplierId) throw badRequest('Chỉ phiếu trả hàng mới chọn nhà cung cấp');
 
     return this.transactions.run(async ({ tx }) => {
       const branch = await this.adjustments.findBranch(tx, branchId);
-      if (!branch) throw this.invalidReference('chi nhánh không tồn tại');
+      if (!branch) throw invalidReference('chi nhánh không tồn tại');
       if (branch.status !== RecordStatus.ACTIVE) throw inventoryError(ErrorCode.BRANCH_INACTIVE);
       if (dto.supplierId && !(await this.adjustments.findSupplier(tx, dto.supplierId))) {
-        throw this.invalidReference('nhà cung cấp không tồn tại');
+        throw invalidReference('nhà cung cấp không tồn tại');
       }
 
       const batches = await this.adjustments.findBatches(tx, batchIds);
@@ -140,7 +142,7 @@ export class AdjustmentService {
       const items = draftLines.map((line, index) => {
         const batch = batchById.get(line.batchId);
         if (!batch || batch.branchId !== branchId) {
-          throw this.invalidReference(`dòng ${index + 1}: lô không thuộc chi nhánh`);
+          throw invalidReference(`dòng ${index + 1}: lô không thuộc chi nhánh`);
         }
         // Giá vốn chốt lúc xác nhận (giá lô lúc đó), nháp để 0.
         return {
@@ -196,8 +198,8 @@ export class AdjustmentService {
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
       const head = await this.adjustments.findHead(tx, id, branchWhere(scope));
-      if (!head) throw this.notFound();
-      if (head.status !== ReceiptStatus.DRAFT) throw this.wrongState(head.status);
+      if (!head) throw errors.notFound();
+      if (head.status !== ReceiptStatus.DRAFT) throw errors.wrongState(head.status);
 
       // Chiếm phiếu trước mọi việc khác: bấm đúp dừng ở đây với 1701.
       // Thứ tự khoá: bản ghi phiếu (stock_adjustments) → các lô theo id — cùng thứ tự với nhập/điều chuyển.
@@ -208,7 +210,7 @@ export class AdjustmentService {
         updatedAt: now,
         updatedBy: actorId,
       });
-      if (!claimed) throw this.wrongState();
+      if (!claimed) throw errors.wrongState();
 
       const items = await this.adjustments.findItems(tx, id);
       const batchIds = items.map((item) => item.batchId);
@@ -255,8 +257,8 @@ export class AdjustmentService {
 
     return this.transactions.run(async ({ tx }) => {
       const head = await this.adjustments.findHead(tx, id, branchWhere(scope));
-      if (!head) throw this.notFound();
-      if (head.status !== ReceiptStatus.DRAFT) throw this.wrongState(head.status);
+      if (!head) throw errors.notFound();
+      if (head.status !== ReceiptStatus.DRAFT) throw errors.wrongState(head.status);
       const claimed = await this.adjustments.transition(tx, id, ReceiptStatus.DRAFT, {
         status: ReceiptStatus.CANCELLED,
         cancelledAt: now,
@@ -265,7 +267,7 @@ export class AdjustmentService {
         updatedAt: now,
         updatedBy: actorId,
       });
-      if (!claimed) throw this.wrongState();
+      if (!claimed) throw errors.wrongState();
       await this.recordStatus(tx, actor, {
         adjustmentId: id,
         branchId: head.branchId,
@@ -288,18 +290,18 @@ export class AdjustmentService {
     const common = { batchId: item.batchId, reason: item.reason ?? null };
 
     if (type === AdjustmentType.STOCK_TAKE) {
-      if (item.actualQuantity === undefined) throw this.badRequest(`${label}: kiểm kê phải có actualQuantity`);
+      if (item.actualQuantity === undefined) throw badRequest(`${label}: kiểm kê phải có actualQuantity`);
       if (item.quantity !== undefined) {
-        throw this.badRequest(`${label}: kiểm kê không gửi quantity — server tự tính chênh lệch`);
+        throw badRequest(`${label}: kiểm kê không gửi quantity — server tự tính chênh lệch`);
       }
       return { ...common, actualQuantity: item.actualQuantity, quantity: 0 };
     }
 
-    if (item.actualQuantity !== undefined) throw this.badRequest(`${label}: actualQuantity chỉ dùng cho kiểm kê`);
-    if (item.quantity === undefined || item.quantity === 0) throw this.badRequest(`${label}: phải có quantity khác 0`);
+    if (item.actualQuantity !== undefined) throw badRequest(`${label}: actualQuantity chỉ dùng cho kiểm kê`);
+    if (item.quantity === undefined || item.quantity === 0) throw badRequest(`${label}: phải có quantity khác 0`);
     if (type === AdjustmentType.OTHER) return { ...common, actualQuantity: null, quantity: item.quantity };
     if (item.quantity < 0) {
-      throw this.badRequest(`${label}: huỷ/trả NCC nhập số dương — là số lượng đưa ra khỏi kho`);
+      throw badRequest(`${label}: huỷ/trả NCC nhập số dương — là số lượng đưa ra khỏi kho`);
     }
     return { ...common, actualQuantity: null, quantity: -item.quantity };
   }
@@ -322,43 +324,9 @@ export class AdjustmentService {
     ]);
   }
 
-  private assertNoDuplicateBatches(batchIds: readonly string[]): void {
-    if (new Set(batchIds).size !== batchIds.length) {
-      throw this.badRequest('Một lô chỉ được xuất hiện một lần trong phiếu');
-    }
-  }
-
-  private resolveTargetBranch(scope: BranchScope, requested: string | undefined): string {
-    if (scope.kind === 'BRANCH') {
-      assertBranchInScope(scope, requested ?? scope.branchId);
-      return scope.branchId;
-    }
-    if (!requested) throw this.badRequest('Cần chọn chi nhánh (branchId)');
-    return requested;
-  }
-
   private async mustFind(tx: Prisma.TransactionClient, id: string): Promise<AdjustmentDetail> {
     const adjustment = await this.adjustments.findDetail(id, {}, tx);
-    if (!adjustment) throw this.notFound();
+    if (!adjustment) throw errors.notFound();
     return adjustment;
-  }
-
-  private notFound(): ErrorException {
-    return new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Phiếu điều chỉnh không tồn tại' });
-  }
-
-  private wrongState(status?: ReceiptStatus): ErrorException {
-    return inventoryError(
-      ErrorCode.INVALID_DOCUMENT_STATE,
-      status ? `phiếu đang ở trạng thái ${status}` : 'phiếu vừa được người khác xử lý',
-    );
-  }
-
-  private invalidReference(detail: string): ErrorException {
-    return new ErrorException({ code: ErrorCode.INVALID_REFERENCE, message: `Tham chiếu không hợp lệ: ${detail}` });
-  }
-
-  private badRequest(message: string): ErrorException {
-    return new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message });
   }
 }

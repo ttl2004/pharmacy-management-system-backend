@@ -17,6 +17,7 @@ import {
 } from 'class-validator';
 import { IsDateOnly } from 'src/common/validators/is-date-only.validator';
 import { AbstractBaseQuery } from 'src/providers/abstract-base/abstract-base.query';
+import { MAX_BASE_QUANTITY } from '../../core/inventory.constants';
 
 /**
  * Dòng phiếu điều chỉnh, số lượng theo đơn vị cơ bản. Trường cần gửi tuỳ loại phiếu (kiểm ở service):
@@ -32,14 +33,14 @@ export class AdjustmentItemRequest {
   @IsOptional()
   @IsInt()
   @Min(0)
-  @Max(10_000_000)
+  @Max(MAX_BASE_QUANTITY)
   @ApiPropertyOptional({ description: 'STOCK_TAKE: số đếm thực tế' })
   actualQuantity?: number;
 
   @IsOptional()
   @IsInt()
-  @Min(-10_000_000)
-  @Max(10_000_000)
+  @Min(-MAX_BASE_QUANTITY)
+  @Max(MAX_BASE_QUANTITY)
   @ApiPropertyOptional({ description: 'DISPOSE/RETURN_TO_SUPPLIER: số đưa ra (> 0); OTHER: delta có dấu' })
   quantity?: number;
 

@@ -44,23 +44,29 @@ export class DbSessionStore extends SessionStore {
   ) {
     super();
   }
-  isActive(sid: string): Promise<boolean> {
-    return this.transactions.read(async () => {
-      if (this.revision !== this.transactions.revision) {
-        this.cache.clear();
-        this.revision = this.transactions.revision;
-      }
-      const now = Date.now();
-      if ((this.cache.get(sid) ?? 0) > now) return true;
-      this.cache.delete(sid);
-      const token = await this.prisma.refreshToken.findFirst({
-        where: { sid, revokedAt: null, expiresAt: { gt: new Date(now) } },
-      });
-      if (!token) return false;
-      if (this.cache.size >= 10000) this.cache.clear();
-      this.cache.set(sid, Math.min(now + 20000, token.expiresAt.getTime()));
-      return true;
+  /**
+   * Đọc thuần, KHÔNG xếp vào hàng đợi ghi: mọi request có token đều gọi hàm này, xếp hàng thì một
+   * transaction ghi chậm sẽ làm cả hệ thống đứng chờ. Đúng đắn nhờ `revision`: ghi xong là `revision`
+   * tăng, nên kết quả đọc trùng lúc với một lần thu hồi phiên không được đưa vào cache.
+   */
+  async isActive(sid: string): Promise<boolean> {
+    if (this.revision !== this.transactions.revision) {
+      this.cache.clear();
+      this.revision = this.transactions.revision;
+    }
+    const seen = this.revision;
+    const now = Date.now();
+    if ((this.cache.get(sid) ?? 0) > now) return true;
+    this.cache.delete(sid);
+    const token = await this.prisma.refreshToken.findFirst({
+      where: { sid, revokedAt: null, expiresAt: { gt: new Date(now) } },
     });
+    if (!token) return false;
+    // Có lần ghi nào commit trong lúc đang đọc thì không cache — có thể đó chính là lần thu hồi phiên này.
+    if (this.transactions.revision !== seen) return true;
+    if (this.cache.size >= 10000) this.cache.clear();
+    this.cache.set(sid, Math.min(now + 20000, token.expiresAt.getTime()));
+    return true;
   }
   activate(sid: string): Promise<void> {
     // Bản ghi refresh đã commit là nguồn xác nhận phiên; không cache trạng thái chưa commit.

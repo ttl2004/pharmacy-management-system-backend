@@ -284,3 +284,63 @@ describe('PermissionService — rào cấp bậc', () => {
     expect(replaceForRole).toHaveBeenCalledWith(expect.anything(), 'role-pm', expect.any(Array), 'admin-1');
   });
 });
+
+describe('PermissionService — cache quyền theo vai trò', () => {
+  function makeCachedService(granted: { current: string[] }) {
+    const findOne = jest
+      .fn()
+      .mockImplementation(({ code }: { code: string }) => Promise.resolve({ ...PHARMACY_MANAGER_ROLE, code }));
+    const findGrantedCodes = jest.fn().mockImplementation(() => Promise.resolve([...granted.current]));
+    const service = makeService({
+      roles: { findOne },
+      permissions: {
+        findAllOrdered: jest.fn().mockResolvedValue(PERMISSION_CODES.map((code) => ({ id: `id:${code}`, code }))),
+      },
+      rolePermissions: { findGrantedCodes, replaceForRole: jest.fn().mockResolvedValue(undefined) },
+    });
+    return { service, findGrantedCodes };
+  }
+
+  it('đọc DB một lần cho nhiều request cùng vai trò', async () => {
+    const { service, findGrantedCodes } = makeCachedService({ current: ['product:read'] });
+
+    await service.getGrantedCodes('SALES_STAFF');
+    await expect(service.getGrantedCodes('SALES_STAFF')).resolves.toEqual(new Set(['product:read']));
+
+    expect(findGrantedCodes).toHaveBeenCalledTimes(1);
+  });
+
+  it('caller sửa Set nhận được cũng không làm bẩn cache', async () => {
+    const { service } = makeCachedService({ current: ['product:read'] });
+
+    (await service.getGrantedCodes('SALES_STAFF')).add('branch:delete');
+
+    await expect(service.getGrantedCodes('SALES_STAFF')).resolves.toEqual(new Set(['product:read']));
+  });
+
+  it('sửa ma trận xong thì lần đọc sau thấy quyền mới, không đợi hết TTL', async () => {
+    const granted = { current: ['product:read'] };
+    const { service } = makeCachedService(granted);
+    await service.getGrantedCodes('PHARMACY_MANAGER');
+
+    granted.current = ['product:read', 'user:read'];
+    await service.replaceRolePermissions('PHARMACY_MANAGER', ['product:read', 'user:read'], SUPER_ADMIN);
+
+    await expect(service.getGrantedCodes('PHARMACY_MANAGER')).resolves.toEqual(new Set(['product:read', 'user:read']));
+  });
+
+  it('hết TTL thì đọc lại DB — phòng khi ma trận bị sửa từ tiến trình khác (script seed)', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service, findGrantedCodes } = makeCachedService({ current: ['product:read'] });
+      await service.getGrantedCodes('SALES_STAFF');
+
+      jest.advanceTimersByTime(31_000);
+      await service.getGrantedCodes('SALES_STAFF');
+
+      expect(findGrantedCodes).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});

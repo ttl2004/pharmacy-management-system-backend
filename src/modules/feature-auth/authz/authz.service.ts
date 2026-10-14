@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { TokenService, TokenMetadata } from './token.service';
 import { authError } from './auth.error';
 import * as bcrypt from 'bcrypt';
+import { SYSTEM_ACTOR_ID } from 'src/common/constants/app.constant';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
@@ -31,6 +32,31 @@ export class AuthzService extends AbstractBaseService<Auth> {
     super(authzRepository);
   }
 
+  /**
+   * Dòng `users` cho `SYSTEM_ACTOR_ID` — tác nhân ghi vào `createdBy`/`updatedBy` khi job/seed thao tác. Phải có
+   * thật để các cột người thao tác gắn được FK sang `users`. Không có `auths` và ở trạng thái INACTIVE nên không
+   * đăng nhập được; mang vai trò SUPER_ADMIN để luật 14 + rào cấp bậc chặn mọi API sửa/xoá nó.
+   */
+  async seedSystemActor() {
+    const existing = await this.prisma.user.findUnique({ where: { id: SYSTEM_ACTOR_ID }, select: { id: true } });
+    if (existing) {
+      this.authzLogger.log('Tác nhân hệ thống đã tồn tại');
+      return;
+    }
+
+    const superAdminRole = await this.requireSuperAdminRole();
+    await this.prisma.user.create({
+      data: {
+        id: SYSTEM_ACTOR_ID,
+        fullName: 'Hệ thống',
+        roleId: superAdminRole.id,
+        status: UserStatus.INACTIVE,
+        createdBy: SYSTEM_ACTOR_ID,
+      },
+    });
+    this.authzLogger.log('Đã tạo tác nhân hệ thống');
+  }
+
   async seedSuperAdmin() {
     const email = this.configService.get<string>('superAdmin.email');
     const username = this.configService.get<string>('superAdmin.username');
@@ -52,15 +78,7 @@ export class AuthzService extends AbstractBaseService<Auth> {
     this.authzLogger.log('Đang khởi tạo quản trị viên cấp cao...');
     const existingSuperAdmin = await this.userRepository.findByEmailIgnoringSoftDelete(email);
 
-    const superAdminRole = await this.prisma.role.findFirst({
-      where: { code: AuthRole.SUPER_ADMIN, isDeleted: false },
-    });
-    if (!superAdminRole) {
-      throw new ErrorException({
-        code: ErrorCode.ROLE_NOT_FOUND,
-        message: 'Chưa có vai trò SUPER_ADMIN trong DB. Chạy "npm run seed:permissions" trước.',
-      });
-    }
+    const superAdminRole = await this.requireSuperAdminRole();
 
     if (!existingSuperAdmin) {
       this.authzLogger.log('Chưa có quản trị viên cấp cao, đang tạo...');
@@ -130,5 +148,18 @@ export class AuthzService extends AbstractBaseService<Auth> {
     }
 
     return user;
+  }
+
+  private async requireSuperAdminRole() {
+    const role = await this.prisma.role.findFirst({
+      where: { code: AuthRole.SUPER_ADMIN, isDeleted: false },
+    });
+    if (!role) {
+      throw new ErrorException({
+        code: ErrorCode.ROLE_NOT_FOUND,
+        message: 'Chưa có vai trò SUPER_ADMIN trong DB. Chạy "npm run seed:permissions" trước.',
+      });
+    }
+    return role;
   }
 }

@@ -89,7 +89,7 @@ src/
 | Biến | Mô tả | Mặc định |
 |---|---|---|
 | `PORT` | Port HTTP server | `3000` |
-| `DATABASE_URL` | Chuỗi kết nối PostgreSQL, dạng `postgresql://user:password@host:5432/dbname`. Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`) | (bắt buộc) |
+| `DATABASE_URL` | Chuỗi kết nối PostgreSQL, dạng `postgresql://user:password@host:5432/dbname?connection_limit=10&pool_timeout=20`. Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`). Luôn đặt `connection_limit` — DB chỉ có 60 kết nối dùng chung | (bắt buộc) |
 | `DB_LOGGING` | In câu SQL ra log | `false` |
 | `JWT_ACCESS_SECRET` | Secret ký access JWT, tối thiểu 32 ký tự | (bắt buộc) |
 | `JWT_ACCESS_TTL` | Thời hạn access JWT | `15m` |
@@ -148,6 +148,11 @@ Thiết lập máy mới: `npm install` → `cp .env.example .env` → `npm run 
 
 Thứ tự này không tuỳ tiện: `seed:users` cần vai trò (do `seed:permissions` tạo) và chi nhánh (do
 `seed:catalog` tạo), còn `seed:super-admin` cần vai trò `SUPER_ADMIN` đã tồn tại.
+
+`seed:permissions` còn tạo **tác nhân hệ thống**: dòng `users` mang đúng id `SYSTEM_ACTOR_ID`
+(`src/common/constants/app.constant.ts`), tên "Hệ thống", trạng thái INACTIVE, không có tài khoản đăng nhập. Seed
+và job ghi id này vào `createdBy`/`updatedBy`; nó phải là người dùng thật để các cột người thao tác gắn được khoá
+ngoại sang `users` (bắt đầu từ nhóm bảng kho).
 
 Xem cấu hình tại: `src/common/configs/configuration.ts` và `src/common/databases/prisma.service.ts`.
 

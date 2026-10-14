@@ -17,9 +17,17 @@ import { RoleRepository } from './repositories/role.repository';
 import { PermissionRepository } from './repositories/permission.repository';
 import { RolePermissionRepository } from './repositories/role-permission.repository';
 
+/**
+ * Quyền của vai trò được cache trong bộ nhớ vì guard đọc nó ở MỌI request (2 lượt DB ~200 ms qua pooler).
+ * Mọi đường ghi ma trận trong tiến trình này đều xoá cache; TTL ngắn lo phần ghi từ tiến trình khác
+ * (script seed, instance thứ hai) — nhiều instance thật sự thì cần Redis.
+ */
+const GRANT_CACHE_TTL_MS = 30_000;
+
 @Injectable()
 export class PermissionService {
   private readonly logger = new Logger(PermissionService.name);
+  private readonly grantCache = new Map<string, { codes: Set<PermissionCode>; expiresAt: number }>();
 
   constructor(
     private readonly roles: RoleRepository,
@@ -32,11 +40,16 @@ export class PermissionService {
 
   /** Quyền đang có của một vai trò. Guard gọi hàm này ở mỗi request. */
   async getGrantedCodes(roleCode: string): Promise<Set<PermissionCode>> {
+    const cached = this.grantCache.get(roleCode);
+    // Trả bản sao: caller sửa Set cũng không làm bẩn cache.
+    if (cached && cached.expiresAt > Date.now()) return new Set(cached.codes);
+
     const role = await this.roles.findOne({ code: roleCode });
     if (!role) return new Set();
 
-    const codes = await this.rolePermissions.findGrantedCodes(role.id);
-    return new Set(codes as PermissionCode[]);
+    const codes = new Set((await this.rolePermissions.findGrantedCodes(role.id)) as PermissionCode[]);
+    this.grantCache.set(roleCode, { codes, expiresAt: Date.now() + GRANT_CACHE_TTL_MS });
+    return new Set(codes);
   }
 
   async getCatalog() {
@@ -90,9 +103,14 @@ export class PermissionService {
     assertGrantable(wanted, current, callerCodes);
 
     const permissionIds = wanted.map((code) => idByCode.get(code) as string);
-    await this.transactions.write(async (tx) => {
-      await this.rolePermissions.replaceForRole(tx, role.id, permissionIds, caller.userId);
-    });
+    try {
+      await this.transactions.write(async (tx) => {
+        await this.rolePermissions.replaceForRole(tx, role.id, permissionIds, caller.userId);
+      });
+    } finally {
+      // Xoá cả khi lỗi: không biết chắc transaction đã commit tới đâu.
+      this.grantCache.clear();
+    }
 
     return { role: this.toRoleView(role), permissionCodes: wanted };
   }
@@ -178,7 +196,11 @@ export class PermissionService {
       }
     }
 
-    await this.applyDefaultGrants();
+    try {
+      await this.applyDefaultGrants();
+    } finally {
+      this.grantCache.clear();
+    }
   }
 
   /**

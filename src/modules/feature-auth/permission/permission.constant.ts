@@ -49,6 +49,11 @@ export const PERMISSION_CATALOG = [
   { code: 'branch-product:read', name: 'Xem ngưỡng tồn theo chi nhánh', module: 'branch-product', sortOrder: 1 },
   { code: 'branch-product:update', name: 'Đặt ngưỡng tồn theo chi nhánh', module: 'branch-product', sortOrder: 2 },
   { code: 'audit-log:read', name: 'Xem nhật ký thao tác', module: 'audit-log', sortOrder: 1 },
+  { code: 'transfer:read', name: 'Xem phiếu điều chuyển', module: 'transfer', sortOrder: 1 },
+  { code: 'transfer:create', name: 'Lập phiếu điều chuyển (chi nhánh gửi)', module: 'transfer', sortOrder: 2 },
+  { code: 'transfer:ship', name: 'Xuất hàng điều chuyển (chi nhánh gửi)', module: 'transfer', sortOrder: 3 },
+  { code: 'transfer:receive', name: 'Nhận hàng điều chuyển (chi nhánh nhận)', module: 'transfer', sortOrder: 4 },
+  { code: 'transfer:cancel', name: 'Huỷ phiếu điều chuyển (chi nhánh gửi)', module: 'transfer', sortOrder: 5 },
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CATALOG)[number]['code'];

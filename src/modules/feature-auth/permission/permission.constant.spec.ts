@@ -165,6 +165,14 @@ describe('Danh mục quyền và mã lỗi', () => {
       const staff = grants(AuthRole.SALES_STAFF).filter((code) => /^(stock|branch-product|audit-log):/.test(code));
       expect(staff.sort()).toEqual(['branch-product:read', 'stock:read']);
     });
+
+    it('điều chuyển: PM có đủ 5 quyền (gửi/nhận do service ép theo chi nhánh); SALES_STAFF chỉ đọc', () => {
+      const all = ['transfer:read', 'transfer:create', 'transfer:ship', 'transfer:receive', 'transfer:cancel'];
+      expect(grants(AuthRole.ADMIN)).toEqual(expect.arrayContaining(all));
+      expect(grants(AuthRole.PHARMACY_MANAGER)).toEqual(expect.arrayContaining(all));
+      expect(grants(AuthRole.SALES_STAFF).filter((code) => code.startsWith('transfer:'))).toEqual(['transfer:read']);
+      expect(grants(AuthRole.CUSTOMER).filter((code) => code.startsWith('transfer:'))).toEqual([]);
+    });
   });
 
   it('danh mục quyền không có mã trùng nhau', () => {

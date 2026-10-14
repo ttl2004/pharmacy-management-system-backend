@@ -42,7 +42,7 @@ function makeIntake(lockedRows: LockedBatch[]) {
     findWithNonImportMovements: jest.fn().mockResolvedValue(new Set<string>()),
     resetDates: jest.fn(),
   };
-  const ledger = { apply: jest.fn().mockResolvedValue([]) };
+  const ledger = { apply: jest.fn().mockResolvedValue([]), lockBatches: jest.fn().mockResolvedValue(lockedRows) };
   const ctx: InventoryTxContext = { tx: {} as never, afterCommit: jest.fn() };
   return { intake: new StockIntakeService(batches as never, ledger as never), batches, ledger, ctx };
 }
@@ -149,6 +149,32 @@ describe('weightedAverageCost (K3)', () => {
 
   it('lô đang trống thì lấy giá lần đưa vào này', () => {
     expect(weightedAverageCost(0, 999, 10, 1_500)).toBe(1_500);
+  });
+});
+
+describe('StockIntakeService.returnToBatches', () => {
+  it('hoàn hàng về đúng lô: giá vốn bình quân lại với phần lô đang có, ghi sổ với lô đã khoá', async () => {
+    // Lô còn 10 viên giá 1200 (nhập thêm lúc hàng đi đường); 30 viên giá 900 quay về → (10×1200 + 30×900) / 40 = 975.
+    const rows = [locked({ quantityOnHand: 10, importPrice: 1200 })];
+    const { intake, batches, ledger, ctx } = makeIntake(rows);
+
+    await intake.returnToBatches(ctx, {
+      type: StockMovementType.TRANSFER_IN,
+      refType: StockRefType.STOCK_TRANSFER,
+      refId: 't1',
+      actorId: 'actor',
+      note: 'Hoàn hàng',
+      lines: [{ batchId: 'b1', quantity: 30, unitCost: 900, refItemId: 'i1' }],
+    });
+
+    expect(ledger.lockBatches).toHaveBeenCalledWith(ctx, ['b1']);
+    expect(batches.updateCosts).toHaveBeenCalledWith({}, [{ id: 'b1', importPrice: 975 }], 'actor');
+    expect(ledger.apply).toHaveBeenCalledWith(
+      ctx,
+      [expect.objectContaining({ batchId: 'b1', quantity: 30, unitCost: 900, type: 'TRANSFER_IN', note: 'Hoàn hàng' })],
+      'actor',
+      { preLocked: rows },
+    );
   });
 });
 

@@ -40,6 +40,24 @@ export interface IntakeResult {
   movements: AppliedMovement[];
 }
 
+/** Một dòng hàng quay về ĐÚNG lô cũ (đã biết id), số lượng theo đơn vị cơ bản. */
+export interface ReturnLine {
+  batchId: string;
+  quantity: number;
+  /** Giá vốn / đơn vị cơ bản của phần hàng quay về (giá đã chốt lúc hàng rời lô). */
+  unitCost: number;
+  refItemId: string;
+}
+
+export interface ReturnRequest {
+  type: StockMovementType;
+  refType: StockRefType;
+  refId: string;
+  lines: readonly ReturnLine[];
+  actorId: string;
+  note: string;
+}
+
 /**
  * Đưa hàng vào lô — MỘT thuật toán cho cả xác nhận phiếu nhập và nhận điều chuyển:
  * tạo lô còn thiếu → khoá mọi lô liên quan → kiểm hạn dùng / trạng thái → giá vốn bình quân → ghi sổ.
@@ -110,6 +128,45 @@ export class StockIntakeService {
     await this.batches.updateCosts(tx, costs, request.actorId);
     const movements = await this.ledger.apply(ctx, entries, request.actorId, { preLocked: locked });
     return { batchIdByRefItem, movements };
+  }
+
+  /**
+   * Hàng quay về đúng lô nó đã rời (vd. huỷ điều chuyển đang trên đường). Cũng là một lần "đưa thêm hàng vào lô" nên
+   * giá vốn phải bình quân lại: trong lúc hàng đi vắng, lô có thể đã nhận thêm hàng giá khác. Không kiểm trạng thái hay
+   * hạn dùng của lô — hàng của chính lô đó luôn phải về sổ, kể cả khi lô vừa bị khoá/thu hồi.
+   * Số câu lệnh cố định: khoá (1) + giá vốn (1) + sổ kho (2).
+   */
+  async returnToBatches(ctx: InventoryTxContext, request: ReturnRequest): Promise<AppliedMovement[]> {
+    if (!request.lines.length) return [];
+    const batchIds = request.lines.map((line) => line.batchId);
+    const locked = await this.ledger.lockBatches(ctx, batchIds);
+    const batchById = new Map(locked.map((batch) => [batch.id, batch]));
+
+    const costs = request.lines.map((line) => {
+      const batch = batchById.get(line.batchId);
+      if (!batch) throw new Error(`Không khoá được lô ${line.batchId} để hoàn hàng`);
+      return {
+        id: batch.id,
+        importPrice: weightedAverageCost(batch.quantityOnHand, batch.importPrice, line.quantity, line.unitCost),
+      };
+    });
+    await this.batches.updateCosts(ctx.tx, costs, request.actorId);
+
+    return this.ledger.apply(
+      ctx,
+      request.lines.map((line) => ({
+        batchId: line.batchId,
+        type: request.type,
+        quantity: line.quantity,
+        unitCost: line.unitCost,
+        refType: request.refType,
+        refId: request.refId,
+        refItemId: line.refItemId,
+        note: request.note,
+      })),
+      request.actorId,
+      { preLocked: locked },
+    );
   }
 
   /**

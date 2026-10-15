@@ -36,14 +36,19 @@ export class AdjustmentController {
 
   @RequirePermissions('stock-adjustment:create')
   @Post()
-  @ApiOperation({ description: 'Lập phiếu NHÁP. Kiểm kê gửi actualQuantity; huỷ/trả NCC gửi quantity dương.' })
+  @ApiOperation({
+    description:
+      'Lập phiếu NHÁP (chốt sổ sách lúc lập). Kiểm kê gửi actualQuantity; huỷ/trả NCC gửi quantity dương. 1711 lô đang có phiếu kiểm kê nháp.',
+  })
   create(@Body() dto: CreateAdjustmentRequest, @CurrentActor() actor: RequestActor) {
     return this.adjustmentService.create(dto, actor);
   }
 
   @RequirePermissions('stock-adjustment:confirm')
   @Post(':id/confirm')
-  @ApiOperation({ description: 'Xác nhận: chốt số sổ sách và ghi sổ kho (ADJUST / DISPOSE / RETURN_OUT).' })
+  @ApiOperation({
+    description: 'Xác nhận: chốt giá vốn, ghi chênh lệch đã chốt lúc lập vào sổ kho (ADJUST / DISPOSE / RETURN_OUT).',
+  })
   confirm(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
     return this.adjustmentService.confirm(id, actor);
   }

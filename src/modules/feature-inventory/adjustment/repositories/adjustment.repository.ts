@@ -4,6 +4,13 @@ import { PrismaService } from 'src/common/databases/prisma.service';
 
 const USER_BRIEF = { select: { id: true, fullName: true } } as const;
 
+/** Lô dùng để lập dòng phiếu nháp. */
+export interface DraftBatch {
+  id: string;
+  productId: string;
+  quantityOnHand: number;
+}
+
 const ADJUSTMENT_LIST_SELECT = {
   id: true,
   code: true,
@@ -97,11 +104,40 @@ export class AdjustmentRepository {
     return tx.supplier.findFirst({ where: { id, isDeleted: false }, select: { id: true } });
   }
 
-  findBatches(tx: Prisma.TransactionClient, ids: readonly string[]) {
+  /** Lô của chi nhánh — lô chi nhánh khác coi như không tồn tại. */
+  findBatches(tx: Prisma.TransactionClient, branchId: string, ids: readonly string[]): Promise<DraftBatch[]> {
     return tx.stockBatch.findMany({
-      where: { id: { in: [...ids] }, isDeleted: false },
-      select: { id: true, branchId: true, productId: true, batchNumber: true, quantityOnHand: true },
+      where: { id: { in: [...ids] }, branchId, isDeleted: false },
+      select: { id: true, productId: true, quantityOnHand: true },
     });
+  }
+
+  /**
+   * Như `findBatches` nhưng khoá `FOR UPDATE` (thứ tự `id`, như mọi chỗ khoá lô): hai lần lập phiếu kiểm kê cùng lô
+   * chạy nối tiếp. Lọc chi nhánh ngay trong câu khoá — không ai giữ được khoá lô của chi nhánh khác.
+   */
+  lockBatches(tx: Prisma.TransactionClient, branchId: string, ids: readonly string[]): Promise<DraftBatch[]> {
+    if (!ids.length) return Promise.resolve([]);
+    return tx.$queryRaw<DraftBatch[]>(Prisma.sql`
+      SELECT "id", "productId", "quantityOnHand"
+      FROM "stock_batches"
+      WHERE "id" IN (${Prisma.join(ids.map((id) => Prisma.sql`${id}::uuid`))})
+        AND "branchId" = ${branchId}::uuid AND "isDeleted" = false
+      ORDER BY "id"
+      FOR UPDATE`);
+  }
+
+  /** Một dòng kiểm kê thuộc phiếu nháp đang giữ một trong các lô (nếu có). */
+  async findPendingStockTake(tx: Prisma.TransactionClient, batchIds: readonly string[]) {
+    const item = await tx.stockAdjustmentItem.findFirst({
+      where: {
+        batchId: { in: [...batchIds] },
+        isDeleted: false,
+        adjustment: { type: AdjustmentType.STOCK_TAKE, status: ReceiptStatus.DRAFT, isDeleted: false },
+      },
+      select: { batch: { select: { batchNumber: true } }, adjustment: { select: { code: true } } },
+    });
+    return item ? { batchNumber: item.batch.batchNumber, code: item.adjustment.code } : null;
   }
 
   createHeader(tx: Prisma.TransactionClient, data: Prisma.StockAdjustmentUncheckedCreateInput) {

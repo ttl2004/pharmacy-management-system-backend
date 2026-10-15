@@ -23,7 +23,11 @@ export class BatchStatusController {
   }
 
   @Patch(':id/status')
-  @ApiOperation({ description: 'Khoá (QUARANTINE), thu hồi (RECALLED) hoặc mở lại (AVAILABLE) một lô.' })
+  @ApiOperation({
+    description:
+      'Khoá (QUARANTINE), thu hồi (RECALLED) hoặc mở lại (AVAILABLE) một lô. ' +
+      '1712 PM gỡ/hạ mức lô đã thu hồi (chỉ ADMIN) · 1006 lô vừa bị người khác đổi trạng thái.',
+  })
   setStatus(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: UpdateBatchStatusRequest,

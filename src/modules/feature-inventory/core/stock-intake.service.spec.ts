@@ -2,8 +2,7 @@ import { BatchStatus, StockMovementType, StockRefType } from '@prisma/client';
 import { ErrorCode } from 'src/common/types/error-code';
 import { parseDateOnly } from 'src/common/utils/date-only.util';
 import type { InventoryTxContext } from './inventory-transactions';
-import { NewBatchRow, StockBatchRepository } from './stock-batch.repository';
-import type { LockedBatch } from './stock-ledger.repository';
+import { IntakeBatch, NewBatchRow, StockBatchRepository } from './stock-batch.repository';
 import { IntakeLine, StockIntakeService, weightedAverageCost } from './stock-intake.service';
 
 const EXPIRY = parseDateOnly('2028-01-31');
@@ -21,7 +20,7 @@ const line = (overrides: Partial<IntakeLine> = {}): IntakeLine => ({
   ...overrides,
 });
 
-const locked = (overrides: Partial<LockedBatch> = {}): LockedBatch => ({
+const locked = (overrides: Partial<IntakeBatch> = {}): IntakeBatch => ({
   id: 'b1',
   branchId: 'br',
   productId: 'p1',
@@ -31,20 +30,26 @@ const locked = (overrides: Partial<LockedBatch> = {}): LockedBatch => ({
   reservedQuantity: 0,
   importPrice: 1000,
   status: BatchStatus.AVAILABLE,
+  recallReason: null,
+  recalledBy: null,
   ...overrides,
 });
 
-function makeIntake(lockedRows: LockedBatch[]) {
+function makeIntake(lockedRows: IntakeBatch[]) {
   const batches = {
+    lockBatchNumbers: jest.fn(),
     insertSkipExisting: jest.fn().mockResolvedValue({ count: 0 }),
     lockByKey: jest.fn().mockResolvedValue(lockedRows),
+    markRecalled: jest.fn(),
     updateCosts: jest.fn(),
     findWithNonImportMovements: jest.fn().mockResolvedValue(new Set<string>()),
     resetDates: jest.fn(),
   };
   const ledger = { apply: jest.fn().mockResolvedValue([]), lockBatches: jest.fn().mockResolvedValue(lockedRows) };
   const ctx: InventoryTxContext = { tx: {} as never, afterCommit: jest.fn() };
-  return { intake: new StockIntakeService(batches as never, ledger as never), batches, ledger, ctx };
+  const audit = { record: jest.fn() };
+  const intake = new StockIntakeService(batches as never, ledger as never, audit as never);
+  return { intake, batches, ledger, audit, ctx };
 }
 
 const request = (lines: IntakeLine[]) => ({
@@ -127,10 +132,69 @@ describe('StockIntakeService', () => {
     expect(batches.findWithNonImportMovements).not.toHaveBeenCalled();
   });
 
-  it.each([BatchStatus.QUARANTINE, BatchStatus.RECALLED])('lô %s → 1704', async (status) => {
-    const { intake, ctx } = makeIntake([locked({ status })]);
+  it('lô đang cách ly → 1704', async () => {
+    const { intake, ctx } = makeIntake([locked({ status: BatchStatus.QUARANTINE })]);
     await expect(intake.intake(ctx, request([line()]))).rejects.toMatchObject({
       errorCode: ErrorCode.BATCH_NOT_AVAILABLE,
+    });
+  });
+
+  it('lô đã thu hồi vẫn nhận hàng (tồn đúng thực tế), không đổi trạng thái', async () => {
+    const { intake, batches, ledger, ctx } = makeIntake([locked({ status: BatchStatus.RECALLED })]);
+    await intake.intake(ctx, request([line()]));
+    expect(ledger.apply).toHaveBeenCalled();
+    expect(batches.markRecalled).not.toHaveBeenCalled();
+  });
+
+  it('khoá số lô TRƯỚC khi tạo lô, để thu hồi theo số lô chạy nối tiếp với lần đưa hàng vào', async () => {
+    const { intake, batches, ctx } = makeIntake([locked()]);
+    await intake.intake(ctx, request([line()]));
+    expect(batches.lockBatchNumbers).toHaveBeenCalledWith({}, [{ productId: 'p1', batchNumber: 'L1' }]);
+    expect(batches.lockBatchNumbers.mock.invocationCallOrder[0]).toBeLessThan(
+      batches.insertSkipExisting.mock.invocationCallOrder[0],
+    );
+  });
+
+  describe('lô vừa tạo thừa hưởng thu hồi của cùng số lô ở chi nhánh khác', () => {
+    /** lockByKey trả về đúng id mà intake vừa sinh cho lô mới — tức là lô được tạo ở lần này. */
+    function intakeCreating(overrides: Partial<IntakeBatch>) {
+      const setup = makeIntake([]);
+      setup.batches.lockByKey.mockImplementation(() => {
+        const [, rows] = setup.batches.insertSkipExisting.mock.calls[0] as [unknown, NewBatchRow[]];
+        return Promise.resolve([locked({ id: rows[0].id, quantityOnHand: 0, ...overrides })]);
+      });
+      return setup;
+    }
+
+    it('cùng số lô bị thu hồi nơi khác → lô mới RECALLED, cùng lý do và người thu hồi, có nhật ký; hàng vẫn vào sổ', async () => {
+      const { intake, batches, ledger, audit, ctx } = intakeCreating({ recallReason: 'QĐ 9/QLD', recalledBy: 'admin' });
+      await intake.intake(ctx, request([line()]));
+      const [, rows] = batches.insertSkipExisting.mock.calls[0] as [unknown, NewBatchRow[]];
+      expect(batches.markRecalled).toHaveBeenCalledWith(
+        {},
+        [{ id: rows[0].id, reason: 'QĐ 9/QLD', recalledBy: 'admin' }],
+        'actor',
+      );
+      const [, entries] = audit.record.mock.calls[0] as [unknown, Record<string, unknown>[]];
+      expect(entries[0]).toMatchObject({
+        entityId: rows[0].id,
+        before: { status: 'AVAILABLE' },
+        after: { status: 'RECALLED' },
+        reason: 'QĐ 9/QLD',
+      });
+      expect(ledger.apply).toHaveBeenCalled();
+    });
+
+    it('không có thu hồi nào → không đổi trạng thái', async () => {
+      const { intake, batches, ctx } = intakeCreating({});
+      await intake.intake(ctx, request([line()]));
+      expect(batches.markRecalled).not.toHaveBeenCalled();
+    });
+
+    it('lô ĐÃ CÓ từ trước giữ trạng thái của nó dù nơi khác đã thu hồi', async () => {
+      const { intake, batches, ctx } = makeIntake([locked({ recallReason: 'QĐ 9/QLD', recalledBy: 'admin' })]);
+      await intake.intake(ctx, request([line()]));
+      expect(batches.markRecalled).not.toHaveBeenCalled();
     });
   });
 

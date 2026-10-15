@@ -1,11 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import { BatchStatus, StockMovementType, StockRefType } from '@prisma/client';
+import { AuditAction, BatchStatus, StockMovementType, StockRefType } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { ErrorCode } from 'src/common/types/error-code';
 import { toDateOnlyString } from 'src/common/utils/date-only.util';
+import { CHAIN_WIDE_ROLES } from 'src/modules/feature-auth/permission/branch-scope';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { inventoryError } from './inventory.error';
 import type { InventoryTxContext } from './inventory-transactions';
-import { StockBatchRepository } from './stock-batch.repository';
+import { AUDIT_ENTITY } from './inventory.constants';
+import { IntakeBatch, StockBatchRepository } from './stock-batch.repository';
 import type { LockedBatch } from './stock-ledger.repository';
 import { AppliedMovement, StockLedgerService } from './stock-ledger.service';
 
@@ -60,10 +63,12 @@ export interface ReturnRequest {
 
 /**
  * Đưa hàng vào lô — MỘT thuật toán cho cả xác nhận phiếu nhập và nhận điều chuyển:
- * tạo lô còn thiếu → khoá mọi lô liên quan → kiểm hạn dùng / trạng thái → giá vốn bình quân → ghi sổ.
+ * khoá số lô → tạo lô còn thiếu → khoá mọi lô liên quan → kiểm hạn dùng / trạng thái → giá vốn bình quân → ghi sổ.
  *
- * Luật K3 nằm DUY NHẤT ở đây: cùng số lô khác hạn dùng → 1703; lô đang khoá/thu hồi → 1704; cùng số lô khác giá →
- * gộp, giá vốn bình quân gia quyền. Số câu lệnh cố định: tạo (1) + khoá (1) + giá vốn (1) + sổ kho (2).
+ * Luật K3 nằm DUY NHẤT ở đây: cùng số lô khác hạn dùng → 1703; lô đang cách ly → 1704; cùng số lô khác giá →
+ * gộp, giá vốn bình quân gia quyền. Lô bị thu hồi vẫn nhận hàng và giữ RECALLED; lô vừa tạo thừa hưởng thu hồi của
+ * cùng số lô ở chi nhánh khác (`inheritRecalls`). Số câu lệnh cố định: khoá số lô (1) + tạo (1) + khoá lô (1) +
+ * giá vốn (1) + sổ kho (2).
  * Lô trống chỉ từng nhận hàng từ phiếu đã huỷ thì được nhận hạn mới (sửa sai nhập liệu) — xem `reconcileExpiry`.
  * Caller phải đảm bảo mỗi (sản phẩm, số lô) chỉ xuất hiện một lần trong `lines`.
  */
@@ -72,41 +77,40 @@ export class StockIntakeService {
   constructor(
     private readonly batches: StockBatchRepository,
     private readonly ledger: StockLedgerService,
+    private readonly audit: AuditLogService,
   ) {}
 
   async intake(ctx: InventoryTxContext, request: IntakeRequest): Promise<IntakeResult> {
     const { tx } = ctx;
     if (!request.lines.length) return { batchIdByRefItem: new Map(), movements: [] };
 
-    await this.batches.insertSkipExisting(
-      tx,
-      request.lines.map((line) => ({
-        id: randomUUID(),
-        branchId: request.branchId,
-        productId: line.productId,
-        batchNumber: line.batchNumber,
-        manufacturingDate: line.manufacturingDate,
-        expiryDate: line.expiryDate,
-        importPrice: line.unitCost,
-        supplierId: line.supplierId,
-        goodsReceiptItemId: line.goodsReceiptItemId,
-        createdBy: request.actorId,
-      })),
-    );
-    const locked = await this.batches.lockByKey(
-      tx,
-      request.branchId,
-      request.lines.map((line) => ({ productId: line.productId, batchNumber: line.batchNumber })),
-    );
+    const keys = request.lines.map((line) => ({ productId: line.productId, batchNumber: line.batchNumber }));
+    await this.batches.lockBatchNumbers(tx, keys);
+    const newRows = request.lines.map((line) => ({
+      id: randomUUID(),
+      branchId: request.branchId,
+      productId: line.productId,
+      batchNumber: line.batchNumber,
+      manufacturingDate: line.manufacturingDate,
+      expiryDate: line.expiryDate,
+      importPrice: line.unitCost,
+      supplierId: line.supplierId,
+      goodsReceiptItemId: line.goodsReceiptItemId,
+      createdBy: request.actorId,
+    }));
+    await this.batches.insertSkipExisting(tx, newRows);
+    const locked = await this.batches.lockByKey(tx, request.branchId, keys, CHAIN_WIDE_ROLES);
     const batchByKey = new Map(locked.map((batch) => [`${batch.productId}|${batch.batchNumber}`, batch]));
     await this.reconcileExpiry(tx, request, batchByKey);
+    await this.inheritRecalls(tx, locked, new Set(newRows.map((row) => row.id)), request.actorId);
 
     const costs: { id: string; importPrice: number }[] = [];
     const batchIdByRefItem = new Map<string, string>();
     const entries = request.lines.map((line) => {
       const batch = batchByKey.get(`${line.productId}|${line.batchNumber}`);
       if (!batch) throw new Error(`Không khoá được lô ${line.batchNumber} vừa tạo`);
-      if (batch.status !== BatchStatus.AVAILABLE) {
+      // Lô thu hồi vẫn nhận hàng (tồn phải đúng thực tế) và không bán được; chỉ lô đang cách ly mới từ chối.
+      if (batch.status === BatchStatus.QUARANTINE) {
         throw inventoryError(ErrorCode.BATCH_NOT_AVAILABLE, `lô ${line.batchNumber} đang ${batch.status}`);
       }
       costs.push({
@@ -166,6 +170,46 @@ export class StockIntakeService {
       })),
       request.actorId,
       { preLocked: locked },
+    );
+  }
+
+  /**
+   * Thu hồi gắn với SỐ LÔ chứ không với từng dòng lô: lô VỪA TẠO ở chi nhánh này mà cùng số lô đã bị ADMIN thu hồi ở
+   * chi nhánh khác (vd. nhận điều chuyển đang trên đường lúc thu hồi) thì cũng bị thu hồi, cùng lý do và người thu hồi.
+   * Lô đã có từ trước giữ trạng thái của nó — thu hồi lô đó là quyết định riêng. Thêm 2 câu lệnh (đổi trạng thái +
+   * nhật ký), chỉ khi có lô phải thu hồi.
+   */
+  private async inheritRecalls(
+    tx: InventoryTxContext['tx'],
+    locked: readonly IntakeBatch[],
+    createdIds: ReadonlySet<string>,
+    actorId: string,
+  ): Promise<void> {
+    const recalls = locked.flatMap((batch) =>
+      createdIds.has(batch.id) && batch.recallReason && batch.recalledBy
+        ? [{ batch, reason: batch.recallReason, recalledBy: batch.recalledBy }]
+        : [],
+    );
+    if (!recalls.length) return;
+
+    await this.batches.markRecalled(
+      tx,
+      recalls.map(({ batch, reason, recalledBy }) => ({ id: batch.id, reason, recalledBy })),
+      actorId,
+    );
+    await this.audit.record(
+      tx,
+      recalls.map(({ batch, reason }) => ({
+        actorId,
+        action: AuditAction.STATUS_CHANGE,
+        entityType: AUDIT_ENTITY.STOCK_BATCH,
+        entityId: batch.id,
+        branchId: batch.branchId,
+        before: { status: batch.status },
+        // Người nhận hàng không chủ động thu hồi: ghi rõ đây là thừa hưởng quyết định của ai.
+        after: { status: BatchStatus.RECALLED, inheritedRecallBy: batch.recalledBy },
+        reason,
+      })),
     );
   }
 

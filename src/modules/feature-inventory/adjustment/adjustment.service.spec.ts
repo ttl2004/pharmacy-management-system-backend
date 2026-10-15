@@ -14,9 +14,9 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
   const repository = {
     findBranch: jest.fn().mockResolvedValue({ id: A, status: RecordStatus.ACTIVE }),
     findSupplier: jest.fn().mockResolvedValue({ id: 's1' }),
-    findBatches: jest
-      .fn()
-      .mockResolvedValue([{ id: 'b1', branchId: A, productId: 'p1', batchNumber: 'L1', quantityOnHand: 50 }]),
+    findBatches: jest.fn().mockResolvedValue([{ id: 'b1', productId: 'p1', quantityOnHand: 50 }]),
+    lockBatches: jest.fn().mockResolvedValue([{ id: 'b1', productId: 'p1', quantityOnHand: 50 }]),
+    findPendingStockTake: jest.fn().mockResolvedValue(null),
     createHeader: jest.fn().mockResolvedValue({ id: 'adj1' }),
     createItems: jest.fn(),
     findDetail: jest.fn().mockResolvedValue({ id: 'adj1' }),
@@ -130,13 +130,52 @@ describe('AdjustmentService — lập phiếu', () => {
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
   });
 
-  it('lô không thuộc chi nhánh → 1602', async () => {
-    const { service } = makeService({
-      findBatches: jest.fn().mockResolvedValue([{ id: 'b1', branchId: 'khac', productId: 'p1', batchNumber: 'L1' }]),
-    });
+  it('lô không thuộc chi nhánh (truy vấn lọc theo chi nhánh, không thấy lô) → 1602', async () => {
+    const { service, repository } = makeService({ findBatches: jest.fn().mockResolvedValue([]) });
     await expect(service.create(create('DISPOSE', { quantity: 1 }) as never, PM_A)).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_REFERENCE,
     });
+    expect(repository.findBatches).toHaveBeenCalledWith(expect.anything(), A, ['b1']);
+  });
+});
+
+describe('AdjustmentService — mỗi lô một phiếu kiểm kê nháp', () => {
+  it('kiểm kê khoá lô của chi nhánh mình trước khi kiểm phiếu nháp, để hai lần lập cùng lúc chạy nối tiếp', async () => {
+    const { service, repository } = makeService();
+    await service.create(create('STOCK_TAKE', { actualQuantity: 47 }) as never, PM_A);
+    expect(repository.lockBatches).toHaveBeenCalledWith(expect.anything(), A, ['b1']);
+    expect(repository.findBatches).not.toHaveBeenCalled();
+    expect(repository.lockBatches.mock.invocationCallOrder[0]).toBeLessThan(
+      repository.findPendingStockTake.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('lô chi nhánh khác đang có phiếu kiểm kê nháp → vẫn 1602, không lộ phiếu của họ (1711)', async () => {
+    const { service, repository } = makeService({
+      lockBatches: jest.fn().mockResolvedValue([]),
+      findPendingStockTake: jest.fn().mockResolvedValue({ batchNumber: 'L1', code: 'DCK000009' }),
+    });
+    await expect(service.create(create('STOCK_TAKE', { actualQuantity: 1 }) as never, PM_A)).rejects.toMatchObject({
+      errorCode: ErrorCode.INVALID_REFERENCE,
+    });
+    expect(repository.findPendingStockTake).not.toHaveBeenCalled();
+  });
+
+  it('lô đang có phiếu kiểm kê nháp → 1711, không tạo phiếu', async () => {
+    const { service, repository } = makeService({
+      findPendingStockTake: jest.fn().mockResolvedValue({ batchNumber: 'L1', code: 'DCK000001' }),
+    });
+    await expect(service.create(create('STOCK_TAKE', { actualQuantity: 47 }) as never, PM_A)).rejects.toMatchObject({
+      errorCode: ErrorCode.STOCK_TAKE_PENDING,
+    });
+    expect(repository.createHeader).not.toHaveBeenCalled();
+  });
+
+  it('phiếu huỷ hàng chỉ đọc lô (không khoá) và không bị chặn bởi phiếu kiểm kê nháp', async () => {
+    const { service, repository } = makeService();
+    await service.create(create('DISPOSE', { quantity: 5 }) as never, PM_A);
+    expect(repository.lockBatches).not.toHaveBeenCalled();
+    expect(repository.findPendingStockTake).not.toHaveBeenCalled();
   });
 });
 

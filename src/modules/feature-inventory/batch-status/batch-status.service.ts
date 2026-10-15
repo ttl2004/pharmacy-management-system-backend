@@ -5,10 +5,12 @@ import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import { badRequest, inventoryError } from '../core/inventory.error';
 import { InventoryEvents } from '../core/inventory-events';
 import { branchWhere } from '../core/inventory-scope';
 import { InventoryTransactions, InventoryTxContext } from '../core/inventory-transactions';
 import { AUDIT_ENTITY } from '../core/inventory.constants';
+import { StockBatchRepository } from '../core/stock-batch.repository';
 import { RecallBatchRequest, UpdateBatchStatusRequest } from './dtos/batch-status.request';
 
 const BATCH_STATUS_SELECT = {
@@ -41,6 +43,7 @@ const BLOCKING_RANK: Record<BatchStatus, number> = {
 export class BatchStatusService {
   constructor(
     private readonly transactions: InventoryTransactions,
+    private readonly batches: StockBatchRepository,
     private readonly events: InventoryEvents,
     private readonly audit: AuditLogService,
   ) {}
@@ -48,35 +51,44 @@ export class BatchStatusService {
   async setStatus(id: string, dto: UpdateBatchStatusRequest, actor: RequestActor) {
     // Khoá/thu hồi bắt buộc lý do (DB cũng có CHECK); mở khoá thì xoá lý do cũ — lịch sử nằm ở nhật ký.
     const isBlocking = dto.status !== BatchStatus.AVAILABLE;
-    if (isBlocking && !dto.reason) {
-      throw new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message: 'Khoá hoặc thu hồi lô phải có lý do' });
-    }
-    const blockedReason = isBlocking ? (dto.reason ?? null) : null;
+    if (isBlocking && !dto.reason) throw badRequest('Khoá hoặc thu hồi lô phải có lý do');
+    const scope = resolveBranchScope(actor.user);
     const actorId = actor.user.userId;
-    const now = new Date();
+    const blocked = {
+      blockedReason: isBlocking ? (dto.reason ?? null) : null,
+      blockedAt: isBlocking ? new Date() : null,
+      blockedBy: isBlocking ? actorId : null,
+    };
 
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
       const batch = await tx.stockBatch.findFirst({
-        where: { id, isDeleted: false, ...branchWhere(resolveBranchScope(actor.user)) },
+        where: { id, isDeleted: false, ...branchWhere(scope) },
         select: BATCH_STATUS_SELECT,
       });
       if (!batch) throw new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Lô hàng không tồn tại' });
       // Đã ở đúng trạng thái: không ghi gì, không phát sự kiện (bấm lại không sinh nhật ký rác).
       if (batch.status === dto.status) return batch;
+      // Thu hồi là quyết định pháp lý của cả chuỗi: chỉ người có phạm vi toàn chuỗi (ADMIN) được gỡ hoặc hạ mức.
+      if (batch.status === BatchStatus.RECALLED && scope.kind !== 'ALL') {
+        throw inventoryError(ErrorCode.RECALL_ADMIN_ONLY);
+      }
+      // Thu hồi lẻ cũng giữ khoá số lô như thu hồi theo số lô: lô cùng số đang được tạo ở chi nhánh khác hoặc thấy
+      // quyết định này (thừa hưởng), hoặc đã tạo xong trước nó — không có kết quả tuỳ thời điểm.
+      if (dto.status === BatchStatus.RECALLED) await this.batches.lockBatchNumbers(tx, [batch]);
 
-      const updated = await tx.stockBatch.update({
-        where: { id },
-        data: {
-          status: dto.status,
-          blockedReason,
-          blockedAt: isBlocking ? now : null,
-          blockedBy: isBlocking ? actorId : null,
-          updatedAt: now,
-          updatedBy: actorId,
-        },
-        select: BATCH_STATUS_SELECT,
+      // Chỉ ghi khi lô vẫn ở trạng thái vừa đọc: request khác (vd. thu hồi theo số lô) đổi xen giữa thì báo lại,
+      // không ghi đè — ghi đè có thể hạ một lô vừa bị thu hồi xuống cách ly.
+      const { count } = await tx.stockBatch.updateMany({
+        where: { id, status: batch.status, isDeleted: false },
+        data: { status: dto.status, ...blocked, updatedAt: new Date(), updatedBy: actorId },
       });
+      if (!count) {
+        throw new ErrorException({
+          code: ErrorCode.HTTP_CONFLICT,
+          message: 'Lô vừa được người khác đổi trạng thái, hãy tải lại rồi thử lại',
+        });
+      }
       await this.audit.record(tx, [
         {
           actorId,
@@ -91,30 +103,26 @@ export class BatchStatusService {
         },
       ]);
       this.emitAfterCommit(ctx, [batch.branchId], batch.productId);
-      return updated;
+      return { ...batch, status: dto.status, ...blocked };
     });
   }
 
   /**
    * Thu hồi theo SỐ LÔ: mọi lô cùng (sản phẩm, số lô) trong phạm vi của người gọi — ADMIN khoá cả chuỗi trong một
    * lần, PM chỉ khoá được ở chi nhánh mình. Không lô nào khớp → 1600.
+   * Giữ khoá số lô (`lockBatchNumbers`) nên lô cùng số được tạo đồng thời hoặc nằm trong lần thu hồi này, hoặc thừa
+   * hưởng nó khi tạo (`StockIntakeService`). Các lô khớp bị khoá dòng: đổi trạng thái lẻ chạy xen giữa không lọt.
    */
   async recall(dto: RecallBatchRequest, actor: RequestActor) {
+    const scope = resolveBranchScope(actor.user);
     const actorId = actor.user.userId;
     const now = new Date();
 
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
-      const matched = await tx.stockBatch.findMany({
-        where: {
-          productId: dto.productId,
-          batchNumber: dto.batchNumber,
-          isDeleted: false,
-          ...branchWhere(resolveBranchScope(actor.user)),
-        },
-        select: { id: true, branchId: true, status: true },
-        orderBy: { id: 'asc' },
-      });
+      const key = { productId: dto.productId, batchNumber: dto.batchNumber };
+      await this.batches.lockBatchNumbers(tx, [key]);
+      const matched = await this.batches.lockByBatchNumber(tx, key, scope.kind === 'ALL' ? undefined : scope.branchId);
       if (!matched.length) {
         throw new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Không có lô nào khớp để thu hồi' });
       }

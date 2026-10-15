@@ -38,9 +38,11 @@ function makeService(overrides: {
   const permissions = { ...overrides.permissions } as never;
   const rolePermissions = { ...overrides.rolePermissions } as never;
   const users = { findByIdWithRole: jest.fn(), update: jest.fn(), ...overrides.users } as never;
-  const transactions = { write: jest.fn((work: (tx: unknown) => unknown) => work({})) } as never;
+  const prisma = {
+    $transaction: jest.fn((work: (tx: unknown) => unknown) => work({ $executeRaw: jest.fn() })),
+  } as never;
   const userService = { assertBranchRule: jest.fn().mockResolvedValue(undefined), ...overrides.userService } as never;
-  return new PermissionService(roles, permissions, rolePermissions, users, transactions, userService);
+  return new PermissionService(roles, permissions, rolePermissions, users, prisma, userService);
 }
 
 const PHARMACY_MANAGER_ROLE = { id: 'role-pm', code: 'PHARMACY_MANAGER', level: 60 };

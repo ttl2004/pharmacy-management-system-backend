@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuthzModule } from '../feature-auth/authz/authz.module';
 import { PermissionModule } from '../feature-auth/permission/permission.module';
+import { CatalogTransactions } from './catalog-transactions';
 import { CategoryController } from './category/category.controller';
 import { CategoryService } from './category/category.service';
 import { CategoryRepository } from './category/repositories/category.repository';
@@ -18,6 +19,7 @@ import { ProductRepository } from './product/repositories/product.repository';
   imports: [PermissionModule, AuthzModule],
   controllers: [CategoryController, ManufacturerController, UnitController, ProductController],
   providers: [
+    CatalogTransactions,
     CategoryService,
     CategoryRepository,
     ManufacturerService,

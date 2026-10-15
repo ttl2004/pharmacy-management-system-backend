@@ -5,7 +5,7 @@ import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
-import { SessionTransactions } from '../../feature-auth/authz/session.store';
+import { CatalogTransactions, productWriteLocks } from '../catalog-transactions';
 import { CreateProductRequest, ProductUnitRequest, UpdateProductRequest } from './dtos/product.request';
 import { ProductQuery } from './dtos/product.query';
 import { ProductDetail, ProductRepository } from './repositories/product.repository';
@@ -14,7 +14,7 @@ import { ProductDetail, ProductRepository } from './repositories/product.reposit
 export class ProductService extends AbstractBaseService<Product> {
   constructor(
     private readonly productRepository: ProductRepository,
-    private readonly transactions: SessionTransactions,
+    private readonly transactions: CatalogTransactions,
   ) {
     super(productRepository);
   }
@@ -48,7 +48,8 @@ export class ProductService extends AbstractBaseService<Product> {
 
     let created: ProductDetail | null;
     try {
-      created = await this.transactions.write(async (tx) => {
+      const locks = productWriteLocks(null, [dto.barcode, ...dto.units.map((unit) => unit.barcode)]);
+      created = await this.transactions.write(locks, async (tx) => {
         await this.assertReferences(tx, {
           categoryId: dto.categoryId,
           manufacturerId: dto.manufacturerId ?? null,
@@ -106,9 +107,10 @@ export class ProductService extends AbstractBaseService<Product> {
 
     let updated: ProductDetail | null;
     try {
-      updated = await this.transactions.write(async (tx) => {
-        // Đọc trong cùng transaction với bước ghi: mọi suy luận bên dưới phải dựa trên trạng thái
-        // sẽ được ghi đè, không phải snapshot đọc ngoài (đọc không được tuần tự hoá như ghi).
+      const locks = productWriteLocks(id, [dto.barcode, ...(dto.units ?? []).map((unit) => unit.barcode)]);
+      updated = await this.transactions.write(locks, async (tx) => {
+        // Đọc trong cùng transaction, SAU khi giữ khoá sản phẩm: mọi suy luận bên dưới dựa trên đúng trạng thái
+        // sẽ bị ghi đè, không phải snapshot đọc ngoài mà lần ghi khác có thể vừa đổi.
         const existing = await this.productRepository.findDetailWith(tx, id);
         if (!existing) throw this.notFound();
 
@@ -153,7 +155,7 @@ export class ProductService extends AbstractBaseService<Product> {
    * để chứng từ kho/đơn hàng về sau vẫn tham chiếu được lịch sử.
    */
   async remove(id: string, callerId: string): Promise<{ success: true }> {
-    await this.transactions.write(async (tx) => {
+    await this.transactions.write(productWriteLocks(id, []), async (tx) => {
       const existing = await this.productRepository.findDetailWith(tx, id);
       if (!existing) throw this.notFound();
       if (await this.productRepository.hasOpenInventory(tx, id)) {

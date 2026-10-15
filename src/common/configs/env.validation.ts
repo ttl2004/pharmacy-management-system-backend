@@ -22,6 +22,29 @@ export const envSchema = z
   .object({
     //- Ứng dụng
     PORT: z.coerce.number().int().positive().default(3000),
+    // Origin được gọi API kèm cookie, ngăn cách bằng dấu phẩy. Để trống: không cho trình duyệt gọi chéo origin.
+    CORS_ORIGINS: z
+      .string()
+      .default('')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((origin) => origin.trim())
+          .filter(Boolean),
+      )
+      // CORS so origin theo chuỗi tuyệt đối: giá trị phải đúng dạng chuẩn trình duyệt gửi (chữ thường, không / cuối,
+      // không ký tự đại diện), nếu không sẽ hợp lệ khi kiểm mà không bao giờ khớp.
+      .pipe(
+        z.array(
+          z
+            .string()
+            .refine(
+              (origin) =>
+                URL.canParse(origin) && /^https?:$/.test(new URL(origin).protocol) && new URL(origin).origin === origin,
+              'Mỗi origin có dạng http(s)://host[:port], chữ thường, không có / cuối',
+            ),
+        ),
+      ),
 
     //- Cơ sở dữ liệu
     DB_LOGGING: boolStr('false'),

@@ -54,13 +54,17 @@ function makeService(
     findByIdWithRole: jest.fn().mockResolvedValue({ id: 'target', role: { code: 'SALES_STAFF', level: 40 } }),
     ...repositoryOverrides,
   } as never;
-  const prisma = { role: { findFirst: jest.fn() }, branch: { findFirst: jest.fn() }, ...infra.prisma } as never;
-  const transactions = { write: jest.fn((work: (tx: unknown) => unknown) => work(infra.tx ?? {})) } as never;
+  const prisma = {
+    role: { findFirst: jest.fn() },
+    branch: { findFirst: jest.fn() },
+    $transaction: jest.fn((work: (tx: unknown) => unknown) => work(infra.tx ?? {})),
+    ...infra.prisma,
+  } as never;
   const sessions = {
     revokeAllByUser: jest.fn().mockResolvedValue(undefined),
     ...sessionOverrides,
   } as never;
-  return new UserService(repository, prisma, transactions, sessions);
+  return new UserService(repository, prisma, sessions);
 }
 
 const EMPTY_PAGE = { hits: [], total: 0, page: 1, totalPages: 0, limit: 10 };

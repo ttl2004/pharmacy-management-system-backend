@@ -45,6 +45,6 @@ class AuthConfigModule {}
     PasswordService,
     { provide: SessionStore, useClass: DbSessionStore },
   ],
-  exports: [AuthzService, AuthzGuard, SessionStore, PasswordService, SessionTransactions],
+  exports: [AuthzService, AuthzGuard, SessionStore, PasswordService],
 })
 export class AuthzModule {}

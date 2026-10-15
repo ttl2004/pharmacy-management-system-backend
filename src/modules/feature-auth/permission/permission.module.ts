@@ -9,7 +9,7 @@ import { PermissionRepository } from './repositories/permission.repository';
 import { RolePermissionRepository } from './repositories/role-permission.repository';
 
 @Module({
-  // AuthzModule để lấy AuthzGuard (đặt trước PermissionGuard trên route) và SessionTransactions.
+  // AuthzModule để lấy AuthzGuard (đặt trước PermissionGuard trên route).
   imports: [forwardRef(() => AuthzModule), forwardRef(() => UserModule)],
   controllers: [PermissionController],
   providers: [PermissionService, PermissionGuard, RoleRepository, PermissionRepository, RolePermissionRepository],

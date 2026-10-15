@@ -8,7 +8,7 @@ import { ErrorCode } from 'src/common/types/error-code';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
-import { SessionStore, SessionTransactions } from '../authz/session.store';
+import { SessionStore } from '../authz/session.store';
 import type { JwtUser } from '../authz/types/authz.types';
 import {
   assertBranchInScope,
@@ -32,7 +32,6 @@ export class UserService extends AbstractBaseService<User> {
   constructor(
     private readonly userRepository: UserRepository,
     private readonly prisma: PrismaService,
-    private readonly transactions: SessionTransactions,
     private readonly sessions: SessionStore,
   ) {
     super(userRepository);
@@ -102,7 +101,7 @@ export class UserService extends AbstractBaseService<User> {
     await this.assertBranchRule(role.code, branchId);
 
     try {
-      return await this.transactions.write(async (tx) => {
+      return await this.prisma.$transaction(async (tx) => {
         const user = await tx.user.create({
           data: {
             fullName: dto.fullName,

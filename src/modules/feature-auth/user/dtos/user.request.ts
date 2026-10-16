@@ -1,21 +1,27 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Gender, UserStatus } from '@prisma/client';
+import { Transform } from 'class-transformer';
 import { IsEnum, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength, ValidateIf } from 'class-validator';
 import { AuthRole } from 'src/common/types/common.enum';
+import { VIETNAM_PHONE_PATTERN } from 'src/common/utils/phone.util';
+import { toVietnamPhone, trimLowerCase } from 'src/common/utils/string-transform.util';
 
 /** Ngày sinh chỉ nhận `YYYY-MM-DD` — khớp cách service dựng mốc UTC nửa đêm. */
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
+const PHONE_MESSAGE = 'phoneNumber phải là SĐT Việt Nam: 10 số (di động) hoặc 11 số (cố định), bắt đầu bằng 0 hoặc +84';
+
 export class CreateUserRequest {
   /** SĐT là định danh gốc của mọi tài khoản — cột cho phép null để không vỡ dữ liệu cũ, nhưng API bắt buộc. */
+  @Transform(toVietnamPhone)
   @IsString()
-  @IsNotEmpty()
-  @MaxLength(15)
-  @ApiProperty({ example: '0900000000' })
+  @Matches(VIETNAM_PHONE_PATTERN, { message: PHONE_MESSAGE })
+  @ApiProperty({ example: '0900000000', description: 'Nhận cả +84/84 và dấu cách, chấm, gạch; lưu dạng 0xxxxxxxxx' })
   phoneNumber: string;
 
   /** Khách mua tại quầy không có email — cột cho phép null. */
   @IsOptional()
+  @Transform(trimLowerCase)
   @IsString()
   @MaxLength(150)
   @ApiProperty({ required: false })
@@ -84,9 +90,9 @@ export class CreateUserRequest {
 export class UpdateUserRequest {
   /** Không được để null — SĐT là định danh gốc. */
   @ValidateIf((_, value) => value !== undefined)
+  @Transform(toVietnamPhone)
   @IsString()
-  @IsNotEmpty()
-  @MaxLength(15)
+  @Matches(VIETNAM_PHONE_PATTERN, { message: PHONE_MESSAGE })
   @ApiPropertyOptional({ example: '0900000000' })
   phoneNumber?: string;
 
@@ -105,6 +111,7 @@ export class UpdateUserRequest {
   fullName?: string;
 
   @IsOptional()
+  @Transform(trimLowerCase)
   @IsString()
   @MaxLength(150)
   @ApiPropertyOptional({ nullable: true })

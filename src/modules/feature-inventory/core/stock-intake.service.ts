@@ -61,6 +61,22 @@ export interface ReturnRequest {
   note: string;
 }
 
+/** Rút lại đúng phần hàng một chứng từ đã đưa vào lô (huỷ phiếu nhập) — lấy từ chính bút toán nhập. */
+export interface WithdrawLine {
+  batchId: string;
+  /** Dương, theo đơn vị cơ bản. */
+  quantity: number;
+  /** Giá vốn ghi trên bút toán nhập; bút toán nhập luôn có, `null` là dữ liệu hỏng. */
+  unitCost: number | null;
+  refItemId: string | null;
+}
+
+export interface WithdrawRequest extends Omit<ReturnRequest, 'lines'> {
+  lines: readonly WithdrawLine[];
+  /** Lô caller đã khoá (để kiểm "chưa xuất") — tồn trong đó là tồn TRƯỚC khi rút. */
+  locked: readonly LockedBatch[];
+}
+
 /**
  * Đưa hàng vào lô — MỘT thuật toán cho cả xác nhận phiếu nhập và nhận điều chuyển:
  * khoá số lô → tạo lô còn thiếu → khoá mọi lô liên quan → kiểm hạn dùng / trạng thái → giá vốn bình quân → ghi sổ.
@@ -174,6 +190,49 @@ export class StockIntakeService {
   }
 
   /**
+   * Ngược của `intake`: rút phần hàng chứng từ đã đưa vào và trả giá vốn về như chưa từng nhập. Caller phải bảo đảm
+   * lô chưa có hàng XUẤT ra kể từ lần nhập (K4) — khi đó giá bình quân chỉ là tổng giá trị chia tổng lượng, nên rút
+   * ra là phép tính ngược chính xác (lệch tối đa vài đồng do làm tròn), kể cả khi lô đã nhận thêm hàng sau đó.
+   * Số câu lệnh cố định: giá vốn (1) + sổ kho (2).
+   */
+  async withdraw(ctx: InventoryTxContext, request: WithdrawRequest): Promise<AppliedMovement[]> {
+    if (!request.lines.length) return [];
+    const batchById = new Map(request.locked.map((batch) => [batch.id, batch]));
+
+    // Một lô có thể nhận nhiều dòng của cùng phiếu: gộp lượng và giá trị trước khi tính ngược.
+    const removedByBatch = new Map<string, { quantity: number; value: number }>();
+    for (const line of request.lines) {
+      if (line.unitCost === null) throw new Error(`Bút toán nhập của lô ${line.batchId} thiếu giá vốn`);
+      const removed = removedByBatch.get(line.batchId) ?? { quantity: 0, value: 0 };
+      removed.quantity += line.quantity;
+      removed.value += line.quantity * line.unitCost;
+      removedByBatch.set(line.batchId, removed);
+    }
+    const costs = [...removedByBatch].map(([batchId, removed]) => {
+      const batch = batchById.get(batchId);
+      if (!batch) throw new Error(`Lô ${batchId} chưa được khoá trước khi rút hàng`);
+      return { id: batchId, importPrice: costAfterWithdraw(batch.quantityOnHand, batch.importPrice, removed) };
+    });
+    await this.batches.updateCosts(ctx.tx, costs, request.actorId);
+
+    return this.ledger.apply(
+      ctx,
+      request.lines.map((line) => ({
+        batchId: line.batchId,
+        type: request.type,
+        quantity: -line.quantity,
+        unitCost: line.unitCost,
+        refType: request.refType,
+        refId: request.refId,
+        refItemId: line.refItemId,
+        note: request.note,
+      })),
+      request.actorId,
+      { preLocked: request.locked },
+    );
+  }
+
+  /**
    * Thu hồi gắn với SỐ LÔ chứ không với từng dòng lô: lô VỪA TẠO ở chi nhánh này mà cùng số lô đã bị ADMIN thu hồi ở
    * chi nhánh khác (vd. nhận điều chuyển đang trên đường lúc thu hồi) thì cũng bị thu hồi, cùng lý do và người thu hồi.
    * Lô đã có từ trước giữ trạng thái của nó — thu hồi lô đó là quyết định riêng. Thêm 2 câu lệnh (đổi trạng thái +
@@ -264,4 +323,18 @@ export function weightedAverageCost(onHand: number, currentCost: number, addQuan
   const total = onHand + addQuantity;
   if (total <= 0) return addCost;
   return Math.round((onHand * currentCost + addQuantity * addCost) / total);
+}
+
+/**
+ * Ngược của `weightedAverageCost`: giá vốn sau khi rút `removed` (lượng + tổng giá trị lúc nhập) khỏi lô. Lô về 0 thì
+ * giữ giá hiện tại — vô hại vì lần nhập kế tiếp vào lô trống lấy thẳng giá mới. Không âm (phòng sai số làm tròn).
+ */
+export function costAfterWithdraw(
+  onHand: number,
+  currentCost: number,
+  removed: { quantity: number; value: number },
+): number {
+  const remaining = onHand - removed.quantity;
+  if (remaining <= 0) return currentCost;
+  return Math.max(0, Math.round((onHand * currentCost - removed.value) / remaining));
 }

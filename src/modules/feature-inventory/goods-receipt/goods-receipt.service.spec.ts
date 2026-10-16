@@ -54,7 +54,10 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     softDeleteItems: jest.fn(),
     ...overrides,
   };
-  const intake = { intake: jest.fn().mockResolvedValue({ batchIdByRefItem: new Map(), movements: [] }) };
+  const intake = {
+    intake: jest.fn().mockResolvedValue({ batchIdByRefItem: new Map(), movements: [] }),
+    withdraw: jest.fn().mockResolvedValue([]),
+  };
   const transactions = { run: jest.fn((work: (ctx: unknown) => unknown) => work({ tx: {}, afterCommit: jest.fn() })) };
   const ledger = { apply: jest.fn().mockResolvedValue([]), lockBatches: jest.fn().mockResolvedValue([]) };
   const codes = { next: jest.fn().mockResolvedValue('PN000001') };
@@ -211,7 +214,7 @@ describe('GoodsReceiptService — xác nhận', () => {
 
 describe('GoodsReceiptService — huỷ', () => {
   it('phiếu đã xác nhận mà lô đã xuất → 1707, không đảo bút toán', async () => {
-    const { service, ledger } = makeService({
+    const { service, ledger, intake } = makeService({
       findStatus: jest.fn().mockResolvedValue({ id: 'r1', status: ReceiptStatus.CONFIRMED, branchId: BRANCH_A }),
       findImportMovements: jest
         .fn()
@@ -223,6 +226,30 @@ describe('GoodsReceiptService — huỷ', () => {
     await expect(service.cancel('r1', { reason: 'sai' }, PM_A)).rejects.toMatchObject({
       errorCode: ErrorCode.BATCH_ALREADY_MOVED,
     });
+    expect(intake.withdraw).not.toHaveBeenCalled();
+  });
+
+  it('phiếu đã xác nhận, lô chưa xuất: rút hàng qua intake (trả giá vốn) với lô đã khoá', async () => {
+    const lockedRows = [{ id: 'b1', batchNumber: 'L1', quantityOnHand: 20, importPrice: 1000 }];
+    const { service, ledger, intake } = makeService({
+      findStatus: jest.fn().mockResolvedValue({ id: 'r1', status: ReceiptStatus.CONFIRMED, branchId: BRANCH_A }),
+      findImportMovements: jest
+        .fn()
+        .mockResolvedValue([{ batchId: 'b1', quantity: 20, unitCost: 1000, refItemId: 'i1', createdAt: new Date() }]),
+      findBatchesMovedSince: jest.fn().mockResolvedValue([]),
+    });
+    ledger.lockBatches.mockResolvedValue(lockedRows);
+
+    await service.cancel('r1', { reason: 'Gõ nhầm giá' }, PM_A);
+
+    expect(intake.withdraw).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        refId: 'r1',
+        locked: lockedRows,
+        lines: [{ batchId: 'b1', quantity: 20, unitCost: 1000, refItemId: 'i1' }],
+      }),
+    );
     expect(ledger.apply).not.toHaveBeenCalled();
   });
 

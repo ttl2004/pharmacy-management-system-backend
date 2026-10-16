@@ -5,6 +5,7 @@ import { APP_CONSTANTS } from 'src/common/constants/app.constant';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
+import { normalizePhoneSearch } from 'src/common/utils/phone.util';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
@@ -60,7 +61,7 @@ export class UserService extends AbstractBaseService<User> {
       page: query.page,
       limit: query.limit,
       sort: query.sort,
-      search: query.search,
+      search: query.search && normalizePhoneSearch(query.search),
       searchFields: ['phoneNumber', 'fullName', 'email'],
       relations: { role: true, branch: true },
     });

@@ -110,6 +110,30 @@ export class StockBatchRepository {
       FOR UPDATE`);
   }
 
+  /**
+   * Khoá các lô BÁN ĐƯỢC của những sản phẩm này ở một chi nhánh: AVAILABLE, còn hạn sau `today` (`YYYY-MM-DD` giờ
+   * VN — lô hết hạn đúng hôm nay là đã hết hạn), còn hàng chưa giữ. Thứ tự khoá `id`, cùng thứ tự với
+   * `StockLedgerRepository.lockBatches`; thứ tự FEFO do caller tự sắp. MỘT câu lệnh cho cả đơn.
+   */
+  lockSellable(
+    tx: Prisma.TransactionClient,
+    branchId: string,
+    productIds: readonly string[],
+    today: string,
+  ): Promise<LockedBatch[]> {
+    if (!productIds.length) return Promise.resolve([]);
+    const ids = Prisma.join(productIds.map((id) => Prisma.sql`${id}::uuid`));
+    return tx.$queryRaw<LockedBatch[]>(Prisma.sql`
+      SELECT "id", "branchId", "productId", "batchNumber", "expiryDate", "quantityOnHand", "reservedQuantity",
+             "importPrice", "status"
+      FROM "stock_batches"
+      WHERE "branchId" = ${branchId}::uuid AND "productId" IN (${ids})
+        AND "status" = 'AVAILABLE' AND "expiryDate" > ${today}::date
+        AND "quantityOnHand" > "reservedQuantity" AND "isDeleted" = false
+      ORDER BY "id"
+      FOR UPDATE`);
+  }
+
   /** Đưa lô vào trạng thái thu hồi theo quyết định đã có (lý do, người thu hồi) — MỘT câu lệnh. */
   async markRecalled(
     tx: Prisma.TransactionClient,

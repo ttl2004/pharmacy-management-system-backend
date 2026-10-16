@@ -3,7 +3,7 @@ import { ErrorCode } from 'src/common/types/error-code';
 import { parseDateOnly } from 'src/common/utils/date-only.util';
 import type { InventoryTxContext } from './inventory-transactions';
 import { IntakeBatch, NewBatchRow, StockBatchRepository } from './stock-batch.repository';
-import { IntakeLine, StockIntakeService, weightedAverageCost } from './stock-intake.service';
+import { costAfterWithdraw, IntakeLine, StockIntakeService, weightedAverageCost } from './stock-intake.service';
 
 const EXPIRY = parseDateOnly('2028-01-31');
 
@@ -236,6 +236,57 @@ describe('StockIntakeService.returnToBatches', () => {
     expect(ledger.apply).toHaveBeenCalledWith(
       ctx,
       [expect.objectContaining({ batchId: 'b1', quantity: 30, unitCost: 900, type: 'TRANSFER_IN', note: 'Hoàn hàng' })],
+      'actor',
+      { preLocked: rows },
+    );
+  });
+});
+
+describe('costAfterWithdraw', () => {
+  it('ngược đúng với weightedAverageCost: rút phần vừa nhập thì về giá cũ', () => {
+    const merged = weightedAverageCost(100, 1_000, 50, 1_300); // 1.100
+    expect(costAfterWithdraw(150, merged, { quantity: 50, value: 50 * 1_300 })).toBe(1_000);
+  });
+
+  it('nhập nhầm giá rồi lô nhận thêm hàng khác: huỷ phiếu nhầm vẫn ra giá như chưa từng nhập', () => {
+    // 100×1.000, nhập nhầm 10×100.000 → 10.000; nhập tiếp 90×1.000 → 5.950; rút phần nhầm → 190.000 / 190 = 1.000.
+    const afterTypo = weightedAverageCost(100, 1_000, 10, 100_000);
+    const afterMore = weightedAverageCost(110, afterTypo, 90, 1_000);
+    expect(costAfterWithdraw(200, afterMore, { quantity: 10, value: 10 * 100_000 })).toBe(1_000);
+  });
+
+  it('lô về 0 thì giữ giá hiện tại', () => {
+    expect(costAfterWithdraw(50, 1_300, { quantity: 50, value: 65_000 })).toBe(1_300);
+  });
+});
+
+describe('StockIntakeService.withdraw', () => {
+  it('trả giá vốn về như chưa nhập (gộp nhiều dòng cùng lô), ghi bút toán âm với lô caller đã khoá', async () => {
+    // Lô 150 viên giá 1.100 = 100×1.000 có sẵn + phiếu này 2 dòng 20×1.300 và 30×1.300.
+    const rows = [locked({ quantityOnHand: 150, importPrice: 1_100 })];
+    const { intake, batches, ledger, ctx } = makeIntake(rows);
+
+    await intake.withdraw(ctx, {
+      type: StockMovementType.IMPORT,
+      refType: StockRefType.GOODS_RECEIPT,
+      refId: 'r1',
+      actorId: 'actor',
+      note: 'Huỷ phiếu',
+      locked: rows,
+      lines: [
+        { batchId: 'b1', quantity: 20, unitCost: 1_300, refItemId: 'i1' },
+        { batchId: 'b1', quantity: 30, unitCost: 1_300, refItemId: 'i2' },
+      ],
+    });
+
+    expect(ledger.lockBatches).not.toHaveBeenCalled();
+    expect(batches.updateCosts).toHaveBeenCalledWith({}, [{ id: 'b1', importPrice: 1_000 }], 'actor');
+    expect(ledger.apply).toHaveBeenCalledWith(
+      ctx,
+      [
+        expect.objectContaining({ batchId: 'b1', quantity: -20, refItemId: 'i1' }),
+        expect.objectContaining({ batchId: 'b1', quantity: -30, refItemId: 'i2' }),
+      ],
       'actor',
       { preLocked: rows },
     );

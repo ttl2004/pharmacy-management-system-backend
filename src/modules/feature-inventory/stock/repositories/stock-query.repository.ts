@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
+import { containsPattern } from 'src/common/utils/like-pattern.util';
 
 const BATCH_SELECT = {
   id: true,
@@ -120,7 +121,7 @@ export class StockQueryRepository {
     if (filter.branchId) conditions.push(Prisma.sql`b."branchId" = ${filter.branchId}::uuid`);
     if (filter.productId) conditions.push(Prisma.sql`b."productId" = ${filter.productId}::uuid`);
     if (filter.search) {
-      const pattern = `%${filter.search}%`;
+      const pattern = containsPattern(filter.search);
       conditions.push(Prisma.sql`(p."name" ILIKE ${pattern} OR p."code" ILIKE ${pattern})`);
     }
     const where = Prisma.join(conditions, ' AND ');

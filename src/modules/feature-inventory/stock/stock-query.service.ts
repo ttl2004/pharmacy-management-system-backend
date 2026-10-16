@@ -3,6 +3,7 @@ import { BatchStatus, Prisma } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
+import { escapeLike } from 'src/common/utils/like-pattern.util';
 import {
   addDaysToDateOnly,
   daysBetweenDateOnly,
@@ -57,9 +58,9 @@ export class StockQueryService {
     }
     if (query.search) {
       where.OR = [
-        { batchNumber: { contains: query.search, mode: 'insensitive' } },
-        { product: { name: { contains: query.search, mode: 'insensitive' } } },
-        { product: { code: { contains: query.search, mode: 'insensitive' } } },
+        { batchNumber: { contains: escapeLike(query.search), mode: 'insensitive' } },
+        { product: { name: { contains: escapeLike(query.search), mode: 'insensitive' } } },
+        { product: { code: { contains: escapeLike(query.search), mode: 'insensitive' } } },
       ];
     }
     const page = await this.stock.findBatchPage(where, query.page, query.limit);

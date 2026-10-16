@@ -10,6 +10,7 @@ import {
 } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorCode } from 'src/common/types/error-code';
+import { escapeLike } from 'src/common/utils/like-pattern.util';
 import { addDaysToDateOnly, vietnamDayStartUtc } from 'src/common/utils/date-only.util';
 import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
@@ -106,7 +107,7 @@ export class AdjustmentService {
         ...(query.toDate ? { lt: vietnamDayStartUtc(addDaysToDateOnly(query.toDate, 1)) } : {}),
       };
     }
-    if (query.search) where.code = { contains: query.search, mode: 'insensitive' };
+    if (query.search) where.code = { contains: escapeLike(query.search), mode: 'insensitive' };
     return this.adjustments.findPage(where, query.page, query.limit);
   }
 

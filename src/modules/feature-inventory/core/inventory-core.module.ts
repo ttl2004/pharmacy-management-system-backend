@@ -3,6 +3,7 @@ import { AuditLogModule } from 'src/providers/audit-log/audit-log.module';
 import { DocumentCodeService } from './document-code.service';
 import { InventoryEvents } from './inventory-events';
 import { InventoryTransactions } from './inventory-transactions';
+import { StockAllocationService } from './stock-allocation.service';
 import { StockBatchRepository } from './stock-batch.repository';
 import { StockIntakeService } from './stock-intake.service';
 import { StockLedgerRepository } from './stock-ledger.repository';
@@ -23,6 +24,7 @@ import { StockLedgerService } from './stock-ledger.service';
     StockLedgerService,
     StockBatchRepository,
     StockIntakeService,
+    StockAllocationService,
   ],
   exports: [
     InventoryTransactions,
@@ -31,6 +33,7 @@ import { StockLedgerService } from './stock-ledger.service';
     StockLedgerService,
     StockBatchRepository,
     StockIntakeService,
+    StockAllocationService,
     AuditLogModule,
   ],
 })

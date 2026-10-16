@@ -34,7 +34,7 @@ function entry(batchId: string, quantity: number, overrides: Partial<LedgerEntry
   };
 }
 
-/** Repository giả mô phỏng đúng điều kiện SQL: tồn mới >= phần đang giữ thì mới cập nhật. */
+/** Repository giả mô phỏng đúng điều kiện SQL: phần giữ mới không âm và tồn mới >= phần giữ mới thì mới cập nhật. */
 function makeLedger(stock: LockedBatch[]) {
   const byId = new Map(stock.map((item) => [item.id, { ...item }]));
   const inserted: MovementRow[] = [];
@@ -42,13 +42,26 @@ function makeLedger(stock: LockedBatch[]) {
     lockBatches: jest.fn((_tx: unknown, ids: string[]) =>
       Promise.resolve(ids.filter((id) => byId.has(id)).map((id) => ({ ...byId.get(id)! }))),
     ),
-    applyDeltas: jest.fn((_tx: unknown, deltas: { batchId: string; delta: number }[]) =>
+    applyDeltas: jest.fn((_tx: unknown, deltas: { batchId: string; delta: number; reservedDelta?: number }[]) =>
+      Promise.resolve(
+        deltas.flatMap(({ batchId, delta, reservedDelta = 0 }) => {
+          const row = byId.get(batchId)!;
+          const reserved = row.reservedQuantity + reservedDelta;
+          if (reserved < 0 || row.quantityOnHand + delta < reserved) return [];
+          row.quantityOnHand += delta;
+          row.reservedQuantity = reserved;
+          return [{ id: batchId, quantityOnHand: row.quantityOnHand }];
+        }),
+      ),
+    ),
+    applyReservations: jest.fn((_tx: unknown, deltas: { batchId: string; delta: number }[]) =>
       Promise.resolve(
         deltas.flatMap(({ batchId, delta }) => {
           const row = byId.get(batchId)!;
-          if (row.quantityOnHand + delta < row.reservedQuantity) return [];
-          row.quantityOnHand += delta;
-          return [{ id: batchId, quantityOnHand: row.quantityOnHand }];
+          const reserved = row.reservedQuantity + delta;
+          if (reserved < 0 || reserved > row.quantityOnHand) return [];
+          row.reservedQuantity = reserved;
+          return [{ id: batchId, branchId: row.branchId, productId: row.productId, reservedQuantity: reserved }];
         }),
       ),
     ),
@@ -69,7 +82,8 @@ function makeLedger(stock: LockedBatch[]) {
     for (const hook of hooks) await hook();
   };
 
-  return { ledger: new StockLedgerService(repository as never, events), repository, inserted, emitted, ctx, commit };
+  const ledger = new StockLedgerService(repository as never, events);
+  return { ledger, repository, byId, inserted, emitted, ctx, commit };
 }
 
 describe('StockLedgerService.apply', () => {
@@ -154,5 +168,82 @@ describe('StockLedgerService.apply', () => {
     await commit();
     expect(emitted).toHaveLength(2);
     expect(emitted.find((event) => event.branchId === 'CN-A')?.productIds.sort()).toEqual(['P-1', 'P-2']);
+  });
+});
+
+describe('StockLedgerService — giữ hàng cho đơn online', () => {
+  const ORDER_REF = { refType: StockRefType.ORDER, refId: 'order-1' };
+  const sale = (batchId: string, quantity: number) =>
+    entry(batchId, quantity, { type: StockMovementType.SALE, refType: StockRefType.ORDER, refId: 'order-1' });
+
+  it('reserve: giảm lượng bán được, không đổi tồn, không ghi sổ', async () => {
+    const { ledger, byId, inserted, ctx } = makeLedger([batch('a', 10)]);
+
+    await ledger.reserve(ctx, [{ batchId: 'a', quantity: 4 }], ORDER_REF, ACTOR);
+
+    expect(byId.get('a')).toMatchObject({ quantityOnHand: 10, reservedQuantity: 4 });
+    expect(inserted).toHaveLength(0);
+  });
+
+  it('reserve: hai dòng cùng lô được gộp; vượt phần còn trống thì báo 1700 kèm số lô', async () => {
+    const { ledger, repository, ctx } = makeLedger([batch('a', 10, { reservedQuantity: 3 })]);
+    const lines = [
+      { batchId: 'a', quantity: 4 },
+      { batchId: 'a', quantity: 4 },
+    ];
+
+    await expect(ledger.reserve(ctx, lines, ORDER_REF, ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.INSUFFICIENT_STOCK,
+      message: expect.stringContaining('LO-a') as string,
+    });
+    expect(repository.applyReservations).toHaveBeenCalledWith(expect.anything(), [{ batchId: 'a', delta: 8 }], ACTOR);
+  });
+
+  it('xuất hàng đơn đã giữ (fromReserved): trừ tồn và nhả phần giữ trong cùng câu lệnh', async () => {
+    const { ledger, byId, repository, ctx } = makeLedger([batch('a', 10, { reservedQuantity: 10 })]);
+
+    await ledger.apply(ctx, [{ ...sale('a', -10), fromReserved: true }], ACTOR);
+
+    expect(byId.get('a')).toMatchObject({ quantityOnHand: 0, reservedQuantity: 0 });
+    expect(repository.applyDeltas).toHaveBeenCalledTimes(1);
+  });
+
+  it('không có fromReserved thì vẫn bị chặn bởi chính phần đã giữ', async () => {
+    const { ledger, ctx } = makeLedger([batch('a', 10, { reservedQuantity: 10 })]);
+
+    await expect(ledger.apply(ctx, [sale('a', -10)], ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.INSUFFICIENT_STOCK,
+    });
+  });
+
+  it('fromReserved trên bút toán nhập là lỗi lập trình', async () => {
+    const { ledger, ctx } = makeLedger([batch('a', 10)]);
+
+    await expect(ledger.apply(ctx, [{ ...entry('a', 5), fromReserved: true }], ACTOR)).rejects.toThrow(
+      'Chỉ bút toán xuất',
+    );
+  });
+
+  it('release: nhả đúng phần giữ; nhả quá là lỗi lập trình', async () => {
+    const { ledger, byId, ctx } = makeLedger([batch('a', 10, { reservedQuantity: 5 })]);
+
+    await ledger.release(ctx, [{ batchId: 'a', quantity: 2 }], ORDER_REF, ACTOR);
+    expect(byId.get('a')?.reservedQuantity).toBe(3);
+
+    await expect(ledger.release(ctx, [{ batchId: 'a', quantity: 4 }], ORDER_REF, ACTOR)).rejects.toThrow(
+      'Nhả nhiều hơn phần đang giữ',
+    );
+  });
+
+  it('preLocked: không khoá lại; sự kiện tồn kho mang chứng từ đơn và chỉ phát sau commit', async () => {
+    const stock = [batch('a', 10, { branchId: 'CN-A', productId: 'P-1' })];
+    const { ledger, repository, emitted, ctx, commit } = makeLedger(stock);
+
+    await ledger.reserve(ctx, [{ batchId: 'a', quantity: 1 }], ORDER_REF, ACTOR, { preLocked: stock });
+    expect(repository.lockBatches).not.toHaveBeenCalled();
+    expect(emitted).toHaveLength(0);
+
+    await commit();
+    expect(emitted).toEqual([expect.objectContaining({ branchId: 'CN-A', productIds: ['P-1'], ...ORDER_REF })]);
   });
 });

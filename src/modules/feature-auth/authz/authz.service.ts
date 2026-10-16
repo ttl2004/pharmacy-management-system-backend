@@ -7,6 +7,7 @@ import { SYSTEM_ACTOR_ID } from 'src/common/constants/app.constant';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
+import { normalizeVietnamPhone } from 'src/common/utils/phone.util';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { UserRepository } from '../user/repositories/user.repository';
 import { LoginRequest } from './dtos/login.request';
@@ -70,7 +71,8 @@ export class AuthzService extends AbstractBaseService<Auth> {
     }
 
     const fullName = this.configService.get<string>('superAdmin.fullName');
-    const phoneNumber = this.configService.get<string>('superAdmin.phoneNumber');
+    const configuredPhone = this.configService.get<string>('superAdmin.phoneNumber');
+    const phoneNumber = configuredPhone && normalizeVietnamPhone(configuredPhone);
     const address = this.configService.get<string>('superAdmin.address');
     const dateOfBirth = this.configService.get<string>('superAdmin.dateOfBirth');
     const gender = this.configService.get<Gender>('superAdmin.gender');

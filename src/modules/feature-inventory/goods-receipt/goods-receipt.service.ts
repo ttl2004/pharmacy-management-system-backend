@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { AuditAction, Prisma, ReceiptStatus, RecordStatus, StockMovementType, StockRefType } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorCode } from 'src/common/types/error-code';
+import { escapeLike } from 'src/common/utils/like-pattern.util';
 import {
   addDaysToDateOnly,
   daysBetweenDateOnly,
@@ -76,8 +77,8 @@ export class GoodsReceiptService {
     }
     if (query.search) {
       where.OR = [
-        { code: { contains: query.search, mode: 'insensitive' } },
-        { supplierInvoiceNo: { contains: query.search, mode: 'insensitive' } },
+        { code: { contains: escapeLike(query.search), mode: 'insensitive' } },
+        { supplierInvoiceNo: { contains: escapeLike(query.search), mode: 'insensitive' } },
       ];
     }
     return this.receipts.findPage(where, query.page, query.limit, this.toOrder(query.sort));
@@ -307,21 +308,21 @@ export class GoodsReceiptService {
               .map((batch) => batch.batchNumber);
             throw inventoryError(ErrorCode.BATCH_ALREADY_MOVED, `lô ${numbers.join(', ')}`);
           }
-          await this.ledger.apply(
-            ctx,
-            imports.map((movement) => ({
+          // Rút qua intake để giá vốn của lô trở về như chưa từng nhập phiếu này (gõ nhầm giá không để lại dấu).
+          await this.intake.withdraw(ctx, {
+            type: StockMovementType.IMPORT,
+            refType: StockRefType.GOODS_RECEIPT,
+            refId: id,
+            lines: imports.map((movement) => ({
               batchId: movement.batchId,
-              type: StockMovementType.IMPORT,
-              quantity: -movement.quantity,
+              quantity: movement.quantity,
               unitCost: movement.unitCost,
-              refType: StockRefType.GOODS_RECEIPT,
-              refId: id,
               refItemId: movement.refItemId,
-              note: 'Đảo bút toán nhập do huỷ phiếu',
             })),
+            locked,
             actorId,
-            { preLocked: locked },
-          );
+            note: 'Đảo bút toán nhập do huỷ phiếu',
+          });
         }
       }
 

@@ -10,6 +10,7 @@ import {
 } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorCode } from 'src/common/types/error-code';
+import { escapeLike } from 'src/common/utils/like-pattern.util';
 import {
   addDaysToDateOnly,
   daysBetweenDateOnly,
@@ -92,7 +93,7 @@ export class TransferService {
     if (query.status) conditions.push({ status: query.status });
     if (query.fromDate) conditions.push({ createdAt: { gte: vietnamDayStartUtc(query.fromDate) } });
     if (query.toDate) conditions.push({ createdAt: { lt: vietnamDayStartUtc(addDaysToDateOnly(query.toDate, 1)) } });
-    if (query.search) conditions.push({ code: { contains: query.search, mode: 'insensitive' } });
+    if (query.search) conditions.push({ code: { contains: escapeLike(query.search), mode: 'insensitive' } });
     return this.transfers.findPage({ AND: conditions }, query.page, query.limit);
   }
 

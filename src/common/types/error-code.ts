@@ -69,4 +69,8 @@ export enum ErrorCode {
   SUPPLIER_INACTIVE = 1710,
   STOCK_TAKE_PENDING = 1711,
   RECALL_ADMIN_ONLY = 1712,
+
+  //- Bán hàng — dải 1800–1849, giai đoạn sau khai tiếp không tranh số
+  PRESCRIPTION_REQUIRED = 1800,
+  PRODUCT_NOT_SELLABLE = 1801,
 }

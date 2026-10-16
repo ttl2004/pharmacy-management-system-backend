@@ -96,6 +96,11 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'stock-adjustment:confirm',
     'stock-adjustment:cancel',
     'stock-batch:block',
+    // Bán hàng — phạm vi chi nhánh do service ép (ma trận bán hàng 2026-10-16).
+    'order:read',
+    'order:create',
+    'order:pay',
+    'order:cancel',
   ],
   [AuthRole.PHARMACY_MANAGER]: [
     'branch:read',
@@ -125,6 +130,11 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'stock-adjustment:confirm',
     'stock-adjustment:cancel',
     'stock-batch:block',
+    // Bán hàng — phạm vi chi nhánh do service ép (ma trận bán hàng 2026-10-16).
+    'order:read',
+    'order:create',
+    'order:pay',
+    'order:cancel',
   ],
   // Dược sĩ chỉ ĐỌC dữ liệu kho của chi nhánh mình; mọi thao tác ghi kho là của PM hoặc ADMIN (K9, K10).
   [AuthRole.SALES_STAFF]: [
@@ -139,5 +149,10 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'branch-product:read',
     'transfer:read',
     'stock-adjustment:read',
+    // Bán hàng — phạm vi chi nhánh do service ép (ma trận bán hàng 2026-10-16).
+    'order:read',
+    'order:create',
+    'order:pay',
+    'order:cancel',
   ],
 };

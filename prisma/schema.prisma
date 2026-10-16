@@ -70,6 +70,7 @@ model Branch {
   stockAdjustments StockAdjustment[]
   branchProducts   BranchProduct[]
   auditLogs        AuditLog[]
+  orders           Order[]
 
   @@map("branches")
 }
@@ -125,6 +126,15 @@ model User {
   branchProductsCreated       BranchProduct[]       @relation("BranchProductCreatedBy")
   branchProductsUpdated       BranchProduct[]       @relation("BranchProductUpdatedBy")
   auditLogs                   AuditLog[]            @relation("AuditLogActor")
+
+  // Quan hệ ngược của nhóm bán hàng — chỉ để Prisma tạo FK.
+  ordersAsCustomer  Order[]     @relation("OrderCustomer")
+  ordersAsStaff     Order[]     @relation("OrderStaff")
+  ordersCreated     Order[]     @relation("OrderCreatedBy")
+  ordersUpdated     Order[]     @relation("OrderUpdatedBy")
+  orderItemsCreated OrderItem[] @relation("OrderItemCreatedBy")
+  orderItemsUpdated OrderItem[] @relation("OrderItemUpdatedBy")
+  paymentsCreated   Payment[]   @relation("PaymentCreatedBy")
 
   @@map("users")
 }
@@ -316,6 +326,7 @@ model Product {
   stockTransferItems   StockTransferItem[]
   stockAdjustmentItems StockAdjustmentItem[]
   branchProducts       BranchProduct[]
+  orderItems           OrderItem[]
 
   @@index([categoryId])
   @@index([manufacturerId])
@@ -344,6 +355,7 @@ model ProductUnit {
   unit    Unit    @relation(fields: [unitId], references: [id], onDelete: Restrict)
 
   goodsReceiptItems GoodsReceiptItem[]
+  orderItems        OrderItem[]
 
   @@unique([productId, unitId])
   @@index([productId, isDeleted])
@@ -551,6 +563,7 @@ model StockBatch {
   transferItemsOut StockTransferItem[]   @relation("TransferFromBatch")
   transferItemsIn  StockTransferItem[]   @relation("TransferToBatch")
   adjustmentItems  StockAdjustmentItem[]
+  orderItemBatches OrderItemBatch[]
 
   @@unique([branchId, productId, batchNumber])
   @@index([branchId, productId, expiryDate])
@@ -748,4 +761,155 @@ model AuditLog {
   @@index([actorId, createdAt])
   @@index([branchId, createdAt])
   @@map("audit_logs")
+}
+
+// ============================================================
+//  NHÓM BÁN HÀNG — thiết kế: docs/thiet-ke-csdl-dbml.md nhóm 4, luật: từ điển dữ liệu mục 4.4
+//  - Không nhận trả hàng · thanh toán một lần đủ tiền · chưa có giảm giá · chưa có thanh toán online/hoàn tiền.
+//  - Tổng tiền BigInt như phiếu nhập (K2); đơn giá Int.
+//  - order_item_batches và payments không có isDeleted (lịch sử giữ/trừ kho và chứng từ tài chính).
+//  - Giỏ hàng, giao hàng (carts, cart_items, shipments) thuộc phần bán online — chưa làm, thêm bằng migration riêng.
+// ============================================================
+
+enum OrderChannel {
+  POS
+  ONLINE
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  SHIPPING
+  COMPLETED
+  CANCELLED
+}
+
+/// Chưa có thanh toán online: VNPay/MoMo thêm sau bằng `ALTER TYPE ... ADD VALUE`.
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  COD
+}
+
+enum TransactionStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+/// Một bảng cho cả bán tại quầy và online — phân biệt bằng `channel`.
+model Order {
+  id                   String        @id @default(uuid()) @db.Uuid
+  isDeleted            Boolean       @default(false)
+  createdAt            DateTime      @default(now()) @db.Timestamptz(3)
+  createdBy            String?       @db.Uuid
+  updatedAt            DateTime?     @db.Timestamptz(3)
+  updatedBy            String?       @db.Uuid
+  code                 String        @unique @db.VarChar(20)
+  branchId             String        @db.Uuid
+  customerId           String?       @db.Uuid
+  staffId              String?       @db.Uuid
+  channel              OrderChannel
+  status               OrderStatus   @default(PENDING)
+  subtotalAmount       BigInt        @default(0)
+  shippingFee          Int           @default(0)
+  totalAmount          BigInt        @default(0)
+  paymentStatus        PaymentStatus @default(UNPAID)
+  prescriptionCode     String?       @db.VarChar(50)
+  prescriberName       String?       @db.VarChar(150)
+  prescriptionImageUrl String?       @db.Text
+  note                 String?       @db.Text
+  cancelReason         String?       @db.Text
+  confirmedAt          DateTime?     @db.Timestamptz(3)
+  completedAt          DateTime?     @db.Timestamptz(3)
+  cancelledAt          DateTime?     @db.Timestamptz(3)
+
+  branch        Branch      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  customer      User?       @relation("OrderCustomer", fields: [customerId], references: [id], onDelete: Restrict)
+  staff         User?       @relation("OrderStaff", fields: [staffId], references: [id], onDelete: Restrict)
+  createdByUser User?       @relation("OrderCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser User?       @relation("OrderUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  items         OrderItem[]
+  payments      Payment[]
+
+  @@index([branchId, status])
+  @@index([branchId, createdAt])
+  @@index([customerId])
+  @@index([createdAt])
+  /// Job tự huỷ quét đơn PENDING theo kênh và thời điểm.
+  @@index([status, channel, createdAt])
+  @@map("orders")
+}
+
+/// Dòng đơn — tên, đơn vị, hệ số là BẢN SAO lúc bán.
+model OrderItem {
+  id             String    @id @default(uuid()) @db.Uuid
+  isDeleted      Boolean   @default(false)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy      String?   @db.Uuid
+  updatedAt      DateTime? @db.Timestamptz(3)
+  updatedBy      String?   @db.Uuid
+  orderId        String    @db.Uuid
+  productId      String    @db.Uuid
+  productUnitId  String    @db.Uuid
+  productName    String    @db.VarChar(250)
+  unitName       String    @db.VarChar(50)
+  conversionRate Int
+  quantity       Int
+  baseQuantity   Int
+  unitPrice      Int
+  totalPrice     BigInt
+
+  order         Order            @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  product       Product          @relation(fields: [productId], references: [id], onDelete: Restrict)
+  productUnit   ProductUnit      @relation(fields: [productUnitId], references: [id], onDelete: Restrict)
+  createdByUser User?            @relation("OrderItemCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser User?            @relation("OrderItemUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  batches       OrderItemBatch[]
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("order_items")
+}
+
+/// Dòng đơn lấy hàng từ lô nào. Ghi lúc giữ hàng; bất biến từ lúc trừ kho (sổ kho trỏ refItemId vào đây).
+model OrderItemBatch {
+  id          String   @id @default(uuid()) @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  orderItemId String   @db.Uuid
+  batchId     String   @db.Uuid
+  quantity    Int
+  unitCost    Int
+
+  orderItem OrderItem  @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  batch     StockBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+
+  @@unique([orderItemId, batchId])
+  @@index([batchId])
+  @@map("order_item_batches")
+}
+
+/// Lượt thanh toán. Không xoá dòng; chỉ cập nhật trạng thái (vd COD: PENDING lúc đặt → SUCCESS khi giao xong).
+model Payment {
+  id              String            @id @default(uuid()) @db.Uuid
+  createdAt       DateTime          @default(now()) @db.Timestamptz(3)
+  createdBy       String?           @db.Uuid
+  updatedAt       DateTime?         @db.Timestamptz(3)
+  orderId         String            @db.Uuid
+  method          PaymentMethod
+  amount          BigInt
+  status          TransactionStatus @default(PENDING)
+  /// Mã tham chiếu chuyển khoản ngân hàng.
+  transactionCode String?           @db.VarChar(100)
+  paidAt          DateTime?         @db.Timestamptz(3)
+  note            String?           @db.Text
+
+  order         Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  createdByUser User? @relation("PaymentCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+
+  @@unique([method, transactionCode])
+  @@index([orderId])
+  @@map("payments")
 }

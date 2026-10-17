@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from 'src/common/databases/prisma.service';
-import { SessionStore, SessionTransactions } from './session.store';
+import { SessionTransactions } from './session.store';
 import { ErrorCode } from 'src/common/types/error-code';
 import { authError } from './auth.error';
 import { JwtUser } from './types/authz.types';
@@ -12,7 +12,6 @@ export class PasswordService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly transactions: SessionTransactions,
-    private readonly sessions: SessionStore,
   ) {}
 
   async change(user: JwtUser, dto: ChangePasswordRequest) {
@@ -20,7 +19,8 @@ export class PasswordService {
     if (!credentials || !(await bcrypt.compare(dto.currentPassword, credentials.password)))
       throw authError(ErrorCode.LOGIN_INVALID);
     const hash = await this.hash(dto.newPassword);
-    await this.transactions.write(async (tx) => {
+    // Khoá theo người dùng: không lần đăng nhập nào chen giữa lúc đổi mật khẩu và lúc thu hồi mọi phiên.
+    await this.transactions.forUser(user.userId, async (tx) => {
       const active = await tx.refreshToken.findFirst({
         where: { sid: user.sid, userId: user.userId, revokedAt: null, expiresAt: { gt: new Date() } },
       });
@@ -35,7 +35,6 @@ export class PasswordService {
         data: { revokedAt: new Date() },
       });
     });
-    await this.sessions.revokeAllByUser(user.userId);
   }
 
   // Chỉ dùng nội bộ. Luồng khôi phục sau này phải xác minh bằng chứng khôi phục dùng một lần
@@ -43,7 +42,7 @@ export class PasswordService {
   // Không mở trực tiếp phương thức này thành endpoint HTTP không yêu cầu xác thực.
   async resetPassword(userId: string, newPassword: string) {
     const hash = await this.hash(newPassword);
-    await this.transactions.write(async (tx) => {
+    await this.transactions.forUser(userId, async (tx) => {
       const updated = await tx.auth.updateMany({
         where: { userId, isDeleted: false },
         data: { password: hash, lastChangedPasswordAt: new Date(), updatedAt: new Date() },
@@ -51,7 +50,6 @@ export class PasswordService {
       if (!updated.count) throw authError(ErrorCode.LOGIN_INVALID);
       await tx.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
     });
-    await this.sessions.revokeAllByUser(userId);
   }
 
   private async hash(password: string) {

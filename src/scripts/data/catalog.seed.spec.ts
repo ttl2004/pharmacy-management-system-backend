@@ -58,9 +58,9 @@ describe('Dữ liệu mẫu nhóm sản phẩm, hãng sản xuất và đơn v�
   });
 
   it('mọi tham chiếu theo code của sản phẩm đều tồn tại', () => {
-    const categoryCodes = new Set(SEED_CATEGORIES.map((item) => item.code));
-    const manufacturerCodes = new Set(SEED_MANUFACTURERS.map((item) => item.code));
-    const unitCodes = new Set(SEED_UNITS.map((item) => item.code));
+    const categoryCodes = new Set<string>(SEED_CATEGORIES.map((item) => item.code));
+    const manufacturerCodes = new Set<string>(SEED_MANUFACTURERS.map((item) => item.code));
+    const unitCodes = new Set<string>(SEED_UNITS.map((item) => item.code));
 
     for (const product of SEED_PRODUCTS) {
       expect(categoryCodes.has(product.categoryCode)).toBe(true);

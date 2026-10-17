@@ -89,7 +89,8 @@ src/
 | Biến | Mô tả | Mặc định |
 |---|---|---|
 | `PORT` | Port HTTP server | `3000` |
-| `DATABASE_URL` | Chuỗi kết nối PostgreSQL, dạng `postgresql://user:password@host:5432/dbname`. Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`) | (bắt buộc) |
+| `CORS_ORIGINS` | Origin frontend được gọi API kèm cookie, ngăn cách bằng dấu phẩy (vd. `http://localhost:5173`). Để trống: chặn mọi lời gọi chéo origin | (trống) |
+| `DATABASE_URL` | Chuỗi kết nối PostgreSQL, dạng `postgresql://user:password@host:5432/dbname?connection_limit=10&pool_timeout=20`. Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`). Luôn đặt `connection_limit` — DB chỉ có 60 kết nối dùng chung | (bắt buộc) |
 | `DB_LOGGING` | In câu SQL ra log | `false` |
 | `JWT_ACCESS_SECRET` | Secret ký access JWT, tối thiểu 32 ký tự | (bắt buộc) |
 | `JWT_ACCESS_TTL` | Thời hạn access JWT | `15m` |
@@ -144,10 +145,19 @@ npm run db:generate   # sinh lại Prisma Client
 npm run db:studio     # mở giao diện xem dữ liệu
 ```
 
-Thiết lập máy mới: `npm install` → `cp .env.example .env` → `npm run db:deploy` → `npm run seed:permissions` → `npm run seed:catalog` → `npm run seed:users` → `npm run seed:super-admin`.
+Thiết lập máy mới: `npm install` → `cp .env.example .env` → `npm run db:deploy` → `npm run seed:permissions` → `npm run seed:catalog` → `npm run seed:users` → `npm run seed:super-admin` → `npm run seed:inventory`.
 
 Thứ tự này không tuỳ tiện: `seed:users` cần vai trò (do `seed:permissions` tạo) và chi nhánh (do
 `seed:catalog` tạo), còn `seed:super-admin` cần vai trò `SUPER_ADMIN` đã tồn tại.
+
+`seed:inventory` tạo 3 nhà cung cấp mẫu và tồn đầu kỳ cho CN001–CN003 bằng cách lập rồi xác nhận phiếu nhập qua
+`GoodsReceiptService` — sổ kho, giá vốn và nhật ký mẫu nhất quán như dữ liệu thật. Chạy lại an toàn (bỏ qua chi nhánh
+đã có phiếu ghi chú `SEED_OPENING_STOCK`). Cần chạy sau `seed:permissions` và `seed:catalog`.
+
+`seed:permissions` còn tạo **tác nhân hệ thống**: dòng `users` mang đúng id `SYSTEM_ACTOR_ID`
+(`src/common/constants/app.constant.ts`), tên "Hệ thống", trạng thái INACTIVE, không có tài khoản đăng nhập. Seed
+và job ghi id này vào `createdBy`/`updatedBy`; nó phải là người dùng thật để các cột người thao tác gắn được khoá
+ngoại sang `users` (bắt đầu từ nhóm bảng kho).
 
 Xem cấu hình tại: `src/common/configs/configuration.ts` và `src/common/databases/prisma.service.ts`.
 
@@ -180,9 +190,10 @@ npm run seed:catalog       # dữ liệu nền: 3 chi nhánh, 5 nhóm sản ph�
 npm run seed:users         # tài khoản mẫu: admin, quanly, nhanvien
 ```
 
-Chạy lại nhiều lần vẫn an toàn: vai trò và quyền được upsert theo `code`, còn quyền mặc định chỉ
-được cấp cho vai trò chưa từng có bản ghi cấp quyền nào — nên cấu hình đã chỉnh trên hệ thống không
-bị ghi đè.
+Chạy lại nhiều lần vẫn an toàn: vai trò và quyền được upsert theo `code`; quyền mặc định được cấp theo
+**từng cặp (vai trò, quyền) chưa từng có bản ghi**. Thêm mã mới vào `DEFAULT_ROLE_GRANTS` rồi chạy lại
+seed là vai trò đã có ma trận cũng nhận được, còn quyền đã bị thu hồi trên giao diện (bản ghi xoá mềm)
+thì không bị cấp lại.
 
 Hai script sau chỉ là **dữ liệu mẫu để thử phân quyền**, không bắt buộc khi dựng môi trường thật.
 `seed:users` tạo một tài khoản cho mỗi vai trò nội bộ, kèm dòng `auths` để đăng nhập được; tài khoản
@@ -196,6 +207,8 @@ API quản trị nằm dưới `/permission`: `GET /permission/me`, `GET /permis
 
 API người dùng nằm dưới `/user`: `GET /user`, `GET /user/:id`, `POST /user`, `PATCH /user/:id`,
 `DELETE /user/:id`. Quyền tương ứng là `user:read` · `user:create` · `user:update` · `user:delete`.
+`PHARMACY_MANAGER` có `user:read` nhưng chỉ thấy người dùng thuộc chi nhánh của mình (xem *Phạm vi chi
+nhánh* bên dưới).
 `user:create` **cố ý không cấp cho vai trò nào** — tài khoản của các vai trò nội bộ chỉ `SUPER_ADMIN`
 tạo được. `PATCH /user/:id` không đổi vai trò; việc đó đi qua
 `PATCH /permission/users/:userId/role`. Hai luật bảo vệ ở tầng service, áp cho mọi vai trò gọi:
@@ -243,6 +256,42 @@ update() { ... }
 `PermissionGuard` chặn mọi route không khai báo quyền, kể cả khi đã gắn guard — muốn route chỉ cần
 đăng nhập thì ghi rõ `@AnyAuthenticated()`. `SUPER_ADMIN` bỏ qua toàn bộ kiểm tra quyền. Module
 nghiệp vụ muốn dùng guard phải `imports: [PermissionModule, AuthzModule]`.
+
+### Phạm vi chi nhánh
+
+`PermissionGuard` chỉ trả lời "vai trò này được gọi API này không". Dữ liệu gắn chi nhánh còn qua lớp
+thứ hai ở tầng service, viết một lần trong `src/modules/feature-auth/permission/branch-scope.ts`:
+
+| Vai trò | Phạm vi |
+|---|---|
+| `SUPER_ADMIN`, `ADMIN` | Mọi chi nhánh |
+| `PHARMACY_MANAGER`, `SALES_STAFF` | Chỉ chi nhánh của mình (`users.branchId`, đọc từ DB ở mỗi request) |
+| `CUSTOMER` | Không có phạm vi chi nhánh |
+
+- Lọc hoặc ghi vào chi nhánh khác: `BRANCH_ACCESS_DENIED` (1506, HTTP 403). Không gửi chi nhánh thì
+  nhân viên được tự điền chi nhánh của mình.
+- Nhân viên chưa được gán chi nhánh: `BRANCH_NOT_ASSIGNED` (1507, HTTP 403) — không bao giờ được hiểu
+  thành "mọi chi nhánh".
+- Đọc/sửa/xoá theo id một bản ghi ngoài phạm vi: trả mã "không tồn tại" như bản ghi không có thật.
+- Danh mục, sản phẩm, đơn vị, hãng, storefront và danh sách chi nhánh là dữ liệu dùng chung, không áp
+  phạm vi.
+- Phạm vi vẫn giữ dù ma trận quyền bị chỉnh trên giao diện. Hiện áp cho `/user` và
+  `PATCH /permission/users/:userId/role`; `GET /permission/me` trả thêm `branchId` và `branchScope`
+  (`ALL` · `BRANCH` · `NONE`).
+
+Module mới có dữ liệu gắn chi nhánh (kho, đơn hàng…) phải dùng lại các hàm trong `branch-scope.ts`, không
+tự viết phép kiểm riêng.
+
+### Rào cấp bậc
+
+Không ai thay đổi được người dùng hay vai trò **cùng cấp hoặc cao hơn** mình (cấp bậc là `roles.level`:
+SUPER_ADMIN 100 · ADMIN 80 · PHARMACY_MANAGER 60 · SALES_STAFF 40 · CUSTOMER 20) — `ROLE_LEVEL_FORBIDDEN` (1508).
+Áp cho tạo/sửa/xoá người dùng, đổi vai trò (cả người bị đổi lẫn vai trò mới) và sửa ma trận quyền. Tự sửa hồ sơ của
+chính mình vẫn được (trừ tài khoản `SUPER_ADMIN` — tự sửa vẫn bị chặn 1604 theo luật 14).
+
+- Không đổi được vai trò của tài khoản `SUPER_ADMIN` (1604), không gán vai trò `SUPER_ADMIN` qua API (1603).
+- Sửa ma trận quyền chỉ được cấp **thêm** quyền chính mình đang có — `PERMISSION_NOT_GRANTABLE` (1509); thu hồi thì được.
+- Hệ quả: `ADMIN` không sửa/xoá được `ADMIN` khác.
 
 > **Cẩn thận vòng lặp module:** `AuthzModule` và `PermissionModule` đều import `UserModule` để lấy
 > `UserRepository`. Nên module nào vừa cung cấp repository cho chúng, vừa cần guard của chúng — như

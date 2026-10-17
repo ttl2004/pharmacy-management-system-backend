@@ -33,7 +33,9 @@ export const ROLE_CATALOG = [
 export type RoleCode = (typeof ROLE_CATALOG)[number]['code'];
 
 /**
- * Quyền cấp sẵn ở lần seed đầu tiên.
+ * Quyền mặc định của từng vai trò. Seed cấp theo từng cặp (vai trò, quyền) chưa từng có bản ghi: thêm mã vào
+ * đây rồi chạy lại `npm run seed:permissions` là vai trò đã có ma trận cũng nhận được; quyền đã bị thu hồi trên
+ * giao diện thì không bị cấp lại.
  *
  * SUPER_ADMIN không có mặt vì luôn bỏ qua mọi kiểm tra quyền. `permission:update` và
  * `user:role:update` cố ý không cấp cho ai: SUPER_ADMIN vẫn làm được nhờ luật bỏ qua, còn
@@ -72,13 +74,85 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'product:create',
     'product:update',
     'product:delete',
+    'supplier:read',
+    'supplier:create',
+    'supplier:update',
+    'supplier:delete',
+    'goods-receipt:read',
+    'goods-receipt:create',
+    'goods-receipt:confirm',
+    'goods-receipt:cancel',
+    'stock:read',
+    'branch-product:read',
+    'branch-product:update',
+    'audit-log:read',
+    'transfer:read',
+    'transfer:create',
+    'transfer:ship',
+    'transfer:receive',
+    'transfer:cancel',
+    'stock-adjustment:read',
+    'stock-adjustment:create',
+    'stock-adjustment:confirm',
+    'stock-adjustment:cancel',
+    'stock-batch:block',
+    // Bán hàng — phạm vi chi nhánh do service ép (ma trận bán hàng 2026-10-16).
+    'order:read',
+    'order:create',
+    'order:pay',
+    'order:cancel',
   ],
   [AuthRole.PHARMACY_MANAGER]: [
+    'branch:read',
+    // Chỉ thấy người dùng thuộc chi nhánh mình — phạm vi do branch-scope.ts ép ở tầng service.
+    'user:read',
+    'category:read',
+    'manufacturer:read',
+    'unit:read',
+    'product:read',
+    // Kho: mọi thao tác ghi đều gói trong chi nhánh mình — phạm vi do service ép (ma trận kho duyệt 2026-10-14).
+    'supplier:read',
+    'goods-receipt:read',
+    'goods-receipt:create',
+    'goods-receipt:confirm',
+    'goods-receipt:cancel',
+    'stock:read',
+    'branch-product:read',
+    'branch-product:update',
+    'audit-log:read',
+    'transfer:read',
+    'transfer:create',
+    'transfer:ship',
+    'transfer:receive',
+    'transfer:cancel',
+    'stock-adjustment:read',
+    'stock-adjustment:create',
+    'stock-adjustment:confirm',
+    'stock-adjustment:cancel',
+    'stock-batch:block',
+    // Bán hàng — phạm vi chi nhánh do service ép (ma trận bán hàng 2026-10-16).
+    'order:read',
+    'order:create',
+    'order:pay',
+    'order:cancel',
+  ],
+  // Dược sĩ chỉ ĐỌC dữ liệu kho của chi nhánh mình; mọi thao tác ghi kho là của PM hoặc ADMIN (K9, K10).
+  [AuthRole.SALES_STAFF]: [
     'branch:read',
     'category:read',
     'manufacturer:read',
     'unit:read',
     'product:read',
+    'supplier:read',
+    'goods-receipt:read',
+    'stock:read',
+    'branch-product:read',
+    'transfer:read',
+    'stock-adjustment:read',
+    // Bán hàng — phạm vi chi nhánh do service ép (ma trận bán hàng 2026-10-16).
+    'order:read',
+    'order:create',
+    'order:pay',
+    'order:cancel',
   ],
-  [AuthRole.SALES_STAFF]: ['branch:read', 'category:read', 'manufacturer:read', 'unit:read', 'product:read'],
 };

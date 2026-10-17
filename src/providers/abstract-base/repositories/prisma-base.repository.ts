@@ -1,4 +1,5 @@
 import { Prisma, PrismaClient } from '@prisma/client';
+import { containsPattern } from 'src/common/utils/like-pattern.util';
 import {
   BaseFindOptions,
   BaseRecord,
@@ -151,7 +152,7 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
   private async searchIds(search: string, fields: string[]): Promise<string[]> {
     const model = Prisma.dmmf.datamodel.models.find((item) => item.name === this.modelName);
     const table = model?.dbName ?? this.modelName;
-    const pattern = `%${search.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+    const pattern = containsPattern(search);
 
     const conditions = fields.map((field) => {
       const column = model?.fields.find((item) => item.name === field)?.dbName ?? field;

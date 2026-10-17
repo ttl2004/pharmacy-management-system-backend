@@ -5,18 +5,27 @@ import { APP_CONSTANTS } from 'src/common/constants/app.constant';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
+import { normalizePhoneSearch } from 'src/common/utils/phone.util';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
-import { SessionStore, SessionTransactions } from '../authz/session.store';
+import { SessionStore } from '../authz/session.store';
+import type { JwtUser } from '../authz/types/authz.types';
+import {
+  assertBranchInScope,
+  BRANCH_BOUND_ROLES,
+  type BranchScope,
+  isInBranchScope,
+  resolveBranchScope,
+  scopedBranchFilter,
+} from '../permission/branch-scope';
+import { assertOutranks } from '../permission/role-hierarchy';
 import { CreateUserRequest, UpdateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserRepository } from './repositories/user.repository';
 
 export type UserDetail = User & { role: Role; branch: Branch | null };
 
-/** Vai trò bắt buộc thuộc một chi nhánh; các vai trò còn lại phải để trống. */
-const BRANCH_REQUIRED_ROLES = ['PHARMACY_MANAGER', 'SALES_STAFF'];
 const SUPER_ADMIN_ROLE = 'SUPER_ADMIN';
 
 @Injectable()
@@ -24,13 +33,15 @@ export class UserService extends AbstractBaseService<User> {
   constructor(
     private readonly userRepository: UserRepository,
     private readonly prisma: PrismaService,
-    private readonly transactions: SessionTransactions,
     private readonly sessions: SessionStore,
   ) {
     super(userRepository);
   }
 
-  async list(query: UserQuery) {
+  async list(query: UserQuery, caller: JwtUser) {
+    // Phạm vi chi nhánh kiểm trước mọi truy vấn (BS-04). Với nhân viên chi nhánh, bộ lọc luôn là chi nhánh
+    // của họ — admin và khách hàng có branchId null (luật 10) nên tự rơi khỏi danh sách.
+    const branchId = scopedBranchFilter(resolveBranchScope(caller), query.branchId);
     const filter: BaseWhere<User> = {};
 
     if (query.roleCode) {
@@ -43,22 +54,24 @@ export class UserService extends AbstractBaseService<User> {
       }
       filter.roleId = roleId;
     }
-    if (query.branchId) filter.branchId = query.branchId;
+    if (branchId) filter.branchId = branchId;
     if (query.status) filter.status = query.status;
 
     return this.userRepository.findManyWithPagination(filter, {
       page: query.page,
       limit: query.limit,
       sort: query.sort,
-      search: query.search,
+      search: query.search && normalizePhoneSearch(query.search),
       searchFields: ['phoneNumber', 'fullName', 'email'],
       relations: { role: true, branch: true },
     });
   }
 
-  async getDetail(id: string): Promise<UserDetail> {
+  async getDetail(id: string, caller: JwtUser): Promise<UserDetail> {
+    const scope = resolveBranchScope(caller);
     const user = await this.userRepository.findByIdWithRoleAndBranch(id);
-    if (!user) {
+    // Ngoài phạm vi chi nhánh thì trả như không tồn tại (BS-05) — không để lộ là có người dùng này.
+    if (!user || !isInBranchScope(scope, user.branchId)) {
       throw new ErrorException({
         code: ErrorCode.USER_NOT_FOUND,
         message: 'Người dùng không tồn tại',
@@ -67,7 +80,8 @@ export class UserService extends AbstractBaseService<User> {
     return user;
   }
 
-  async create(dto: CreateUserRequest, callerId: string): Promise<User> {
+  async create(dto: CreateUserRequest, caller: JwtUser): Promise<User> {
+    const scope = resolveBranchScope(caller);
     const hasUsername = Boolean(dto.username);
     const hasPassword = Boolean(dto.password);
     if (hasUsername !== hasPassword) {
@@ -77,11 +91,18 @@ export class UserService extends AbstractBaseService<User> {
       });
     }
 
+    // BS-06: nhân viên chi nhánh không gửi branchId thì tự điền chi nhánh của họ, gửi chi nhánh khác thì 1506.
+    // Vai trò bắt buộc để trống chi nhánh (ADMIN, CUSTOMER) vì thế trượt luật 10 ngay bên dưới (BS-09).
+    const branchId = dto.branchId ?? (scope.kind === 'BRANCH' ? scope.branchId : undefined);
+    assertBranchInScope(scope, branchId);
+
     const role = await this.requireAssignableRole(dto.roleCode);
-    await this.assertBranchRule(role.code, dto.branchId);
+    // Rào cấp bậc: chỉ tạo được người có vai trò thấp hơn mình (1508).
+    assertOutranks(caller.roleLevel, role.level);
+    await this.assertBranchRule(role.code, branchId);
 
     try {
-      return await this.transactions.write(async (tx) => {
+      return await this.prisma.$transaction(async (tx) => {
         const user = await tx.user.create({
           data: {
             fullName: dto.fullName,
@@ -91,9 +112,9 @@ export class UserService extends AbstractBaseService<User> {
             dateOfBirth: dto.dateOfBirth ? new Date(`${dto.dateOfBirth}T00:00:00.000Z`) : null,
             gender: dto.gender ?? null,
             roleId: role.id,
-            branchId: dto.branchId ?? null,
+            branchId: branchId ?? null,
             status: dto.status ?? UserStatus.ACTIVE,
-            createdBy: callerId,
+            createdBy: caller.userId,
           },
         });
 
@@ -103,7 +124,7 @@ export class UserService extends AbstractBaseService<User> {
               username: dto.username,
               password: await bcrypt.hash(dto.password, APP_CONSTANTS.BCRYPT_SALT),
               userId: user.id,
-              createdBy: callerId,
+              createdBy: caller.userId,
             },
           });
         }
@@ -131,11 +152,11 @@ export class UserService extends AbstractBaseService<User> {
   }
 
   /**
-   * Luật 10: vai trò nhân viên bắt buộc có chi nhánh, vai trò còn lại bắt buộc để trống.
-   * `undefined` (không gửi trường) được coi là null khi tạo mới.
+   * Luật 10: vai trò gắn chi nhánh (`BRANCH_BOUND_ROLES`) bắt buộc có chi nhánh, vai trò còn lại bắt buộc để
+   * trống. `undefined` (không gửi trường) được coi là null khi tạo mới.
    */
   async assertBranchRule(roleCode: string, branchId: string | null | undefined): Promise<void> {
-    const needsBranch = BRANCH_REQUIRED_ROLES.includes(roleCode);
+    const needsBranch = BRANCH_BOUND_ROLES.includes(roleCode);
     const value = branchId ?? null;
 
     if (needsBranch && !value) {
@@ -165,24 +186,33 @@ export class UserService extends AbstractBaseService<User> {
   }
 
   /**
-   * Luật 14 + 15 + ràng buộc `branchId` theo vai trò. KHÔNG đổi vai trò — việc đó đi qua
+   * Luật 14 + 15 + ràng buộc `branchId` theo vai trò + phạm vi chi nhánh + rào cấp bậc. KHÔNG đổi vai trò — việc đó đi qua
    * `PATCH /permission/users/:userId/role` với quyền `user:role:update`.
    */
-  async update(id: string, dto: UpdateUserRequest, callerId: string): Promise<User> {
+  async update(id: string, dto: UpdateUserRequest, caller: JwtUser): Promise<User> {
+    const scope = resolveBranchScope(caller);
+    // Phạm vi đứng TRƯỚC luật 14 (BS-05): nhân viên chi nhánh nhắm vào tài khoản ngoài chi nhánh — kể cả
+    // SUPER_ADMIN — phải nhận 1200 như không tồn tại, không được nhận 1604 làm lộ tài khoản đó.
+    await this.assertTargetInScope(id, scope);
     await this.assertNotSuperAdminTarget(id);
-    this.assertNotSelf(callerId, id, dto.status !== undefined);
+    this.assertNotSelf(caller.userId, id, dto.status !== undefined);
+    // BS-06: chuyển người dùng sang chi nhánh khác — kể cả gỡ về null — là ghi ra ngoài phạm vi.
+    if (dto.branchId !== undefined) assertBranchInScope(scope, dto.branchId);
 
     const current = await this.userRepository.findByIdWithRole(id);
     if (!current) {
       throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
     }
+    // Rào cấp bậc: không sửa được người cùng cấp hoặc cao hơn (1508). Tự sửa hồ sơ của mình vẫn được — phần
+    // nguy hiểm (tự đổi trạng thái, tự xoá, tự đổi vai trò) đã bị luật 15 và mã 1505 chặn riêng.
+    if (caller.userId !== id) assertOutranks(caller.roleLevel, current.role.level);
 
     // Chỉ kiểm luật chi nhánh khi client thực sự gửi trường đó; không gửi thì giữ nguyên giá trị cũ.
     if (dto.branchId !== undefined) {
       await this.assertBranchRule(current.role.code, dto.branchId);
     }
 
-    const data: Partial<User> = { updatedBy: callerId };
+    const data: Partial<User> = { updatedBy: caller.userId };
     if (dto.fullName !== undefined) data.fullName = dto.fullName;
     if (dto.email !== undefined) data.email = dto.email;
     if (dto.address !== undefined) data.address = dto.address;
@@ -206,9 +236,18 @@ export class UserService extends AbstractBaseService<User> {
   }
 
   /** Luật 13: xoá mềm + thu hồi mọi refresh token còn hiệu lực. */
-  async remove(id: string, callerId: string): Promise<{ success: true }> {
+  async remove(id: string, caller: JwtUser): Promise<{ success: true }> {
+    const scope = resolveBranchScope(caller);
+    await this.assertTargetInScope(id, scope);
     await this.assertNotSuperAdminTarget(id);
-    this.assertNotSelfDelete(callerId, id);
+    this.assertNotSelfDelete(caller.userId, id);
+
+    const target = await this.userRepository.findByIdWithRole(id);
+    if (!target) {
+      throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+    }
+    // Rào cấp bậc: không xoá được người cùng cấp hoặc cao hơn (1508).
+    assertOutranks(caller.roleLevel, target.role.level);
 
     const deleted = await this.userRepository.softDelete({ id });
     if (!deleted) {
@@ -253,5 +292,18 @@ export class UserService extends AbstractBaseService<User> {
       code: ErrorCode.SELF_OPERATION_FORBIDDEN,
       message: 'Không thể tự xoá tài khoản của chính mình',
     });
+  }
+
+  /**
+   * BS-05: bản ghi đích phải nằm trong phạm vi chi nhánh của người gọi, ngoài phạm vi thì báo 1200 như không
+   * tồn tại. Phạm vi ALL bỏ qua hẳn để ADMIN/SUPER_ADMIN không tốn thêm truy vấn.
+   */
+  private async assertTargetInScope(id: string, scope: BranchScope): Promise<void> {
+    if (scope.kind === 'ALL') return;
+
+    const target = await this.userRepository.findByIdWithRole(id);
+    if (!target || !isInBranchScope(scope, target.branchId)) {
+      throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+    }
   }
 }

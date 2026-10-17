@@ -47,6 +47,9 @@ export class AuthzStrategy extends PassportStrategy(Strategy, AUTH_JWT) {
       // Đọc vai trò từ DB chứ không tin token: đổi vai trò có hiệu lực ngay ở request kế tiếp,
       // không phải chờ access token hết hạn và không cần thu hồi phiên.
       role: user.role.code as AuthRole,
+      // Cùng lý do với `role`: chi nhánh đọc từ DB để đổi chi nhánh có hiệu lực ngay.
+      branchId: user.branchId,
+      roleLevel: user.role.level,
     };
   }
 }

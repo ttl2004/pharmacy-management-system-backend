@@ -3,7 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { Prisma, RecordStatus } from '@prisma/client';
 import { SYSTEM_ACTOR_ID } from 'src/common/constants/app.constant';
 import { PrismaService } from 'src/common/databases/prisma.service';
-import { SessionTransactions } from 'src/modules/feature-auth/authz/session.store';
+import { CatalogTransactions, productWriteLocks } from 'src/modules/feature-catalog/catalog-transactions';
 import { AppModule } from '../app.module';
 import { SEED_BRANCHES, SEED_CATEGORIES, SEED_MANUFACTURERS, SEED_PRODUCTS, SEED_UNITS } from './data/catalog.seed';
 import type { SeedProductUnit } from './data/catalog.seed';
@@ -156,7 +156,7 @@ async function reconcileUnits(
 
 async function seedProducts(
   prisma: PrismaService,
-  transactions: SessionTransactions,
+  transactions: CatalogTransactions,
   references: { categories: IdByCode; manufacturers: IdByCode; units: IdByCode },
   logger: Logger,
 ): Promise<void> {
@@ -186,8 +186,9 @@ async function seedProducts(
     };
 
     // Sản phẩm và cấu hình đơn vị bán của nó là một khối: lỗi giữa chừng không được để lại sản phẩm
-    // thiếu đơn vị. Đi qua `SessionTransactions` cho cùng kỷ luật với `ProductService`.
-    const existed = await transactions.write(async (tx) => {
+    // thiếu đơn vị. Đi qua `CatalogTransactions` cho cùng khoá mã vạch với `ProductService`.
+    const locks = productWriteLocks(null, [product.barcode, ...product.units.map((unit) => unit.barcode)]);
+    const existed = await transactions.write(locks, async (tx) => {
       const existing = await tx.product.findFirst({ where: { code: product.code } });
       const saved = existing
         ? await tx.product.update({
@@ -210,7 +211,7 @@ async function bootstrap() {
 
   try {
     const prisma = app.get(PrismaService);
-    const transactions = app.get(SessionTransactions);
+    const transactions = app.get(CatalogTransactions);
 
     await seedBranches(prisma, logger);
     const categories = await seedCategories(prisma, logger);

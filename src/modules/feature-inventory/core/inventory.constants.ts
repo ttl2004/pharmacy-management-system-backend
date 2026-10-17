@@ -19,11 +19,15 @@ export const INVENTORY_TX_MAX_WAIT_MS = 5_000;
 /** Lô còn hạn dưới số ngày này thì vẫn cho nhập nhưng trả cảnh báo (K7). */
 export const NEAR_EXPIRY_WARNING_DAYS = 90;
 
-/** Loại chứng từ kho → tiền tố mã và SEQUENCE sinh số (tạo trong migration kho). */
+/**
+ * Loại chứng từ → tiền tố mã và SEQUENCE sinh số. Ba loại đầu tạo trong migration kho, `ORDER` trong migration bán hàng —
+ * đơn hàng cũng là chứng từ của sổ kho (`StockRefType.ORDER`) nên dùng chung bộ sinh mã.
+ */
 export const DOCUMENT_CODE_FORMATS = {
   GOODS_RECEIPT: { prefix: 'PN', sequence: 'goods_receipt_code_seq' },
   STOCK_TRANSFER: { prefix: 'DC', sequence: 'stock_transfer_code_seq' },
   STOCK_ADJUSTMENT: { prefix: 'DCK', sequence: 'stock_adjustment_code_seq' },
+  ORDER: { prefix: 'HD', sequence: 'order_code_seq' },
 } as const;
 
 export type DocumentKind = keyof typeof DOCUMENT_CODE_FORMATS;

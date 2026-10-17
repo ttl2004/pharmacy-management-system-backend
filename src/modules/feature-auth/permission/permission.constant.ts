@@ -69,6 +69,10 @@ export const PERMISSION_CATALOG = [
   },
   { code: 'stock-adjustment:cancel', name: 'Huỷ phiếu điều chỉnh nháp', module: 'stock-adjustment', sortOrder: 4 },
   { code: 'stock-batch:block', name: 'Khoá, mở khoá, thu hồi lô', module: 'stock-batch', sortOrder: 1 },
+  { code: 'order:read', name: 'Xem đơn hàng', module: 'order', sortOrder: 1 },
+  { code: 'order:create', name: 'Lập và sửa đơn tại quầy', module: 'order', sortOrder: 2 },
+  { code: 'order:pay', name: 'Thu tiền đơn tại quầy', module: 'order', sortOrder: 3 },
+  { code: 'order:cancel', name: 'Huỷ đơn hàng', module: 'order', sortOrder: 4 },
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CATALOG)[number]['code'];

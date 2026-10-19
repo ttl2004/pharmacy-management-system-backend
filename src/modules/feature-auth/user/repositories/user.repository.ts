@@ -41,7 +41,7 @@ export class UserRepository extends PrismaBaseRepository<User> {
   findByIdWithRoleAndBranch(id: string) {
     return this.prisma.user.findFirst({
       where: { id, isDeleted: false },
-      include: { role: true, branch: true },
+      include: { role: true, branch: true, auth: { select: { username: true } } },
     });
   }
 }

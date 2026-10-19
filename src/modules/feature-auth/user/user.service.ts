@@ -4,6 +4,7 @@ import * as bcrypt from 'bcrypt';
 import { APP_CONSTANTS } from 'src/common/constants/app.constant';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
+import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import { normalizePhoneSearch } from 'src/common/utils/phone.util';
 import { PrismaService } from 'src/common/databases/prisma.service';
@@ -13,18 +14,22 @@ import { SessionStore } from '../authz/session.store';
 import type { JwtUser } from '../authz/types/authz.types';
 import {
   assertBranchInScope,
-  BRANCH_BOUND_ROLES,
   type BranchScope,
+  isBranchBoundRole,
   isInBranchScope,
   resolveBranchScope,
   scopedBranchFilter,
 } from '../permission/branch-scope';
 import { assertOutranks } from '../permission/role-hierarchy';
+import { assertRoleWithinCallerGrants } from '../permission/role-grant-guard';
 import { CreateUserRequest, UpdateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserRepository } from './repositories/user.repository';
 
-export type UserDetail = User & { role: Role; branch: Branch | null };
+export type UserDetail = User & { role: Role; branch: Branch | null; auth: { username: string } | null };
+
+/** Quan hệ kèm theo mọi bản ghi người dùng trả ra: vai trò, chi nhánh và tên đăng nhập (không lấy mật khẩu). */
+const USER_RELATIONS = { role: true, branch: true, auth: { select: { username: true } } };
 
 const SUPER_ADMIN_ROLE = 'SUPER_ADMIN';
 
@@ -54,6 +59,13 @@ export class UserService extends AbstractBaseService<User> {
       }
       filter.roleId = roleId;
     }
+    if (query.excludeCustomer) {
+      const customerId = await this.userRepository.findRoleIdByCode(AuthRole.CUSTOMER);
+      // Đã lọc theo một vai trò thì giữ nguyên; riêng chọn CUSTOMER mà vẫn loại CUSTOMER thì ra rỗng.
+      if (customerId) {
+        filter.roleId = filter.roleId === customerId ? { in: [] } : (filter.roleId ?? { not: customerId });
+      }
+    }
     if (branchId) filter.branchId = branchId;
     if (query.status) filter.status = query.status;
 
@@ -63,7 +75,7 @@ export class UserService extends AbstractBaseService<User> {
       sort: query.sort,
       search: query.search && normalizePhoneSearch(query.search),
       searchFields: ['phoneNumber', 'fullName', 'email'],
-      relations: { role: true, branch: true },
+      relations: USER_RELATIONS,
     });
   }
 
@@ -80,7 +92,7 @@ export class UserService extends AbstractBaseService<User> {
     return user;
   }
 
-  async create(dto: CreateUserRequest, caller: JwtUser): Promise<User> {
+  async create(dto: CreateUserRequest, caller: JwtUser): Promise<UserDetail> {
     const scope = resolveBranchScope(caller);
     const hasUsername = Boolean(dto.username);
     const hasPassword = Boolean(dto.password);
@@ -99,11 +111,14 @@ export class UserService extends AbstractBaseService<User> {
     const role = await this.requireAssignableRole(dto.roleCode);
     // Rào cấp bậc: chỉ tạo được người có vai trò thấp hơn mình (1508).
     assertOutranks(caller.roleLevel, role.level);
+    // Và vai trò đó không được mang quyền người gọi không có (1509).
+    await assertRoleWithinCallerGrants(this.prisma, role.id, caller);
     await this.assertBranchRule(role.code, branchId);
 
     try {
       return await this.prisma.$transaction(async (tx) => {
         const user = await tx.user.create({
+          include: { role: true, branch: true },
           data: {
             fullName: dto.fullName,
             phoneNumber: dto.phoneNumber,
@@ -129,7 +144,7 @@ export class UserService extends AbstractBaseService<User> {
           });
         }
 
-        return user;
+        return { ...user, auth: dto.username ? { username: dto.username } : null };
       });
     } catch (error) {
       rethrowDuplicate(error);
@@ -152,11 +167,11 @@ export class UserService extends AbstractBaseService<User> {
   }
 
   /**
-   * Luật 10: vai trò gắn chi nhánh (`BRANCH_BOUND_ROLES`) bắt buộc có chi nhánh, vai trò còn lại bắt buộc để
+   * Luật 10: vai trò gắn chi nhánh (`isBranchBoundRole`) bắt buộc có chi nhánh, vai trò còn lại bắt buộc để
    * trống. `undefined` (không gửi trường) được coi là null khi tạo mới.
    */
   async assertBranchRule(roleCode: string, branchId: string | null | undefined): Promise<void> {
-    const needsBranch = BRANCH_BOUND_ROLES.includes(roleCode);
+    const needsBranch = isBranchBoundRole(roleCode);
     const value = branchId ?? null;
 
     if (needsBranch && !value) {
@@ -189,7 +204,7 @@ export class UserService extends AbstractBaseService<User> {
    * Luật 14 + 15 + ràng buộc `branchId` theo vai trò + phạm vi chi nhánh + rào cấp bậc. KHÔNG đổi vai trò — việc đó đi qua
    * `PATCH /permission/users/:userId/role` với quyền `user:role:update`.
    */
-  async update(id: string, dto: UpdateUserRequest, caller: JwtUser): Promise<User> {
+  async update(id: string, dto: UpdateUserRequest, caller: JwtUser): Promise<UserDetail> {
     const scope = resolveBranchScope(caller);
     // Phạm vi đứng TRƯỚC luật 14 (BS-05): nhân viên chi nhánh nhắm vào tài khoản ngoài chi nhánh — kể cả
     // SUPER_ADMIN — phải nhận 1200 như không tồn tại, không được nhận 1604 làm lộ tài khoản đó.
@@ -225,11 +240,11 @@ export class UserService extends AbstractBaseService<User> {
     if (dto.branchId !== undefined) data.branchId = dto.branchId ?? null;
 
     try {
-      const updated = await this.userRepository.update({ id }, data);
+      const updated = await this.userRepository.update({ id }, data, { relations: USER_RELATIONS });
       if (!updated) {
         throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
       }
-      return updated;
+      return updated as UserDetail;
     } catch (error) {
       rethrowDuplicate(error);
     }

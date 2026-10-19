@@ -2,7 +2,6 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Gender, UserStatus } from '@prisma/client';
 import { Transform } from 'class-transformer';
 import { IsEnum, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength, ValidateIf } from 'class-validator';
-import { AuthRole } from 'src/common/types/common.enum';
 import { VIETNAM_PHONE_PATTERN } from 'src/common/utils/phone.util';
 import { toVietnamPhone, trimLowerCase } from 'src/common/utils/string-transform.util';
 
@@ -55,8 +54,9 @@ export class CreateUserRequest {
   branchId?: string;
 
   @IsString()
-  @ApiProperty({ enum: AuthRole, example: 'SALES_STAFF' })
-  roleCode: AuthRole;
+  @MaxLength(50)
+  @ApiProperty({ example: 'SALES_STAFF', description: 'Mã vai trò, gồm cả vai trò tự tạo' })
+  roleCode: string;
 
   /** Phải đi cùng `password` — gửi lẻ một trong hai là lỗi 1002. */
   @IsOptional()

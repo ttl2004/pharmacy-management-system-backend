@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { ErrorCode } from 'src/common/types/error-code';
 
 export type PermissionErrorCode =
@@ -11,7 +11,8 @@ export type PermissionErrorCode =
   | ErrorCode.BRANCH_ACCESS_DENIED
   | ErrorCode.BRANCH_NOT_ASSIGNED
   | ErrorCode.ROLE_LEVEL_FORBIDDEN
-  | ErrorCode.PERMISSION_NOT_GRANTABLE;
+  | ErrorCode.PERMISSION_NOT_GRANTABLE
+  | ErrorCode.ROLE_IN_USE;
 
 const permissionMessages: Record<PermissionErrorCode, string> = {
   [ErrorCode.PERMISSION_DENIED]: 'Bạn không có quyền thực hiện thao tác này',
@@ -24,12 +25,15 @@ const permissionMessages: Record<PermissionErrorCode, string> = {
   [ErrorCode.BRANCH_NOT_ASSIGNED]: 'Tài khoản nhân viên chưa được gán chi nhánh',
   [ErrorCode.ROLE_LEVEL_FORBIDDEN]: 'Không thể thao tác người dùng hoặc vai trò cùng cấp hay cao hơn mình',
   [ErrorCode.PERMISSION_NOT_GRANTABLE]: 'Không thể cấp quyền mà chính bạn không có',
+  [ErrorCode.ROLE_IN_USE]: 'Vai trò vẫn còn được gán cho người dùng (kể cả tài khoản đã xoá)',
 };
 
-export function permissionError(code: PermissionErrorCode) {
-  const payload = { code, message: permissionMessages[code] };
+/** `message` tuỳ chọn để thay câu mặc định bằng câu đúng ngữ cảnh. */
+export function permissionError(code: PermissionErrorCode, message?: string) {
+  const payload = { code, message: message ?? permissionMessages[code] };
 
   if (code === ErrorCode.ROLE_NOT_FOUND) return new NotFoundException(payload);
   if (code === ErrorCode.PERMISSION_NOT_FOUND) return new BadRequestException(payload);
+  if (code === ErrorCode.ROLE_IN_USE) return new ConflictException(payload);
   return new ForbiddenException(payload);
 }

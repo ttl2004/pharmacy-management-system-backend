@@ -46,6 +46,7 @@ export enum ErrorCode {
   BRANCH_NOT_ASSIGNED = 1507,
   ROLE_LEVEL_FORBIDDEN = 1508,
   PERMISSION_NOT_GRANTABLE = 1509,
+  ROLE_IN_USE = 1510,
 
   //- CRUD nghiệp vụ dùng chung
   RECORD_NOT_FOUND = 1600,

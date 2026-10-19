@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
 import { ErrorCode } from 'src/common/types/error-code';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
@@ -15,6 +15,9 @@ import { RolePermissionRepository } from './repositories/role-permission.reposit
 
 /** Cấp bậc CUSTOMER — vai trò tự tạo phải cao hơn mức này. */
 const CUSTOMER_LEVEL = 20;
+
+/** Độ dài tối đa cột `roles.code` (VarChar(50)). */
+const ROLE_CODE_MAX_LENGTH = 50;
 
 /** Quản trị vai trò: danh sách, tạo và xoá vai trò tự tạo. Ma trận quyền nằm ở `PermissionService`. */
 @Injectable()
@@ -86,26 +89,29 @@ export class RoleAdminService {
     }
   }
 
-  /** Xoá cứng vai trò tự tạo. Còn user trỏ tới (kể cả đã xoá mềm, vì khoá ngoại vẫn giữ) thì 1510. */
+  /**
+   * Xoá mềm vai trò tự tạo. Chỉ user CHƯA xoá còn trỏ tới mới chặn (1510); user đã xoá mềm bị bỏ qua.
+   * Đổi `code` thành `<code>_DEL_<hậu tố>` để nhả mã unique cho vai trò tạo lại sau này.
+   */
   async deleteRole(roleCode: string, caller: JwtUser): Promise<{ success: true }> {
     const role = await this.permissionService.requireRole(roleCode);
     if (role.isSystem) throw permissionError(ErrorCode.ROLE_NOT_EDITABLE);
     assertOutranks(caller.roleLevel, role.level);
-    if (await this.prisma.user.count({ where: { roleId: role.id } })) {
+    if (await this.prisma.user.count({ where: { roleId: role.id, isDeleted: false } })) {
       throw permissionError(ErrorCode.ROLE_IN_USE);
     }
 
+    // Hậu tố 6 ký tự base36; cắt phần mã gốc để tổng không vượt cột VarChar(50).
+    const suffix = `_DEL_${Date.now().toString(36).slice(-6)}`;
+    const deletedCode = `${role.code.slice(0, ROLE_CODE_MAX_LENGTH - suffix.length)}${suffix}`;
     try {
       await this.prisma.$transaction(async (tx) => {
         await tx.rolePermission.deleteMany({ where: { roleId: role.id } });
-        await tx.role.delete({ where: { id: role.id } });
+        await tx.role.update({
+          where: { id: role.id },
+          data: { isDeleted: true, code: deletedCode, updatedBy: caller.userId, updatedAt: new Date() },
+        });
       });
-    } catch (error) {
-      // Có user mới được gán vai trò giữa lúc kiểm tra và xoá → khoá ngoại chặn.
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2003') {
-        throw permissionError(ErrorCode.ROLE_IN_USE);
-      }
-      throw error;
     } finally {
       this.permissionService.clearGrantCache();
     }

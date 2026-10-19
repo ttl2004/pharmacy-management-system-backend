@@ -25,7 +25,7 @@ const permissionMessages: Record<PermissionErrorCode, string> = {
   [ErrorCode.BRANCH_NOT_ASSIGNED]: 'Tài khoản nhân viên chưa được gán chi nhánh',
   [ErrorCode.ROLE_LEVEL_FORBIDDEN]: 'Không thể thao tác người dùng hoặc vai trò cùng cấp hay cao hơn mình',
   [ErrorCode.PERMISSION_NOT_GRANTABLE]: 'Không thể cấp quyền mà chính bạn không có',
-  [ErrorCode.ROLE_IN_USE]: 'Vai trò vẫn còn được gán cho người dùng (kể cả tài khoản đã xoá)',
+  [ErrorCode.ROLE_IN_USE]: 'Vai trò vẫn còn được gán cho người dùng',
 };
 
 /** `message` tuỳ chọn để thay câu mặc định bằng câu đúng ngữ cảnh. */

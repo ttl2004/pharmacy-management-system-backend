@@ -72,7 +72,7 @@ export class PermissionController {
 
   @RequirePermissions('permission:update')
   @Delete('roles/:code')
-  @ApiOperation({ description: 'Xoá vai trò tự tạo. Vai trò hệ thống trả 1504; còn người dùng trả 1510.' })
+  @ApiOperation({ description: 'Xoá mềm vai trò tự tạo (mã được nhả để dùng lại). Vai trò hệ thống trả 1504; còn người dùng chưa xoá trả 1510.' })
   deleteRole(@Param('code') code: string, @CurrentUser() user: JwtUser) {
     return this.roleAdminService.deleteRole(code, user);
   }

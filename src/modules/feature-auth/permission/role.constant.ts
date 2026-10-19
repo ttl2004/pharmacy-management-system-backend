@@ -101,6 +101,19 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'order:create',
     'order:pay',
     'order:cancel',
+    // Khai trước cho màn giao diện đã có (khách hàng, công nợ, giá, báo cáo, DQG).
+    'customer:read',
+    'customer:create',
+    'customer:update',
+    'customer:delete',
+    'customer-debt:read',
+    'supplier-debt:read',
+    'supplier-debt:write',
+    'price-book:update',
+    'report:read',
+    'dqg:read',
+    'dqg:write',
+    'dqg:connect',
   ],
   [AuthRole.PHARMACY_MANAGER]: [
     'branch:read',
@@ -135,6 +148,18 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'order:create',
     'order:pay',
     'order:cancel',
+    // Kết nối tài khoản CSDL Dược là việc cấp chuỗi — chỉ ADMIN.
+    'customer:read',
+    'customer:create',
+    'customer:update',
+    'customer:delete',
+    'customer-debt:read',
+    'supplier-debt:read',
+    'supplier-debt:write',
+    'price-book:update',
+    'report:read',
+    'dqg:read',
+    'dqg:write',
   ],
   // Dược sĩ chỉ ĐỌC dữ liệu kho của chi nhánh mình; mọi thao tác ghi kho là của PM hoặc ADMIN (K9, K10).
   [AuthRole.SALES_STAFF]: [
@@ -154,5 +179,10 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'order:create',
     'order:pay',
     'order:cancel',
+    // Tại quầy: tra cứu / thêm khách và xem công nợ, không xoá khách.
+    'customer:read',
+    'customer:create',
+    'customer:update',
+    'customer-debt:read',
   ],
 };

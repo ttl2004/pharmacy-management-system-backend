@@ -6,7 +6,7 @@ import type { RequestActor } from 'src/common/decorators/current-actor.decorator
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { AuthRole } from 'src/common/types/common.enum';
 import { addDaysToDateOnly, todayInVietnam } from 'src/common/utils/date-only.util';
-import type { GoodsReceiptItemRequest } from 'src/modules/feature-inventory/goods-receipt/dtos/goods-receipt.request';
+import type { GoodsReceiptItemRequest } from 'src/modules/feature-inventory/goods-receipt/dtos/goods-receipt-item.request';
 import { GoodsReceiptService } from 'src/modules/feature-inventory/goods-receipt/goods-receipt.service';
 import { AppModule } from '../app.module';
 import {

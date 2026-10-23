@@ -13,6 +13,23 @@ export class SupplierRepository extends PrismaBaseRepository<Supplier> {
     return tx.supplier.findFirst({ where: { id, isDeleted: false } });
   }
 
+  /** Cột NCC + nhóm + người tạo, thứ tự tuỳ ý (caller tự xếp lại theo id). */
+  findManyByIds(ids: string[]) {
+    if (ids.length === 0) return Promise.resolve([]);
+    return this.prisma.supplier.findMany({
+      where: { id: { in: ids }, isDeleted: false },
+      include: {
+        group: { select: { id: true, name: true } },
+        createdByUser: { select: { id: true, fullName: true } },
+      },
+    });
+  }
+
+  /** Nhóm NCC còn tồn tại (chưa xoá mềm). */
+  async groupExistsWith(tx: Prisma.TransactionClient, groupId: string): Promise<boolean> {
+    return (await tx.supplierGroup.count({ where: { id: groupId, isDeleted: false } })) > 0;
+  }
+
   createWith(tx: Prisma.TransactionClient, data: Prisma.SupplierUncheckedCreateInput): Promise<Supplier> {
     return tx.supplier.create({ data });
   }

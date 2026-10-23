@@ -1,7 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { RecordStatus } from '@prisma/client';
 import { Transform } from 'class-transformer';
-import { IsEmail, IsEnum, IsNotEmpty, IsOptional, IsString, Matches, MaxLength, ValidateIf } from 'class-validator';
+import { IsEmail, IsEnum, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength, ValidateIf } from 'class-validator';
 import { trimUpperCase } from 'src/common/utils/string-transform.util';
 
 const CODE_PATTERN = /^[A-Z0-9_-]+$/;
@@ -55,6 +55,23 @@ export class CreateSupplierRequest {
   @IsString()
   @ApiPropertyOptional()
   note?: string;
+
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ description: 'Id nhóm NCC (supplier-group)' })
+  groupId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  @ApiPropertyOptional()
+  companyName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  @ApiPropertyOptional({ description: 'CMND/CCCD của NCC cá nhân' })
+  idNumber?: string;
 
   @IsOptional()
   @IsEnum(RecordStatus)
@@ -117,6 +134,23 @@ export class UpdateSupplierRequest {
   @IsString()
   @ApiPropertyOptional({ nullable: true })
   note?: string | null;
+
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ nullable: true })
+  groupId?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  @ApiPropertyOptional({ nullable: true })
+  companyName?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  @ApiPropertyOptional({ nullable: true })
+  idNumber?: string | null;
 
   @ValidateIf((_, value) => value !== undefined)
   @IsEnum(RecordStatus)

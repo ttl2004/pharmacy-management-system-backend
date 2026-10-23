@@ -54,8 +54,8 @@ npm run start:debug
 
 Sau khi chạy thành công:
 
-- API: <http://localhost:3000>
-- Swagger UI: <http://localhost:3000/docs>
+- API: <http://localhost:3790>
+- Swagger UI: <http://localhost:3790/docs>
 
 ---
 
@@ -88,8 +88,8 @@ src/
 
 | Biến | Mô tả | Mặc định |
 |---|---|---|
-| `PORT` | Port HTTP server | `3000` |
-| `CORS_ORIGINS` | Origin frontend được gọi API kèm cookie, ngăn cách bằng dấu phẩy (vd. `http://localhost:5173`). Để trống: chặn mọi lời gọi chéo origin | (trống) |
+| `PORT` | Port HTTP server | `3790` |
+| `CORS_ORIGINS` | Origin frontend được gọi API kèm cookie, ngăn cách bằng dấu phẩy (vd. `http://localhost:5790`). Để trống: chặn mọi lời gọi chéo origin | (trống) |
 | `DATABASE_URL` | Chuỗi kết nối PostgreSQL, dạng `postgresql://user:password@host:5432/dbname?connection_limit=10&pool_timeout=20`. Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`). Luôn đặt `connection_limit` — DB chỉ có 60 kết nối dùng chung | (bắt buộc) |
 | `DB_LOGGING` | In câu SQL ra log | `false` |
 | `JWT_ACCESS_SECRET` | Secret ký access JWT, tối thiểu 32 ký tự | (bắt buộc) |

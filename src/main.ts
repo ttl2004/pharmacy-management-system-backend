@@ -83,7 +83,7 @@ async function bootstrap() {
     swaggerOptions: { persistAuthorization: true },
   });
 
-  const port = configService.get<number>('port') || 3000;
+  const port = configService.get<number>('port') || 3790;
 
   await app.listen(port, '0.0.0.0');
 

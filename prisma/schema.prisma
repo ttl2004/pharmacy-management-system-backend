@@ -62,15 +62,17 @@ model Branch {
 
   users User[]
 
-  goodsReceipts    GoodsReceipt[]
-  stockBatches     StockBatch[]
-  stockMovements   StockMovement[]
-  transfersOut     StockTransfer[]   @relation("TransferFromBranch")
-  transfersIn      StockTransfer[]   @relation("TransferToBranch")
-  stockAdjustments StockAdjustment[]
-  branchProducts   BranchProduct[]
-  auditLogs        AuditLog[]
-  orders           Order[]
+  goodsReceipts           GoodsReceipt[]
+  stockBatches            StockBatch[]
+  stockMovements          StockMovement[]
+  transfersOut            StockTransfer[]          @relation("TransferFromBranch")
+  transfersIn             StockTransfer[]          @relation("TransferToBranch")
+  stockAdjustments        StockAdjustment[]
+  branchProducts          BranchProduct[]
+  auditLogs               AuditLog[]
+  orders                  Order[]
+  supplierPayments        SupplierPayment[]
+  supplierDebtAdjustments SupplierDebtAdjustment[]
 
   @@map("branches")
 }
@@ -126,6 +128,17 @@ model User {
   branchProductsCreated       BranchProduct[]       @relation("BranchProductCreatedBy")
   branchProductsUpdated       BranchProduct[]       @relation("BranchProductUpdatedBy")
   auditLogs                   AuditLog[]            @relation("AuditLogActor")
+
+  // Quan hệ ngược của NCC bổ sung đợt 4 — chỉ để Prisma tạo FK.
+  goodsReceiptsReceived            GoodsReceipt[]           @relation("GoodsReceiptReceiver")
+  supplierGroupsCreated            SupplierGroup[]          @relation("SupplierGroupCreatedBy")
+  supplierGroupsUpdated            SupplierGroup[]          @relation("SupplierGroupUpdatedBy")
+  supplierPaymentsCreated          SupplierPayment[]        @relation("SupplierPaymentCreatedBy")
+  supplierPaymentsUpdated          SupplierPayment[]        @relation("SupplierPaymentUpdatedBy")
+  supplierPaymentsCancelled        SupplierPayment[]        @relation("SupplierPaymentCancelledBy")
+  supplierDebtAdjustmentsCreated   SupplierDebtAdjustment[] @relation("SupplierDebtAdjustmentCreatedBy")
+  supplierDebtAdjustmentsUpdated   SupplierDebtAdjustment[] @relation("SupplierDebtAdjustmentUpdatedBy")
+  supplierDebtAdjustmentsCancelled SupplierDebtAdjustment[] @relation("SupplierDebtAdjustmentCancelledBy")
 
   // Quan hệ ngược của nhóm bán hàng — chỉ để Prisma tạo FK.
   ordersAsCustomer  Order[]     @relation("OrderCustomer")
@@ -446,52 +459,75 @@ model Supplier {
   contactName String?      @db.VarChar(150)
   note        String?      @db.Text
   status      RecordStatus @default(ACTIVE)
+  /// Nhóm NCC (nullable — NCC cũ chưa phân nhóm).
+  groupId     String?      @db.Uuid
+  companyName String?      @db.VarChar(200)
+  /// CMND/CCCD của NCC cá nhân.
+  idNumber    String?      @db.VarChar(20)
 
-  createdByUser User? @relation("SupplierCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
-  updatedByUser User? @relation("SupplierUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  group         SupplierGroup? @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  createdByUser User?          @relation("SupplierCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser User?          @relation("SupplierUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
 
   goodsReceipts    GoodsReceipt[]
   stockBatches     StockBatch[]
   stockAdjustments StockAdjustment[]
+  payments         SupplierPayment[]
+  debtAdjustments  SupplierDebtAdjustment[]
 
   @@index([status])
+  @@index([groupId])
   @@map("suppliers")
 }
 
 model GoodsReceipt {
-  id                  String        @id @default(uuid()) @db.Uuid
-  isDeleted           Boolean       @default(false)
-  createdAt           DateTime      @default(now()) @db.Timestamptz(3)
-  createdBy           String?       @db.Uuid
-  updatedAt           DateTime?     @db.Timestamptz(3)
-  updatedBy           String?       @db.Uuid
-  code                String        @unique @db.VarChar(20)
-  branchId            String        @db.Uuid
-  supplierId          String        @db.Uuid
-  status              ReceiptStatus @default(DRAFT)
-  receivedAt          DateTime?     @db.Timestamptz(3)
-  subtotalAmount      BigInt        @default(0)
-  discountAmount      BigInt        @default(0)
-  vatAmount           BigInt        @default(0)
-  totalAmount         BigInt        @default(0)
-  paidAmount          BigInt        @default(0)
-  paymentStatus       PaymentStatus @default(UNPAID)
-  supplierInvoiceNo   String?       @db.VarChar(50)
-  supplierInvoiceDate DateTime?     @db.Date
-  confirmedAt         DateTime?     @db.Timestamptz(3)
-  confirmedBy         String?       @db.Uuid
-  cancelledAt         DateTime?     @db.Timestamptz(3)
-  cancelledBy         String?       @db.Uuid
-  cancelReason        String?       @db.Text
-  note                String?       @db.Text
+  id                    String         @id @default(uuid()) @db.Uuid
+  isDeleted             Boolean        @default(false)
+  createdAt             DateTime       @default(now()) @db.Timestamptz(3)
+  createdBy             String?        @db.Uuid
+  updatedAt             DateTime?      @db.Timestamptz(3)
+  updatedBy             String?        @db.Uuid
+  code                  String         @unique @db.VarChar(20)
+  branchId              String         @db.Uuid
+  supplierId            String         @db.Uuid
+  status                ReceiptStatus  @default(DRAFT)
+  receivedAt            DateTime?      @db.Timestamptz(3)
+  subtotalAmount        BigInt         @default(0)
+  discountAmount        BigInt         @default(0)
+  vatAmount             BigInt         @default(0)
+  totalAmount           BigInt         @default(0)
+  paidAmount            BigInt         @default(0)
+  paymentStatus         PaymentStatus  @default(UNPAID)
+  supplierInvoiceNo     String?        @db.VarChar(50)
+  supplierInvoiceDate   DateTime?      @db.Date
+  confirmedAt           DateTime?      @db.Timestamptz(3)
+  confirmedBy           String?        @db.Uuid
+  cancelledAt           DateTime?      @db.Timestamptz(3)
+  cancelledBy           String?        @db.Uuid
+  cancelReason          String?        @db.Text
+  note                  String?        @db.Text
+  /// Người nhập hàng (có thể khác người tạo phiếu).
+  receiverId            String?        @db.Uuid
+  /// Hình thức trả NCC lúc xác nhận: CASH | BANK_TRANSFER (CHECK cấm COD).
+  paymentMethod         PaymentMethod?
+  /// Chiết khấu % (null = giảm giá theo VND ở discountAmount).
+  discountPercent       Decimal?       @db.Decimal(5, 2)
+  /// Chi phí nhập cộng vào "Cần trả NCC".
+  supplierExpenseAmount BigInt         @default(0)
+  /// Chi phí nhập chỉ tính vào giá vốn, không cộng vào công nợ NCC.
+  otherExpenseAmount    BigInt         @default(0)
+  /// Bản chụp chi phí: [{code,name,kind,valueType,value,amount}].
+  expenses              Json?          @db.JsonB
 
-  branch          Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
-  supplier        Supplier           @relation(fields: [supplierId], references: [id], onDelete: Restrict)
-  createdByUser   User?              @relation("GoodsReceiptCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
-  updatedByUser   User?              @relation("GoodsReceiptUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
-  confirmedByUser User?              @relation("GoodsReceiptConfirmedBy", fields: [confirmedBy], references: [id], onDelete: Restrict)
-  cancelledByUser User?              @relation("GoodsReceiptCancelledBy", fields: [cancelledBy], references: [id], onDelete: Restrict)
-  items           GoodsReceiptItem[]
+  receiver           User?                       @relation("GoodsReceiptReceiver", fields: [receiverId], references: [id], onDelete: Restrict)
+  paymentAllocations SupplierPaymentAllocation[]
+  branch             Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  supplier           Supplier                    @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  createdByUser      User?                       @relation("GoodsReceiptCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser      User?                       @relation("GoodsReceiptUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  confirmedByUser    User?                       @relation("GoodsReceiptConfirmedBy", fields: [confirmedBy], references: [id], onDelete: Restrict)
+  cancelledByUser    User?                       @relation("GoodsReceiptCancelledBy", fields: [cancelledBy], references: [id], onDelete: Restrict)
+  items              GoodsReceiptItem[]
 
   @@index([branchId, status, createdAt])
   @@index([supplierId])
@@ -516,6 +552,9 @@ model GoodsReceiptItem {
   batchNumber       String    @db.VarChar(50)
   manufacturingDate DateTime? @db.Date
   expiryDate        DateTime  @db.Date
+  /// Giảm giá trên MỖI đơn vị nhập (VND).
+  unitDiscount      Int       @default(0)
+  note              String?   @db.Text
 
   receipt       GoodsReceipt @relation(fields: [receiptId], references: [id], onDelete: Restrict)
   product       Product      @relation(fields: [productId], references: [id], onDelete: Restrict)
@@ -527,6 +566,108 @@ model GoodsReceiptItem {
   @@index([receiptId])
   @@index([productId])
   @@map("goods_receipt_items")
+}
+
+/// RECEIPT = phiếu chi tự sinh khi xác nhận phiếu nhập có "Tiền trả NCC"; MANUAL = lập tay.
+enum SupplierPaymentSource {
+  MANUAL
+  RECEIPT
+}
+
+/// Nhóm NCC. Xoá mềm như các danh mục khác.
+model SupplierGroup {
+  id        String    @id @default(uuid()) @db.Uuid
+  isDeleted Boolean   @default(false)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy String?   @db.Uuid
+  updatedAt DateTime? @db.Timestamptz(3)
+  updatedBy String?   @db.Uuid
+  name      String    @db.VarChar(100)
+  note      String?   @db.Text
+
+  createdByUser User?      @relation("SupplierGroupCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser User?      @relation("SupplierGroupUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  suppliers     Supplier[]
+
+  @@map("supplier_groups")
+}
+
+/// Phiếu chi trả NCC (TTPN…). Chứng từ tài chính: không xoá mềm, huỷ = cancelledAt.
+/// amount = Σ allocations; GoodsReceipt.paidAmount là bộ đệm của Σ phân bổ chưa huỷ.
+model SupplierPayment {
+  id           String                @id @default(uuid()) @db.Uuid
+  createdAt    DateTime              @default(now()) @db.Timestamptz(3)
+  createdBy    String?               @db.Uuid
+  updatedAt    DateTime?             @db.Timestamptz(3)
+  updatedBy    String?               @db.Uuid
+  code         String                @unique @db.VarChar(20)
+  supplierId   String                @db.Uuid
+  branchId     String                @db.Uuid
+  paidAt       DateTime              @db.Timestamptz(3)
+  method       PaymentMethod
+  amount       BigInt
+  note         String?               @db.Text
+  source       SupplierPaymentSource @default(MANUAL)
+  cancelledAt  DateTime?             @db.Timestamptz(3)
+  cancelledBy  String?               @db.Uuid
+  cancelReason String?               @db.Text
+
+  supplier        Supplier                    @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  branch          Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  createdByUser   User?                       @relation("SupplierPaymentCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser   User?                       @relation("SupplierPaymentUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  cancelledByUser User?                       @relation("SupplierPaymentCancelledBy", fields: [cancelledBy], references: [id], onDelete: Restrict)
+  allocations     SupplierPaymentAllocation[]
+
+  @@index([supplierId, paidAt])
+  @@index([branchId])
+  @@map("supplier_payments")
+}
+
+/// Phân bổ một phiếu chi vào từng phiếu nhập.
+model SupplierPaymentAllocation {
+  id        String   @id @default(uuid()) @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  paymentId String   @db.Uuid
+  receiptId String   @db.Uuid
+  amount    BigInt
+
+  payment SupplierPayment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  receipt GoodsReceipt    @relation(fields: [receiptId], references: [id], onDelete: Restrict)
+
+  @@unique([paymentId, receiptId])
+  @@index([receiptId])
+  @@map("supplier_payment_allocations")
+}
+
+/// Điều chỉnh công nợ NCC (DCN…), cấp chuỗi. Huỷ = cancelledAt.
+model SupplierDebtAdjustment {
+  id           String    @id @default(uuid()) @db.Uuid
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy    String?   @db.Uuid
+  updatedAt    DateTime? @db.Timestamptz(3)
+  updatedBy    String?   @db.Uuid
+  code         String    @unique @db.VarChar(20)
+  supplierId   String    @db.Uuid
+  branchId     String    @db.Uuid
+  adjustedAt   DateTime  @db.Timestamptz(3)
+  debtBefore   BigInt
+  debtAfter    BigInt
+  delta        BigInt
+  note         String    @db.Text
+  cancelledAt  DateTime? @db.Timestamptz(3)
+  cancelledBy  String?   @db.Uuid
+  cancelReason String?   @db.Text
+
+  supplier        Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  branch          Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  createdByUser   User?    @relation("SupplierDebtAdjustmentCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  updatedByUser   User?    @relation("SupplierDebtAdjustmentUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
+  cancelledByUser User?    @relation("SupplierDebtAdjustmentCancelledBy", fields: [cancelledBy], references: [id], onDelete: Restrict)
+
+  @@index([supplierId, createdAt])
+  @@index([branchId])
+  @@map("supplier_debt_adjustments")
 }
 
 model StockBatch {

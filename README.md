@@ -257,6 +257,32 @@ update() { ... }
 đăng nhập thì ghi rõ `@AnyAuthenticated()`. `SUPER_ADMIN` bỏ qua toàn bộ kiểm tra quyền. Module
 nghiệp vụ muốn dùng guard phải `imports: [PermissionModule, AuthzModule]`.
 
+### Nhà cung cấp, phiếu nhập và công nợ NCC
+
+Module nằm trong `src/modules/feature-inventory/` (`supplier`, `supplier-group`, `supplier-debt`, `goods-receipt`).
+
+| Nhóm | Endpoint | Quyền |
+|---|---|---|
+| Nhóm NCC | `GET·POST /supplier-group`, `PATCH·DELETE /supplier-group/:id` | `supplier:read` · `create` · `update` · `delete` |
+| Phiếu chi (TTPN) | `POST /supplier-payment`, `GET /supplier-payment/:id`, `POST /supplier-payment/:id/cancel` | `supplier-debt:write` / `read` |
+| Điều chỉnh nợ (DCN) | `POST /supplier-debt-adjustment`, `GET /supplier-debt-adjustment/:id`, `POST …/:id/cancel` | `supplier-debt:write` / `read` |
+| Sổ nợ, phiếu còn nợ | `GET /supplier-debt/:supplierId/ledger`, `GET /supplier-debt/:supplierId/open-receipts?branchId=`, `GET /supplier-debt/receipts/:receiptId/payments` | `supplier-debt:read` (open-receipts: `write`) |
+| Phiếu nhập bổ sung | `GET /goods-receipt/receivers`, `PATCH /goods-receipt/:id/meta` | `goods-receipt:read` · `create` |
+| Cập nhật đã trả | `PATCH /goods-receipt/:id/payment` | `goods-receipt:confirm` + `supplier-debt:write` |
+
+Quy tắc chính:
+
+- **Nợ theo chi nhánh.** Nợ NCC = Σ phiếu nhập + Σ DCN chưa huỷ của đúng chi nhánh (không gửi `branchId` mới là toàn chuỗi). `open-receipts` trả thêm `debt` của chi nhánh đang chọn.
+- **Điều chỉnh nợ có kiểm tra đồng thời.** `expectedDebtBefore` là nợ chi nhánh client đang thấy; lệch so với DB → `DEBT_CHANGED` (1715), tải lại rồi thử. Chênh lệch = `debtAfter − expectedDebtBefore`.
+- **Trần nợ.** Trả vượt nợ còn lại (phiếu chi, hoặc tăng số đã trả trên phiếu nhập) → `DEBT_EXCEEDED` (1714). Huỷ làm nợ chi nhánh âm cũng bị 1714 và rollback.
+- **Huỷ phiếu nhập đã xác nhận.** Phiếu chi do hệ thống sinh tự huỷ theo; phiếu chi lập tay → `RECEIPT_HAS_PAYMENTS` (1713), phải huỷ phiếu chi trước.
+- **`PATCH …/payment`.** Tăng số đã trả → tự lập phiếu chi phần chênh; giảm → từ chối (phải huỷ phiếu chi).
+- **`PATCH …/meta`.** Chỉ áp cho phiếu CONFIRMED (khác trạng thái → 1701); chỉ sửa người nhập, ngày nhập, ghi chú, body rỗng → 1002. Người nhập được kiểm tra lại chỉ khi đổi.
+- **Thứ tự khoá.** NCC (`suppliers`) khoá trước, phiếu nhập (`goods_receipts`) khoá sau — mọi đường ghi đều theo thứ tự này để tránh deadlock.
+- **Phạm vi chi nhánh.** PM/NV bị ép theo chi nhánh của mình (chi nhánh khác → `BRANCH_ACCESS_DENIED`, 1506); chi nhánh không tồn tại, đã xoá hoặc ngừng hoạt động → `INVALID_REFERENCE` (1602).
+
+> Migration `20261023160000_bo_sung_ncc_phieu_nhap_cong_no` chỉ cộng thêm (đã áp lên DB dùng chung ngày 2026-10-23). Migration sau này trên DB dùng chung vẫn cần xác nhận trước khi `prisma migrate deploy`. Dữ liệu DCN tạo trước bản sửa phạm vi chi nhánh có thể làm nợ từng chi nhánh lệch; nên huỷ các DCN đó thủ công.
+
 ### Phạm vi chi nhánh
 
 `PermissionGuard` chỉ trả lời "vai trò này được gọi API này không". Dữ liệu gắn chi nhánh còn qua lớp

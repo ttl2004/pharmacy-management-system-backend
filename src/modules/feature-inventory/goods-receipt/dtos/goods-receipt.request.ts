@@ -1,11 +1,15 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Transform, Type } from 'class-transformer';
+import { PaymentMethod } from '@prisma/client';
+import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsDateString,
+  IsIn,
   IsInt,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
   IsUUID,
@@ -15,64 +19,18 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { IsDateOnly } from 'src/common/validators/is-date-only.validator';
-import { trimUpperCase } from 'src/common/utils/string-transform.util';
+import { GoodsReceiptExpenseRequest } from './goods-receipt-expense.request';
+import { GoodsReceiptItemRequest } from './goods-receipt-item.request';
 
-/** Trần đầu vào — chặn số vô lý trước khi chạm DB (cột `int` tràn ở ~2,1 tỷ). */
-const MAX_QUANTITY = 1_000_000;
-const MAX_UNIT_PRICE = 1_000_000_000;
 /** Tiền cấp phiếu: dưới `Number.MAX_SAFE_INTEGER` rất xa, đủ cho mọi phiếu thật. */
 const MAX_DOCUMENT_AMOUNT = 1_000_000_000_000;
+const MAX_EXPENSES = 10;
 
-/**
- * Một dòng phiếu nhập. KHÔNG có `conversionRate`, `baseQuantity`, `totalPrice`: server tự tính từ `product_units`
- * (whitelist + forbidNonWhitelisted nên client gửi lên là 400).
- */
-export class GoodsReceiptItemRequest {
-  @IsUUID()
-  @ApiProperty()
-  productId: string;
+/** Hình thức trả NCC của phiếu nhập — COD không áp dụng (CHECK trong DB cũng cấm). */
+const RECEIPT_PAYMENT_METHODS = [PaymentMethod.CASH, PaymentMethod.BANK_TRANSFER];
 
-  @IsUUID()
-  @ApiProperty({ description: 'Đơn vị nhập (thường là Hộp) — phải thuộc đúng productId' })
-  productUnitId: string;
-
-  @IsInt()
-  @Min(1)
-  @Max(MAX_QUANTITY)
-  @ApiProperty({ example: 10, description: 'Số lượng theo đơn vị nhập' })
-  quantity: number;
-
-  @IsInt()
-  @Min(0)
-  @Max(MAX_UNIT_PRICE)
-  @ApiProperty({ example: 42000, description: 'Giá nhập theo đơn vị nhập, đồng' })
-  importPrice: number;
-
-  @Transform(trimUpperCase)
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(50)
-  @ApiProperty({ example: 'LO2026A' })
-  batchNumber: string;
-
-  @IsOptional()
-  @IsDateOnly()
-  @ApiPropertyOptional({ example: '2026-01-15' })
-  manufacturingDate?: string;
-
-  @IsDateOnly()
-  @ApiProperty({ example: '2028-01-15' })
-  expiryDate: string;
-}
-
-export class CreateGoodsReceiptRequest {
-  @IsOptional()
-  @IsUUID()
-  @ApiPropertyOptional({
-    description: 'Chi nhánh nhập. PM/nhân viên bỏ trống = chi nhánh của mình; ADMIN bắt buộc gửi.',
-  })
-  branchId?: string;
-
+/** Phần thân dùng chung cho tạo phiếu nháp (POST) và thay phiếu nháp (PUT). */
+export class GoodsReceiptDraftFields {
   @IsUUID()
   @ApiProperty()
   supplierId: string;
@@ -81,6 +39,16 @@ export class CreateGoodsReceiptRequest {
   @IsDateString({ strict: true })
   @ApiPropertyOptional({ description: 'Thời điểm nhận hàng thực tế (ISO 8601). Bỏ trống = lúc xác nhận.' })
   receivedAt?: string;
+
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ description: 'Người nhập hàng — nhân sự ACTIVE của chi nhánh phiếu (hoặc vai trò toàn chuỗi)' })
+  receiverId?: string;
+
+  @IsOptional()
+  @IsIn(RECEIPT_PAYMENT_METHODS)
+  @ApiPropertyOptional({ enum: RECEIPT_PAYMENT_METHODS, description: 'Hình thức trả NCC (CASH | BANK_TRANSFER)' })
+  paymentMethod?: PaymentMethod;
 
   @IsOptional()
   @IsString()
@@ -97,8 +65,15 @@ export class CreateGoodsReceiptRequest {
   @IsInt()
   @Min(0)
   @Max(MAX_DOCUMENT_AMOUNT)
-  @ApiPropertyOptional({ default: 0 })
+  @ApiPropertyOptional({ default: 0, description: 'Giảm giá phiếu theo VND. Không gửi cùng discountPercent.' })
   discountAmount?: number;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(100)
+  @ApiPropertyOptional({ description: 'Chiết khấu % trên tiền hàng; server tự tính discountAmount' })
+  discountPercent?: number;
 
   @IsOptional()
   @IsInt()
@@ -115,6 +90,14 @@ export class CreateGoodsReceiptRequest {
   paidAmount?: number;
 
   @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_EXPENSES)
+  @ValidateNested({ each: true })
+  @Type(() => GoodsReceiptExpenseRequest)
+  @ApiPropertyOptional({ type: [GoodsReceiptExpenseRequest], description: `Chi phí nhập, tối đa ${MAX_EXPENSES}` })
+  expenses?: GoodsReceiptExpenseRequest[];
+
+  @IsOptional()
   @IsString()
   @ApiPropertyOptional()
   note?: string;
@@ -125,63 +108,19 @@ export class CreateGoodsReceiptRequest {
   @Type(() => GoodsReceiptItemRequest)
   @ApiProperty({ type: [GoodsReceiptItemRequest] })
   items: GoodsReceiptItemRequest[];
+}
+
+export class CreateGoodsReceiptRequest extends GoodsReceiptDraftFields {
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({
+    description: 'Chi nhánh nhập. PM/nhân viên bỏ trống = chi nhánh của mình; ADMIN bắt buộc gửi.',
+  })
+  branchId?: string;
 }
 
 /** Sửa phiếu NHÁP = thay toàn bộ (PUT). Không đổi được chi nhánh: muốn nhập chi nhánh khác thì lập phiếu khác. */
-export class UpdateGoodsReceiptRequest {
-  @IsUUID()
-  @ApiProperty()
-  supplierId: string;
-
-  @IsOptional()
-  @IsDateString({ strict: true })
-  @ApiPropertyOptional()
-  receivedAt?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(50)
-  @ApiPropertyOptional()
-  supplierInvoiceNo?: string;
-
-  @IsOptional()
-  @IsDateOnly()
-  @ApiPropertyOptional()
-  supplierInvoiceDate?: string;
-
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  @Max(MAX_DOCUMENT_AMOUNT)
-  @ApiPropertyOptional()
-  discountAmount?: number;
-
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  @Max(MAX_DOCUMENT_AMOUNT)
-  @ApiPropertyOptional()
-  vatAmount?: number;
-
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  @Max(MAX_DOCUMENT_AMOUNT)
-  @ApiPropertyOptional()
-  paidAmount?: number;
-
-  @IsOptional()
-  @IsString()
-  @ApiPropertyOptional()
-  note?: string;
-
-  @IsArray()
-  @ArrayMinSize(1)
-  @ValidateNested({ each: true })
-  @Type(() => GoodsReceiptItemRequest)
-  @ApiProperty({ type: [GoodsReceiptItemRequest] })
-  items: GoodsReceiptItemRequest[];
-}
+export class UpdateGoodsReceiptRequest extends GoodsReceiptDraftFields {}
 
 export class CancelGoodsReceiptRequest {
   @IsString()

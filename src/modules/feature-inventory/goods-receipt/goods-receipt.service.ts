@@ -1,12 +1,20 @@
 import { Injectable } from '@nestjs/common';
-import { AuditAction, Prisma, ReceiptStatus, RecordStatus, StockMovementType, StockRefType } from '@prisma/client';
+import {
+  AuditAction,
+  PaymentMethod,
+  PaymentStatus,
+  Prisma,
+  ReceiptStatus,
+  RecordStatus,
+  StockMovementType,
+  StockRefType,
+  SupplierPaymentSource,
+} from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorCode } from 'src/common/types/error-code';
 import { escapeLike } from 'src/common/utils/like-pattern.util';
 import {
   addDaysToDateOnly,
-  daysBetweenDateOnly,
-  parseDateOnly,
   toDateOnlyString,
   todayInVietnam,
   vietnamDayStartUtc,
@@ -17,36 +25,26 @@ import { DocumentCodeService } from '../core/document-code.service';
 import { badRequest, documentErrors, invalidReference, inventoryError } from '../core/inventory.error';
 import { branchWhere, resolveWriteBranch } from '../core/inventory-scope';
 import { InventoryTransactions } from '../core/inventory-transactions';
-import { AUDIT_ENTITY, MAX_DOCUMENT_LINES, NEAR_EXPIRY_WARNING_DAYS } from '../core/inventory.constants';
+import { AUDIT_ENTITY } from '../core/inventory.constants';
 import { StockIntakeService } from '../core/stock-intake.service';
 import { StockLedgerService } from '../core/stock-ledger.service';
+import { assertBranchDebtNotNegative } from '../supplier-debt/supplier-debt-guards';
+import { SupplierDebtRepository } from '../supplier-debt/repositories/supplier-debt.repository';
+import { SupplierPaymentWriter } from '../supplier-debt/supplier-payment.writer';
 import {
   CancelGoodsReceiptRequest,
   CreateGoodsReceiptRequest,
-  GoodsReceiptItemRequest,
   UpdateGoodsReceiptRequest,
-  UpdateReceiptPaymentRequest,
 } from './dtos/goods-receipt.request';
 import { GoodsReceiptQuery } from './dtos/goods-receipt.query';
-import { computeLine, computeTotals, paymentStatusOf, ReceiptTotals } from './goods-receipt.calculator';
+import { allocateUnitCosts } from './goods-receipt-cost-allocation';
+import { GoodsReceiptDraftBuilder } from './goods-receipt-draft.builder';
+import { GoodsReceiptLocker } from './goods-receipt-locker';
+import { computeLine } from './goods-receipt.calculator';
 import { GoodsReceiptDetail, GoodsReceiptRepository } from './repositories/goods-receipt.repository';
 
 /** Phiếu trả về client kèm cảnh báo (lô cận date…) — cảnh báo không chặn thao tác. */
 export type GoodsReceiptView = GoodsReceiptDetail & { warnings: string[] };
-
-type DraftInput = Omit<CreateGoodsReceiptRequest, 'branchId'>;
-
-interface PreparedDraft {
-  header: {
-    supplierId: string;
-    receivedAt: Date | null;
-    supplierInvoiceNo: string | null;
-    supplierInvoiceDate: Date | null;
-    note: string | null;
-  } & ReceiptTotals;
-  items: Omit<Prisma.GoodsReceiptItemCreateManyInput, 'receiptId' | 'createdBy'>[];
-  warnings: string[];
-}
 
 const SORTABLE_FIELDS = new Set(['createdAt', 'code', 'totalAmount']);
 
@@ -56,10 +54,14 @@ const errors = documentErrors('Phiếu nhập');
 export class GoodsReceiptService {
   constructor(
     private readonly receipts: GoodsReceiptRepository,
+    private readonly locker: GoodsReceiptLocker,
+    private readonly debts: SupplierDebtRepository,
+    private readonly draftBuilder: GoodsReceiptDraftBuilder,
     private readonly intake: StockIntakeService,
     private readonly transactions: InventoryTransactions,
     private readonly ledger: StockLedgerService,
     private readonly codes: DocumentCodeService,
+    private readonly supplierPayments: SupplierPaymentWriter,
     private readonly audit: AuditLogService,
   ) {}
 
@@ -68,6 +70,8 @@ export class GoodsReceiptService {
     const where: Prisma.GoodsReceiptWhereInput = {};
     if (branchId) where.branchId = branchId;
     if (query.supplierId) where.supplierId = query.supplierId;
+    if (query.createdBy) where.createdBy = query.createdBy;
+    if (query.receiverId) where.receiverId = query.receiverId;
     if (query.status) where.status = query.status;
     if (query.fromDate || query.toDate) {
       where.createdAt = {
@@ -100,7 +104,10 @@ export class GoodsReceiptService {
     const actorId = actor.user.userId;
 
     return this.transactions.run(async ({ tx }) => {
-      const draft = await this.prepareDraft(tx, branchId, dto, { requireActiveSupplier: true });
+      const draft = await this.draftBuilder.prepare(tx, branchId, dto, {
+        requireActiveSupplier: true,
+        defaultReceiverId: actorId,
+      });
       const code = await this.codes.next(tx, 'GOODS_RECEIPT');
       const { id } = await this.receipts.createHeader(tx, { code, branchId, ...draft.header, createdBy: actorId });
       await this.receipts.createItems(
@@ -117,6 +124,11 @@ export class GoodsReceiptService {
           after: {
             code,
             supplierId: draft.header.supplierId,
+            receiverId: draft.header.receiverId,
+            paymentMethod: draft.header.paymentMethod,
+            discountAmount: draft.header.discountAmount.toString(),
+            supplierExpenseAmount: draft.header.supplierExpenseAmount.toString(),
+            otherExpenseAmount: draft.header.otherExpenseAmount.toString(),
             totalAmount: draft.header.totalAmount.toString(),
             lines: draft.items.length,
           },
@@ -133,11 +145,14 @@ export class GoodsReceiptService {
     const actorId = actor.user.userId;
 
     return this.transactions.run(async ({ tx }) => {
-      const head = await this.receipts.findStatus(tx, id, branchWhere(scope));
-      if (!head) throw errors.notFound();
+      // Khoá phiếu: đầu phiếu/dòng không đổi giữa lúc đọc và ghi (xác nhận, PATCH payment chạy song song phải xếp hàng).
+      const head = await this.locker.lock(tx, id, branchWhere(scope));
       if (head.status !== ReceiptStatus.DRAFT) throw errors.wrongState(head.status);
 
-      const draft = await this.prepareDraft(tx, head.branchId, dto, { requireActiveSupplier: true });
+      const draft = await this.draftBuilder.prepare(tx, head.branchId, dto, {
+        requireActiveSupplier: true,
+        defaultReceiverId: actorId,
+      });
       const changed = await this.receipts.transition(tx, id, ReceiptStatus.DRAFT, {
         ...draft.header,
         updatedAt: new Date(),
@@ -145,7 +160,8 @@ export class GoodsReceiptService {
       });
       if (!changed) throw errors.wrongState();
 
-      await this.receipts.softDeleteItems(tx, id, actorId);
+      // Số dòng bị xoá mềm = số dòng trước khi sửa, dùng cho phần "trước" của nhật ký.
+      const { count: previousLines } = await this.receipts.softDeleteItems(tx, id, actorId);
       await this.receipts.createItems(
         tx,
         draft.items.map((item) => ({ ...item, receiptId: id, createdBy: actorId })),
@@ -157,8 +173,25 @@ export class GoodsReceiptService {
           entityType: AUDIT_ENTITY.GOODS_RECEIPT,
           entityId: id,
           branchId: head.branchId,
-          before: { totalAmount: head.totalAmount.toString() },
-          after: { totalAmount: draft.header.totalAmount.toString(), lines: draft.items.length },
+          // Cùng bộ khoá với `after` để nhật ký chỉ hiện trường thật sự đổi.
+          before: {
+            receiverId: head.receiverId,
+            paymentMethod: head.paymentMethod,
+            discountAmount: head.discountAmount.toString(),
+            supplierExpenseAmount: head.supplierExpenseAmount.toString(),
+            otherExpenseAmount: head.otherExpenseAmount.toString(),
+            totalAmount: head.totalAmount.toString(),
+            lines: previousLines,
+          },
+          after: {
+            receiverId: draft.header.receiverId,
+            paymentMethod: draft.header.paymentMethod,
+            discountAmount: draft.header.discountAmount.toString(),
+            supplierExpenseAmount: draft.header.supplierExpenseAmount.toString(),
+            otherExpenseAmount: draft.header.otherExpenseAmount.toString(),
+            totalAmount: draft.header.totalAmount.toString(),
+            lines: draft.items.length,
+          },
           ipAddress: actor.ip,
         },
       ]);
@@ -177,10 +210,10 @@ export class GoodsReceiptService {
 
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
-      const head = await this.receipts.findStatus(tx, id, branchWhere(scope));
-      if (!head) throw errors.notFound();
+      // Khoá phiếu: paidAmount, chi phí, giảm giá, dòng hàng dưới đây là số cuối cùng — PUT/PATCH song song phải chờ.
+      const head = await this.locker.lock(tx, id, branchWhere(scope));
       if (head.status !== ReceiptStatus.DRAFT) throw errors.wrongState(head.status);
-      await this.assertBranchActive(tx, head.branchId);
+      await this.draftBuilder.assertBranchActive(tx, head.branchId);
 
       // Chiếm phiếu trước mọi việc khác: request thứ hai (bấm đúp) dừng ở đây, không bao giờ nhập kho lần hai.
       const claimed = await this.receipts.transition(tx, id, ReceiptStatus.DRAFT, {
@@ -188,10 +221,25 @@ export class GoodsReceiptService {
         confirmedAt: now,
         confirmedBy: actorId,
         receivedAt: head.receivedAt ?? now,
+        // "Tiền trả NCC" của nháp thành phiếu chi ngay dưới đây; paidAmount chỉ là bộ đệm Σ phân bổ nên về 0 trước.
+        ...(head.paidAmount > 0n ? { paidAmount: 0n, paymentStatus: PaymentStatus.UNPAID } : {}),
         updatedAt: now,
         updatedBy: actorId,
       });
       if (!claimed) throw errors.wrongState();
+      if (head.paidAmount > 0n) {
+        await this.supplierPayments.createForReceipt(
+          tx,
+          head,
+          head.paidAmount,
+          {
+            method: head.paymentMethod ?? PaymentMethod.CASH,
+            source: SupplierPaymentSource.RECEIPT,
+            note: `Trả khi nhập hàng ${head.code}`,
+          },
+          { actorId, ip: actor.ip },
+        );
+      }
 
       const items = await this.receipts.findItemsForConfirm(tx, id);
       const today = todayInVietnam();
@@ -208,13 +256,14 @@ export class GoodsReceiptService {
           throw invalidReference(`sản phẩm ${unit.product.code} hoặc đơn vị nhập đã ngừng kinh doanh`);
         }
         const expiry = toDateOnlyString(item.expiryDate);
-        this.checkExpiry(item.batchNumber, expiry, today, warnings);
+        this.draftBuilder.checkExpiry(item.batchNumber, expiry, today, warnings);
 
         // K8: hệ số quy đổi lấy theo danh mục LÚC XÁC NHẬN; tiền dòng không đổi vì tính theo đơn vị nhập.
         const amounts = computeLine({
           quantity: item.quantity,
           conversionRate: unit.conversionRate,
           importPrice: item.importPrice,
+          unitDiscount: item.unitDiscount,
         });
         if (!amounts) throw badRequest(`Dòng lô ${item.batchNumber}: số lượng quy đổi vượt giới hạn`);
         if (unit.conversionRate !== item.conversionRate) {
@@ -227,19 +276,26 @@ export class GoodsReceiptService {
       });
       await this.receipts.updateItemConversions(tx, conversions);
 
+      // Q7: phân bổ chi phí (NCC + khác) − giảm giá phiếu vào giá vốn từng dòng theo tỷ lệ thành tiền. VAT không vào.
+      const adjustment = Number(head.supplierExpenseAmount + head.otherExpenseAmount - head.discountAmount);
+      const unitCosts = allocateUnitCosts(
+        lines.map(({ item, amounts }) => ({ totalPrice: item.totalPrice, baseQuantity: amounts.baseQuantity })),
+        adjustment,
+      );
+
       await this.intake.intake(ctx, {
         branchId: head.branchId,
         type: StockMovementType.IMPORT,
         refType: StockRefType.GOODS_RECEIPT,
         refId: id,
         actorId,
-        lines: lines.map(({ item, amounts }) => ({
+        lines: lines.map(({ item, amounts }, index) => ({
           productId: item.productId,
           batchNumber: item.batchNumber,
           manufacturingDate: item.manufacturingDate,
           expiryDate: item.expiryDate,
           quantity: amounts.baseQuantity,
-          unitCost: amounts.unitCost,
+          unitCost: unitCosts[index],
           supplierId: head.supplierId,
           goodsReceiptItemId: item.id,
           refItemId: item.id,
@@ -274,8 +330,8 @@ export class GoodsReceiptService {
 
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
-      const head = await this.receipts.findStatus(tx, id, branchWhere(scope));
-      if (!head) throw errors.notFound();
+      // Phiếu đã xác nhận: khoá NCC rồi khoá phiếu (lock order chung) — huỷ làm đổi công nợ nên xếp hàng cùng phiếu chi/điều chỉnh.
+      const head = await this.locker.lock(tx, id, branchWhere(scope), { supplierWhenConfirmed: true });
       if (head.status === ReceiptStatus.CANCELLED) throw errors.wrongState(head.status);
 
       const claimed = await this.receipts.transition(tx, id, head.status, {
@@ -289,6 +345,10 @@ export class GoodsReceiptService {
       if (!claimed) throw errors.wrongState();
 
       if (head.status === ReceiptStatus.CONFIRMED) {
+        // Phiếu chi lập tay còn hiệu lực → 1713; phiếu chi tự sinh (RECEIPT) huỷ theo, paidAmount về 0.
+        await this.supplierPayments.releaseForReceiptCancel(tx, head, { actorId, ip: actor.ip });
+        // Điều chỉnh nợ trước đó có thể đã hạ nợ chi nhánh về sát 0: huỷ phiếu làm nợ âm thì từ chối.
+        await assertBranchDebtNotNegative(this.debts, tx, head.supplierId, head.branchId, 'Huỷ phiếu nhập');
         const imports = await this.receipts.findImportMovements(tx, id);
         if (imports.length) {
           const locked = await this.ledger.lockBatches(
@@ -341,158 +401,6 @@ export class GoodsReceiptService {
       ]);
       return this.mustFind(tx, id);
     });
-  }
-
-  /** Cập nhật số đã trả NCC (tổng, không phải số trả thêm). Lịch sử từng lần đổi nằm ở `audit_logs`. */
-  async updatePayment(id: string, dto: UpdateReceiptPaymentRequest, actor: RequestActor): Promise<GoodsReceiptDetail> {
-    const scope = resolveBranchScope(actor.user);
-    const actorId = actor.user.userId;
-
-    return this.transactions.run(async ({ tx }) => {
-      const head = await this.receipts.findStatus(tx, id, branchWhere(scope));
-      if (!head) throw errors.notFound();
-      if (head.status === ReceiptStatus.CANCELLED) throw errors.wrongState(head.status);
-
-      const paidAmount = BigInt(dto.paidAmount);
-      if (paidAmount > head.totalAmount) throw badRequest('Số đã trả lớn hơn tổng tiền phiếu');
-      const paymentStatus = paymentStatusOf(paidAmount, head.totalAmount);
-
-      const changed = await this.receipts.transition(tx, id, [ReceiptStatus.DRAFT, ReceiptStatus.CONFIRMED], {
-        paidAmount,
-        paymentStatus,
-        updatedAt: new Date(),
-        updatedBy: actorId,
-      });
-      if (!changed) throw errors.wrongState();
-
-      if (paidAmount !== head.paidAmount) {
-        await this.audit.record(tx, [
-          {
-            actorId,
-            action: AuditAction.UPDATE,
-            entityType: AUDIT_ENTITY.GOODS_RECEIPT,
-            entityId: id,
-            branchId: head.branchId,
-            before: { paidAmount: head.paidAmount.toString() },
-            after: { paidAmount: paidAmount.toString(), paymentStatus },
-            ipAddress: actor.ip,
-          },
-        ]);
-      }
-      return this.mustFind(tx, id);
-    });
-  }
-
-  /**
-   * Kiểm và tính toàn bộ phiếu nháp. Mọi tra cứu tham chiếu là MỘT câu lệnh cho cả phiếu (không vòng lặp gọi DB).
-   */
-  private async prepareDraft(
-    tx: Prisma.TransactionClient,
-    branchId: string,
-    dto: DraftInput,
-    options: { requireActiveSupplier: boolean },
-  ): Promise<PreparedDraft> {
-    if (dto.items.length > MAX_DOCUMENT_LINES) {
-      throw inventoryError(ErrorCode.DOCUMENT_LINE_LIMIT, `tối đa ${MAX_DOCUMENT_LINES} dòng`);
-    }
-    this.assertNoDuplicateBatchLines(dto.items);
-
-    await this.assertBranchActive(tx, branchId);
-    const supplier = await this.receipts.findSupplier(tx, dto.supplierId);
-    if (!supplier) throw invalidReference('nhà cung cấp không tồn tại');
-    if (options.requireActiveSupplier && supplier.status !== RecordStatus.ACTIVE) {
-      throw inventoryError(ErrorCode.SUPPLIER_INACTIVE);
-    }
-
-    const units = await this.receipts.findUnitsWithProduct(tx, [
-      ...new Set(dto.items.map((item) => item.productUnitId)),
-    ]);
-    const unitById = new Map(units.map((unit) => [unit.id, unit]));
-    const today = todayInVietnam();
-    const warnings: string[] = [];
-
-    const items = dto.items.map((item, index) => {
-      const unit = unitById.get(item.productUnitId);
-      if (!unit || unit.isDeleted || unit.productId !== item.productId) {
-        throw invalidReference(`dòng ${index + 1}: đơn vị nhập không thuộc sản phẩm`);
-      }
-      if (
-        unit.status !== RecordStatus.ACTIVE ||
-        unit.product.isDeleted ||
-        unit.product.status !== RecordStatus.ACTIVE
-      ) {
-        throw invalidReference(`dòng ${index + 1}: sản phẩm ${unit.product.code} hoặc đơn vị nhập đã ngừng kinh doanh`);
-      }
-      if (item.manufacturingDate && item.manufacturingDate >= item.expiryDate) {
-        throw badRequest(`Dòng ${index + 1}: ngày sản xuất phải trước hạn dùng`);
-      }
-      this.checkExpiry(item.batchNumber, item.expiryDate, today, warnings);
-
-      const amounts = computeLine({
-        quantity: item.quantity,
-        conversionRate: unit.conversionRate,
-        importPrice: item.importPrice,
-      });
-      if (!amounts) throw badRequest(`Dòng ${index + 1}: số lượng quy đổi vượt giới hạn`);
-
-      return {
-        productId: item.productId,
-        productUnitId: item.productUnitId,
-        quantity: item.quantity,
-        conversionRate: unit.conversionRate,
-        baseQuantity: amounts.baseQuantity,
-        importPrice: item.importPrice,
-        totalPrice: amounts.totalPrice,
-        batchNumber: item.batchNumber,
-        manufacturingDate: item.manufacturingDate ? parseDateOnly(item.manufacturingDate) : null,
-        expiryDate: parseDateOnly(item.expiryDate),
-      };
-    });
-
-    const totals = computeTotals(
-      items.map((item) => item.totalPrice),
-      dto,
-    );
-    if (totals === 'DISCOUNT_EXCEEDS_SUBTOTAL') throw badRequest('Chiết khấu lớn hơn tiền hàng');
-    if (totals === 'PAID_EXCEEDS_TOTAL') throw badRequest('Số đã trả lớn hơn tổng tiền phiếu');
-
-    return {
-      header: {
-        supplierId: dto.supplierId,
-        receivedAt: dto.receivedAt ? new Date(dto.receivedAt) : null,
-        supplierInvoiceNo: dto.supplierInvoiceNo ?? null,
-        supplierInvoiceDate: dto.supplierInvoiceDate ? parseDateOnly(dto.supplierInvoiceDate) : null,
-        note: dto.note ?? null,
-        ...totals,
-      },
-      items,
-      warnings,
-    };
-  }
-
-  /** K7: hạn dùng <= hôm nay (giờ VN) → cấm; còn dưới 90 ngày → cảnh báo, vẫn cho nhập. */
-  private checkExpiry(batchNumber: string, expiry: string, today: string, warnings: string[]): void {
-    const daysLeft = daysBetweenDateOnly(today, expiry);
-    if (daysLeft <= 0) throw inventoryError(ErrorCode.BATCH_EXPIRED, `lô ${batchNumber} hết hạn ${expiry}`);
-    if (daysLeft < NEAR_EXPIRY_WARNING_DAYS) {
-      warnings.push(`Lô ${batchNumber} chỉ còn ${daysLeft} ngày sử dụng (hạn ${expiry})`);
-    }
-  }
-
-  /** Một phiếu không được có hai dòng cùng sản phẩm + số lô: lô là một dòng tồn duy nhất, gộp số lượng vào một dòng. */
-  private assertNoDuplicateBatchLines(items: readonly GoodsReceiptItemRequest[]): void {
-    const seen = new Set<string>();
-    for (const item of items) {
-      const key = `${item.productId}|${item.batchNumber}`;
-      if (seen.has(key)) throw badRequest(`Lô ${item.batchNumber} xuất hiện hai lần — gộp vào một dòng`);
-      seen.add(key);
-    }
-  }
-
-  private async assertBranchActive(tx: Prisma.TransactionClient, branchId: string): Promise<void> {
-    const branch = await this.receipts.findBranch(tx, branchId);
-    if (!branch) throw invalidReference('chi nhánh không tồn tại');
-    if (branch.status !== RecordStatus.ACTIVE) throw inventoryError(ErrorCode.BRANCH_INACTIVE);
   }
 
   private toOrder(sort?: string): Prisma.GoodsReceiptOrderByWithRelationInput[] {

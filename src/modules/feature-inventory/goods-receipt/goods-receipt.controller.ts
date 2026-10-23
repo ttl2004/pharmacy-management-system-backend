@@ -11,7 +11,10 @@ import {
   UpdateGoodsReceiptRequest,
   UpdateReceiptPaymentRequest,
 } from './dtos/goods-receipt.request';
-import { GoodsReceiptQuery } from './dtos/goods-receipt.query';
+import { GoodsReceiptQuery, ReceiversQuery } from './dtos/goods-receipt.query';
+import { UpdateReceiptMetaRequest } from './dtos/goods-receipt-meta.request';
+import { GoodsReceiptMetaService } from './goods-receipt-meta.service';
+import { GoodsReceiptPaymentService } from './goods-receipt-payment.service';
 import { GoodsReceiptService } from './goods-receipt.service';
 
 @Controller('goods-receipt')
@@ -27,13 +30,26 @@ import { GoodsReceiptService } from './goods-receipt.service';
 @ApiResponse({ status: 403, description: '1500 thiếu quyền · 1506 chi nhánh ngoài phạm vi · 1507 chưa gán chi nhánh' })
 @UseGuards(AuthzGuard, PermissionGuard)
 export class GoodsReceiptController {
-  constructor(private readonly goodsReceiptService: GoodsReceiptService) {}
+  constructor(
+    private readonly goodsReceiptService: GoodsReceiptService,
+    private readonly metaService: GoodsReceiptMetaService,
+    private readonly paymentService: GoodsReceiptPaymentService,
+  ) {}
 
   @RequirePermissions('goods-receipt:read')
   @Get()
   @ApiOperation({ description: 'Danh sách phiếu nhập. PM/nhân viên chỉ thấy chi nhánh mình.' })
   list(@Query() query: GoodsReceiptQuery, @CurrentActor() actor: RequestActor) {
     return this.goodsReceiptService.list(query, actor);
+  }
+
+  @RequirePermissions('goods-receipt:read')
+  @Get('receivers')
+  @ApiOperation({
+    description: 'Nhân sự có thể chọn làm người nhập → [{id, fullName}]. PM/nhân viên bị ép về chi nhánh mình.',
+  })
+  receivers(@Query() query: ReceiversQuery, @CurrentActor() actor: RequestActor) {
+    return this.metaService.listReceivers(query, actor);
   }
 
   @RequirePermissions('goods-receipt:read')
@@ -79,14 +95,33 @@ export class GoodsReceiptController {
     return this.goodsReceiptService.cancel(id, dto, actor);
   }
 
+  @RequirePermissions('goods-receipt:create')
+  @Patch(':id/meta')
+  @ApiOperation({
+    description:
+      'Sửa người nhập / ngày nhập / ghi chú của phiếu ĐÃ NHẬP. Phiếu khác trạng thái → 1701; body rỗng → 1002; ' +
+      'người nhập sai chi nhánh → 1602. Không đổi tồn, giá vốn, công nợ.',
+  })
+  updateMeta(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: UpdateReceiptMetaRequest,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.metaService.updateMeta(id, dto, actor);
+  }
+
   @RequirePermissions('goods-receipt:confirm')
   @Patch(':id/payment')
-  @ApiOperation({ description: 'Cập nhật tổng số đã trả NCC. Lịch sử thay đổi ở audit_logs.' })
+  @ApiOperation({
+    description:
+      'Cập nhật tổng số đã trả NCC. Phiếu đã xác nhận: tăng = tự lập phiếu chi (nguồn RECEIPT) — cần thêm quyền ' +
+      '`supplier-debt:write` và không vượt công nợ; giảm → 1002. Lịch sử thay đổi ở audit_logs.',
+  })
   updatePayment(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: UpdateReceiptPaymentRequest,
     @CurrentActor() actor: RequestActor,
   ) {
-    return this.goodsReceiptService.updatePayment(id, dto, actor);
+    return this.paymentService.updatePayment(id, dto, actor);
   }
 }

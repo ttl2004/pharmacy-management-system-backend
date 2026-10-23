@@ -16,6 +16,16 @@ export class GoodsReceiptQuery extends AbstractBaseQuery {
   supplierId?: string;
 
   @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ description: 'Người tạo phiếu' })
+  createdBy?: string;
+
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ description: 'Người nhập hàng' })
+  receiverId?: string;
+
+  @IsOptional()
   @IsEnum(ReceiptStatus)
   @ApiPropertyOptional({ enum: ReceiptStatus })
   status?: ReceiptStatus;
@@ -29,4 +39,12 @@ export class GoodsReceiptQuery extends AbstractBaseQuery {
   @IsDateOnly()
   @ApiPropertyOptional({ description: 'Lập đến hết ngày (giờ VN), YYYY-MM-DD' })
   toDate?: string;
+}
+
+/** Query của `GET /goods-receipt/receivers`. */
+export class ReceiversQuery {
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ description: 'Chi nhánh cần liệt kê người nhập. PM/nhân viên: luôn bị ép về chi nhánh mình.' })
+  branchId?: string;
 }

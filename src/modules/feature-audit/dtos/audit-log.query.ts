@@ -1,7 +1,9 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { AuditAction } from '@prisma/client';
 import { Transform } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
+import {
+  ArrayMaxSize, IsArray, IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min,
+} from 'class-validator';
 import { IsDateOnly } from 'src/common/validators/is-date-only.validator';
 import { MAX_PAGE_LIMIT } from 'src/providers/abstract-base/abstract-base.query';
 
@@ -11,6 +13,22 @@ export class AuditLogQuery {
   @IsUUID()
   @ApiPropertyOptional({ description: 'PM: bỏ trống hoặc đúng chi nhánh mình' })
   branchId?: string;
+
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.split(',').map((s) => s.trim()).filter(Boolean) : value,
+  )
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsUUID('all', { each: true })
+  @ApiPropertyOptional({ type: String, description: 'Nhiều chi nhánh, phân tách bằng dấu phẩy (ADMIN). PM: chỉ chi nhánh mình' })
+  branchIds?: string[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  @ApiPropertyOptional({ description: 'Tìm trong lý do và nội dung trước/sau (không phân biệt hoa thường)' })
+  search?: string;
 
   @IsOptional()
   @IsString()

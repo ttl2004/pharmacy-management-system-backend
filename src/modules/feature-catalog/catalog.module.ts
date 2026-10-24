@@ -22,6 +22,9 @@ import { ProductImageController } from './product/product-image.controller';
 import { ProductImageService } from './product/product-image.service';
 import { ProductService } from './product/product.service';
 import { ProductRepository } from './product/repositories/product.repository';
+import { PriceBookController } from './price-book/price-book.controller';
+import { PriceBookService } from './price-book/price-book.service';
+import { PriceBookRepository } from './price-book/repositories/price-book.repository';
 
 @Module({
   imports: [PermissionModule, AuthzModule, AuditLogModule],
@@ -33,6 +36,7 @@ import { ProductRepository } from './product/repositories/product.repository';
     ProductImageController,
     LocationController,
     RouteController,
+    PriceBookController,
   ],
   providers: [
     CatalogTransactions,
@@ -48,6 +52,8 @@ import { ProductRepository } from './product/repositories/product.repository';
     UnitRepository,
     ProductService,
     ProductRepository,
+    PriceBookService,
+    PriceBookRepository,
   ],
   // Repository được export để `StorefrontModule` dùng lại truy vấn đọc công khai, không viết lại.
   exports: [
@@ -55,6 +61,7 @@ import { ProductRepository } from './product/repositories/product.repository';
     ManufacturerService,
     UnitService,
     ProductService,
+    PriceBookService,
     CategoryRepository,
     ManufacturerRepository,
     ProductRepository,

@@ -79,6 +79,7 @@ model Branch {
   branchProducts          BranchProduct[]
   auditLogs               AuditLog[]
   orders                  Order[]
+  priceBookBranches       PriceBookBranch[]
   supplierPayments        SupplierPayment[]
   supplierDebtAdjustments SupplierDebtAdjustment[]
 
@@ -158,6 +159,9 @@ model User {
   orderItemsCreated OrderItem[] @relation("OrderItemCreatedBy")
   orderItemsUpdated OrderItem[] @relation("OrderItemUpdatedBy")
   paymentsCreated   Payment[]   @relation("PaymentCreatedBy")
+
+  // Người bán được giới hạn của bảng giá.
+  priceBookUsers PriceBookUser[]
 
   @@map("users")
 }
@@ -451,6 +455,7 @@ model ProductUnit {
 
   goodsReceiptItems GoodsReceiptItem[]
   orderItems        OrderItem[]
+  priceBookItems    PriceBookItem[]
 
   @@unique([productId, unitId])
   @@index([productId, isDeleted])
@@ -1021,6 +1026,86 @@ model BranchProduct {
   @@map("branch_products")
 }
 
+// ============================================================
+//  BẢNG GIÁ (Thiết lập giá) — "Bảng giá chung" KHÔNG có bảng riêng: nó là `product_units.salePrice`.
+//  - Xoá cứng bảng + dòng giá + phạm vi (cascade). Đơn cũ giữ `priceBookName`, `priceBookId` về null.
+//  - Viết tay trong migration: unique `lower(name)` và CHECK `price_book_items.price >= 0`.
+// ============================================================
+
+/// Hàng ngoài bảng khi bán: cho thêm / thêm kèm cảnh báo / chặn.
+enum PriceBookPolicy {
+  ALLOW
+  WARN
+  BLOCK
+}
+
+model PriceBook {
+  id              String          @id @default(uuid()) @db.Uuid
+  createdAt       DateTime        @default(now()) @db.Timestamptz(3)
+  createdBy       String?         @db.Uuid
+  updatedAt       DateTime?       @db.Timestamptz(3)
+  updatedBy       String?         @db.Uuid
+  name            String          @unique @db.VarChar(100)
+  startAt         DateTime        @db.Timestamptz(3)
+  endAt           DateTime        @db.Timestamptz(3)
+  status          RecordStatus    @default(ACTIVE)
+  outOfBookPolicy PriceBookPolicy @default(ALLOW)
+  /// Giá gốc công thức: avgCost | lastPurchaseCost | general | <uuid bảng khác>. Không FK: bảng gốc bị xoá thì service gỡ công thức.
+  formulaBase     String?         @db.VarChar(50)
+  /// '+' | '-'
+  formulaOp       String?         @db.VarChar(1)
+  formulaAmount   Int?
+  /// 'vnd' | '%'
+  formulaUnit     String?         @db.VarChar(3)
+
+  branches PriceBookBranch[]
+  users    PriceBookUser[]
+  items    PriceBookItem[]
+  orders   Order[]
+
+  @@map("price_books")
+}
+
+/// Không có dòng nào = áp dụng mọi chi nhánh.
+model PriceBookBranch {
+  priceBookId String @db.Uuid
+  branchId    String @db.Uuid
+
+  priceBook PriceBook @relation(fields: [priceBookId], references: [id], onDelete: Cascade)
+  branch    Branch    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@id([priceBookId, branchId])
+  @@index([branchId])
+  @@map("price_book_branches")
+}
+
+/// Không có dòng nào = áp dụng mọi người bán.
+model PriceBookUser {
+  priceBookId String @db.Uuid
+  userId      String @db.Uuid
+
+  priceBook PriceBook @relation(fields: [priceBookId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@id([priceBookId, userId])
+  @@index([userId])
+  @@map("price_book_users")
+}
+
+/// Giá riêng của một (hàng, đơn vị) trong bảng. Giá nguyên đồng, >= 0 (CHECK trong migration).
+model PriceBookItem {
+  priceBookId   String @db.Uuid
+  productUnitId String @db.Uuid
+  price         Int
+
+  priceBook   PriceBook   @relation(fields: [priceBookId], references: [id], onDelete: Cascade)
+  productUnit ProductUnit @relation(fields: [productUnitId], references: [id], onDelete: Restrict)
+
+  @@id([priceBookId, productUnitId])
+  @@index([productUnitId])
+  @@map("price_book_items")
+}
+
 /// Nhật ký thao tác — BẤT BIẾN, chỉ thêm. Ghi trong CÙNG transaction với thao tác nghiệp vụ.
 model AuditLog {
   id         String      @id @default(uuid()) @db.Uuid
@@ -1112,7 +1197,12 @@ model Order {
   confirmedAt          DateTime?     @db.Timestamptz(3)
   completedAt          DateTime?     @db.Timestamptz(3)
   cancelledAt          DateTime?     @db.Timestamptz(3)
+  /// Bảng giá đã áp lúc tạo đơn; bảng bị xoá thì về null (SetNull), tên giữ ở `priceBookName`.
+  priceBookId          String?       @db.Uuid
+  /// Bản chụp tên bảng giá lúc bán.
+  priceBookName        String?       @db.VarChar(100)
 
+  priceBook     PriceBook?  @relation(fields: [priceBookId], references: [id], onDelete: SetNull)
   branch        Branch      @relation(fields: [branchId], references: [id], onDelete: Restrict)
   customer      User?       @relation("OrderCustomer", fields: [customerId], references: [id], onDelete: Restrict)
   staff         User?       @relation("OrderStaff", fields: [staffId], references: [id], onDelete: Restrict)
@@ -1127,6 +1217,7 @@ model Order {
   @@index([createdAt])
   /// Job tự huỷ quét đơn PENDING theo kênh và thời điểm.
   @@index([status, channel, createdAt])
+  @@index([priceBookId])
   @@map("orders")
 }
 

@@ -55,6 +55,7 @@ export enum ErrorCode {
   ROLE_NOT_ASSIGNABLE = 1603,
   SUPER_ADMIN_PROTECTED = 1604,
   SELF_OPERATION_FORBIDDEN = 1605,
+  PRICE_BOOK_BASE_IN_USE = 1606,
 
   //- Kho — khai đủ cả dải từ giai đoạn 1 để các giai đoạn sau không tranh số
   INSUFFICIENT_STOCK = 1700,
@@ -77,4 +78,6 @@ export enum ErrorCode {
   //- Bán hàng — dải 1800–1849, giai đoạn sau khai tiếp không tranh số
   PRESCRIPTION_REQUIRED = 1800,
   PRODUCT_NOT_SELLABLE = 1801,
+  PRICE_BOOK_UNAVAILABLE = 1802,
+  PRODUCT_NOT_IN_PRICE_BOOK = 1803,
 }

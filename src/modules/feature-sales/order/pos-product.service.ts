@@ -25,6 +25,8 @@ export interface PosProduct {
   name: string;
   imageUrl: string | null;
   requiresPrescription: boolean;
+  /** Thuốc kiểm soát đặc biệt — POS bắt buộc tên + SĐT khách (như mock). */
+  isControlled: boolean;
   /** Lượng bán được tại chi nhánh theo đơn vị cơ bản. */
   sellableBaseQuantity: number;
   units: PosProductUnit[];
@@ -91,6 +93,7 @@ export class PosProductService {
         name: row.name,
         imageUrl: row.imageUrls[0] ?? null,
         requiresPrescription: row.requiresPrescription,
+        isControlled: row.isControlled,
         sellableBaseQuantity: base,
         units: row.units.map((unit) => ({
           id: unit.id,

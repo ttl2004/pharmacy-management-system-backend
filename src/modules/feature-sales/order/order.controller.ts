@@ -11,8 +11,10 @@ import {
   OrderQuery,
   PayOrderRequest,
   PosProductQuery,
+  PreviewAllocationRequest,
   ReplaceOrderItemsRequest,
 } from './dtos/order.request';
+import { OrderVoidAndPreviewService } from './order-void-and-preview.service';
 import { OrderService } from './order.service';
 import { PosProductService } from './pos-product.service';
 
@@ -31,6 +33,7 @@ export class OrderController {
   constructor(
     private readonly orderService: OrderService,
     private readonly posProductService: PosProductService,
+    private readonly afterSale: OrderVoidAndPreviewService,
   ) {}
 
   @RequirePermissions('order:read')
@@ -50,6 +53,15 @@ export class OrderController {
   })
   posProducts(@Query() query: PosProductQuery, @CurrentActor() actor: RequestActor) {
     return this.posProductService.search(query, actor);
+  }
+
+  @RequirePermissions('order:create')
+  @Post('preview-allocation')
+  @ApiOperation({
+    description: 'Xem trước lô FEFO cho giỏ (không giữ hàng): từng dòng → lô dự kiến, lượng bán được, lượng thiếu.',
+  })
+  previewAllocation(@Body() dto: PreviewAllocationRequest, @CurrentActor() actor: RequestActor) {
+    return this.afterSale.preview(dto, actor);
   }
 
   @RequirePermissions('order:read')
@@ -93,5 +105,18 @@ export class OrderController {
     @CurrentActor() actor: RequestActor,
   ) {
     return this.orderService.cancel(id, dto, actor);
+  }
+
+  @RequirePermissions('order:cancel')
+  @Post(':id/void')
+  @ApiOperation({
+    description: 'Huỷ hoá đơn tại quầy ĐÃ THU (COMPLETED): hoàn tiền (REFUNDED) + hàng về đúng lô đã bán (RETURN_IN).',
+  })
+  voidPaid(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: CancelOrderRequest,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.afterSale.voidPaid(id, dto, actor);
   }
 }

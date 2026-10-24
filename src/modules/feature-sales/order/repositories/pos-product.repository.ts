@@ -12,6 +12,7 @@ const POS_PRODUCT_SELECT = {
   name: true,
   imageUrls: true,
   requiresPrescription: true,
+  isControlled: true,
   units: {
     where: SELLABLE_UNIT,
     orderBy: [{ conversionRate: 'asc' }, { id: 'asc' }],

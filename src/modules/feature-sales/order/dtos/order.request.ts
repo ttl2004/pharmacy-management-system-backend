@@ -17,6 +17,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { VIETNAM_PHONE_PATTERN } from 'src/common/utils/phone.util';
@@ -58,6 +59,31 @@ export class PrescriptionRequest {
   imageUrl?: string;
 }
 
+/** Dược sĩ ghi đè cảnh báo tương tác major (đã xác thực mật khẩu ở FE). Server tự điền người ghi đè + thời điểm. */
+export class InteractionOverrideRequest {
+  @IsString()
+  @MinLength(20)
+  @MaxLength(1000)
+  @ApiProperty({ description: 'Lý do ghi đè (≥ 20 ký tự)' })
+  reason: string;
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @MaxLength(100, { each: true })
+  @ApiProperty({ type: [String] })
+  warningIds: string[];
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @MaxLength(500, { each: true })
+  @ApiProperty({ type: [String], description: 'Mô tả ngắn từng cảnh báo — giữ lại khi cơ sở tri thức đổi' })
+  warningSummaries: string[];
+}
+
 class OrderLinesRequest {
   @IsArray()
   @ArrayMinSize(1)
@@ -72,6 +98,19 @@ class OrderLinesRequest {
   @Type(() => PrescriptionRequest)
   @ApiPropertyOptional({ type: PrescriptionRequest, description: 'Bắt buộc trước khi thu tiền nếu có thuốc kê đơn' })
   prescription?: PrescriptionRequest;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(2_000_000_000)
+  @ApiPropertyOptional({ description: 'Giảm giá cả đơn (VND, ≤ tạm tính). Sửa đơn: không gửi = 0' })
+  discountAmount?: number;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => InteractionOverrideRequest)
+  @ApiPropertyOptional({ type: InteractionOverrideRequest })
+  interactionOverride?: InteractionOverrideRequest;
 }
 
 export class CreatePosOrderRequest extends OrderLinesRequest {
@@ -108,8 +147,8 @@ export class CreatePosOrderRequest extends OrderLinesRequest {
 export class ReplaceOrderItemsRequest extends OrderLinesRequest {}
 
 export class PayOrderRequest {
-  @IsIn([PaymentMethod.CASH, PaymentMethod.BANK_TRANSFER])
-  @ApiProperty({ enum: [PaymentMethod.CASH, PaymentMethod.BANK_TRANSFER] })
+  @IsIn([PaymentMethod.CASH, PaymentMethod.BANK_TRANSFER, PaymentMethod.CARD])
+  @ApiProperty({ enum: [PaymentMethod.CASH, PaymentMethod.BANK_TRANSFER, PaymentMethod.CARD] })
   method: PaymentMethod;
 
   @IsOptional()
@@ -124,6 +163,22 @@ export class PayOrderRequest {
   @MaxLength(500)
   @ApiPropertyOptional()
   note?: string;
+}
+
+/** Xem trước lô FEFO cho giỏ hàng (không giữ hàng). */
+export class PreviewAllocationRequest {
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ description: 'Chi nhánh bán. PM/SS bỏ trống = chi nhánh mình; ADMIN bắt buộc.' })
+  branchId?: string;
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(MAX_ORDER_LINES)
+  @ValidateNested({ each: true })
+  @Type(() => OrderItemRequest)
+  @ApiProperty({ type: [OrderItemRequest] })
+  items: OrderItemRequest[];
 }
 
 export class CancelOrderRequest {

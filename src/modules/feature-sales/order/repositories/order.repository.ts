@@ -28,6 +28,8 @@ const ORDER_DETAIL_SELECT = {
   branchId: true,
   subtotalAmount: true,
   shippingFee: true,
+  discountAmount: true,
+  interactionOverride: true,
   prescriptionCode: true,
   prescriberName: true,
   prescriptionImageUrl: true,
@@ -197,7 +199,7 @@ export class OrderRepository {
         salePrice: true,
         status: true,
         unit: { select: { name: true } },
-        product: { select: { id: true, name: true, status: true, requiresPrescription: true } },
+        product: { select: { id: true, name: true, status: true, requiresPrescription: true, isControlled: true } },
       },
     });
   }

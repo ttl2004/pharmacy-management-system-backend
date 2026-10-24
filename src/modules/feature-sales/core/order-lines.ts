@@ -11,7 +11,7 @@ export interface SellableUnit {
   salePrice: number;
   status: RecordStatus;
   unit: { name: string };
-  product: { id: string; name: string; status: RecordStatus; requiresPrescription: boolean };
+  product: { id: string; name: string; status: RecordStatus; requiresPrescription: boolean; isControlled?: boolean };
 }
 
 export interface RequestedLine {
@@ -31,6 +31,8 @@ export interface OrderLine {
   unitPrice: number;
   totalPrice: bigint;
   requiresPrescription: boolean;
+  /** Thuốc kiểm soát — đơn phải gắn khách có SĐT. */
+  isControlled: boolean;
 }
 
 /**
@@ -63,15 +65,22 @@ export function buildOrderLines(requested: readonly RequestedLine[], units: read
       unitPrice: unit.salePrice,
       totalPrice: BigInt(line.quantity) * BigInt(unit.salePrice),
       requiresPrescription: unit.product.requiresPrescription,
+      isControlled: unit.product.isControlled ?? false,
     };
   });
 }
 
-/** Tổng đơn. Chưa có giảm giá (luật đã chốt) nên tổng = tạm tính + phí ship — khớp CHECK `orders_total_formula_chk`. */
+/**
+ * Tổng đơn = tạm tính + phí ship − giảm giá (VND, ≤ tạm tính) — khớp CHECK `orders_total_formula_chk` và
+ * `orders_discount_range_chk`. Giảm giá vượt tạm tính → 400.
+ */
 export function orderTotals(
   lines: readonly OrderLine[],
   shippingFee = 0,
-): { subtotalAmount: bigint; totalAmount: bigint } {
+  discount = 0,
+): { subtotalAmount: bigint; discountAmount: bigint; totalAmount: bigint } {
   const subtotalAmount = lines.reduce((sum, line) => sum + line.totalPrice, 0n);
-  return { subtotalAmount, totalAmount: subtotalAmount + BigInt(shippingFee) };
+  const discountAmount = BigInt(discount);
+  if (discountAmount > subtotalAmount) throw badRequest('Giảm giá vượt tổng tiền hàng');
+  return { subtotalAmount, discountAmount, totalAmount: subtotalAmount + BigInt(shippingFee) - discountAmount };
 }

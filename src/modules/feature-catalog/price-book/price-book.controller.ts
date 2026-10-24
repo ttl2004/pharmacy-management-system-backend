@@ -7,6 +7,9 @@ import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
 import { PriceBookRequest } from './dtos/price-book.request';
+import { PriceRowsFilterRequest, PriceRowsQuery, SetBookItemRequest, SetGeneralPriceRequest } from './dtos/price-book-rows.request';
+import { PriceBookItemsService } from './price-book-items.service';
+import { PriceBookRowsService } from './price-book-rows.service';
 import { PriceBookService } from './price-book.service';
 
 /**
@@ -24,7 +27,11 @@ import { PriceBookService } from './price-book.service';
 @ApiResponse({ status: 403, description: 'Mã lỗi: BRANCH_ACCESS_DENIED (1506) — bảng ngoài phạm vi chi nhánh của người gọi' })
 @UseGuards(AuthzGuard, PermissionGuard)
 export class PriceBookController {
-  constructor(private readonly priceBookService: PriceBookService) {}
+  constructor(
+    private readonly priceBookService: PriceBookService,
+    private readonly rowsService: PriceBookRowsService,
+    private readonly itemsService: PriceBookItemsService,
+  ) {}
 
   @RequirePermissions('product:read')
   @Get()
@@ -41,6 +48,23 @@ export class PriceBookController {
   @ApiOperation({ description: 'Người bán chọn được cho phạm vi áp dụng: {id, fullName}. Quản lý chi nhánh chỉ thấy người cùng chi nhánh.' })
   sellers(@CurrentUser() user: JwtUser) {
     return this.priceBookService.listSellers(user);
+  }
+
+  @RequirePermissions('product:read')
+  @Get('rows')
+  @ApiOperation({
+    description:
+      'Trang dòng giá: mỗi dòng một (hàng, đơn vị) kèm giá vốn, giá nhập cuối theo chi nhánh, giá chung và giá các bảng trong bookIds. Trả {items, total, page, pageSize}.',
+  })
+  rows(@Query() query: PriceRowsQuery, @CurrentUser() user: JwtUser) {
+    return this.rowsService.listRows(query, user);
+  }
+
+  @RequirePermissions('price-book:update')
+  @Put('general-price')
+  @ApiOperation({ description: 'Sửa giá chung (product_units.salePrice). Chỉ vai trò toàn chuỗi; quản lý chi nhánh → 403.' })
+  setGeneralPrice(@Body() dto: SetGeneralPriceRequest, @CurrentUser() user: JwtUser) {
+    return this.rowsService.setGeneralPrice(dto, user);
   }
 
   @RequirePermissions('order:create')
@@ -63,8 +87,33 @@ export class PriceBookController {
   @RequirePermissions('price-book:update')
   @Put(':id')
   @ApiOperation({ description: 'Sửa bảng giá (gửi đủ trường). Bảng ngoài phạm vi sửa của người gọi → 403.' })
-  update(@Param('id', new ParseUUIDPipe()) id: string, @Body() dto: PriceBookRequest, @CurrentUser() user: JwtUser) {
-    return this.priceBookService.update(id, dto, user);
+  update(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: PriceBookRequest,
+    @CurrentUser() user: JwtUser,
+    @Query('branchId', new ParseUUIDPipe({ optional: true })) branchId?: string,
+  ) {
+    return this.priceBookService.update(id, dto, user, branchId);
+  }
+
+  @RequirePermissions('price-book:update')
+  @Put(':id/items')
+  @ApiOperation({ description: 'Sửa giá một ô: price là số -> thêm/cập nhật, null -> bỏ hàng khỏi bảng.' })
+  setItem(@Param('id', new ParseUUIDPipe()) id: string, @Body() dto: SetBookItemRequest, @CurrentUser() user: JwtUser) {
+    return this.itemsService.setItem(id, dto, user);
+  }
+
+  @RequirePermissions('price-book:update')
+  @Post(':id/apply-formula')
+  @ApiOperation({
+    description: 'Áp công thức của bảng cho mọi dòng khớp bộ lọc trong body (như query của /rows). Trả {count}.',
+  })
+  applyFormula(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: PriceRowsFilterRequest,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.itemsService.applyFormulaToFilter(id, dto, user);
   }
 
   @RequirePermissions('price-book:update')

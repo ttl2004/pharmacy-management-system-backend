@@ -23,8 +23,11 @@ import { ProductImageService } from './product/product-image.service';
 import { ProductService } from './product/product.service';
 import { ProductRepository } from './product/repositories/product.repository';
 import { PriceBookController } from './price-book/price-book.controller';
+import { PriceBookItemsService } from './price-book/price-book-items.service';
+import { PriceBookRowsService } from './price-book/price-book-rows.service';
 import { PriceBookService } from './price-book/price-book.service';
 import { PriceBookRepository } from './price-book/repositories/price-book.repository';
+import { PriceBookRowsRepository } from './price-book/repositories/price-book-rows.repository';
 
 @Module({
   imports: [PermissionModule, AuthzModule, AuditLogModule],
@@ -53,7 +56,10 @@ import { PriceBookRepository } from './price-book/repositories/price-book.reposi
     ProductService,
     ProductRepository,
     PriceBookService,
+    PriceBookItemsService,
+    PriceBookRowsService,
     PriceBookRepository,
+    PriceBookRowsRepository,
   ],
   // Repository được export để `StorefrontModule` dùng lại truy vấn đọc công khai, không viết lại.
   exports: [

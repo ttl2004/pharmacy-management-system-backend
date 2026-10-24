@@ -4,7 +4,7 @@ import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
-import { assertBranchInScope, BranchScope, resolveBranchScope } from '../../feature-auth/permission/branch-scope';
+import { assertBranchInScope, BranchScope, resolveBranchScope, scopedBranchFilter } from '../../feature-auth/permission/branch-scope';
 import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
 import { permissionError } from '../../feature-auth/permission/permission.error';
 import { PriceBookRequest } from './dtos/price-book.request';
@@ -15,7 +15,8 @@ import {
   toPriceBookResponse,
 } from './dtos/price-book.response';
 import { priceBookCreatedEntry, priceBookDeletedEntry, priceBookUpdatedEntry } from './price-book-audit';
-import { assertWritableBranchIds, canEditBook } from './price-book-scope';
+import { PriceBookItemsService } from './price-book-items.service';
+import { assertCanEditBook, assertWritableBranchIds, canEditBook } from './price-book-scope';
 import { PriceBookRepository, PriceBookRow, PriceBookScalars } from './repositories/price-book.repository';
 
 /** Bảng áp dụng được cho một đơn — Task 4 (đơn bán) dùng để tính lại giá dòng. */
@@ -37,6 +38,7 @@ export class PriceBookService {
   constructor(
     private readonly repository: PriceBookRepository,
     private readonly audit: AuditLogService,
+    private readonly items: PriceBookItemsService,
   ) {}
 
   async list(user: JwtUser): Promise<PriceBookResponse[]> {
@@ -60,16 +62,21 @@ export class PriceBookService {
     }
   }
 
-  async update(id: string, dto: PriceBookRequest, user: JwtUser): Promise<PriceBookResponse> {
+  /** `branchId` (query) là chi nhánh lấy giá vốn / giá nhập cuối khi `reapplyFormula` tính lại các dòng đang có. */
+  async update(id: string, dto: PriceBookRequest, user: JwtUser, branchId?: string): Promise<PriceBookResponse> {
     const scope = resolveBranchScope(user);
     const existing = await this.getEditable(id, scope);
     const data = await this.prepareWrite(dto, scope, id);
+    const costBranchId = scopedBranchFilter(scope, branchId);
     try {
       const updated = await this.repository.transaction(async (tx) => {
         const row = await this.repository.update(tx, id, data, user.userId);
         const entry = priceBookUpdatedEntry(user.userId, existing, row);
         if (entry) await this.audit.record(tx, [entry]);
-        return row;
+        if (!dto.reapplyFormula) return row;
+        await this.items.reapplyExisting(tx, row, costBranchId);
+        // Đọc lại để `itemCount` đúng sau khi tính lại.
+        return (await this.repository.findById(id, tx)) ?? row;
       });
       return toPriceBookResponse(updated, canEditBook(scope, data.branchIds));
     } catch (error) {
@@ -160,9 +167,7 @@ export class PriceBookService {
   private async getEditable(id: string, scope: BranchScope): Promise<PriceBookRow> {
     const row = await this.repository.findById(id);
     if (!row) throw new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Bảng giá không tồn tại' });
-    if (!canEditBook(scope, row.branches.map((b) => b.branchId))) {
-      throw permissionError(ErrorCode.BRANCH_ACCESS_DENIED, 'Bạn không có quyền sửa bảng giá này');
-    }
+    assertCanEditBook(scope, row.branches.map((b) => b.branchId));
     return row;
   }
 

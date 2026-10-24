@@ -32,3 +32,9 @@ export function assertWritableBranchIds(scope: BranchScope, branchIds: readonly 
     'Quản lý chi nhánh chỉ được tạo, sửa bảng giá áp dụng cho chi nhánh của mình',
   );
 }
+
+/** Chặn sửa / xoá / ghi giá vào bảng ngoài phạm vi SỬA của người gọi (xem được nhưng không sửa được → 403). */
+export function assertCanEditBook(scope: BranchScope, branchIds: readonly string[]): void {
+  if (canEditBook(scope, branchIds)) return;
+  throw permissionError(ErrorCode.BRANCH_ACCESS_DENIED, 'Bạn không có quyền sửa bảng giá này');
+}

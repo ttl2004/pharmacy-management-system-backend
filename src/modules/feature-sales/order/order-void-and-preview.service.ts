@@ -6,8 +6,9 @@ import { resolveBranchScope } from 'src/modules/feature-auth/permission/branch-s
 import { branchWhere, resolveWriteBranch } from 'src/modules/feature-inventory/core/inventory-scope';
 import { InventoryTransactions } from 'src/modules/feature-inventory/core/inventory-transactions';
 import { StockAllocationService } from 'src/modules/feature-inventory/core/stock-allocation.service';
+import { PriceBookService } from 'src/modules/feature-catalog/price-book/price-book.service';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
-import { buildOrderLines } from '../core/order-lines';
+import { bookPriceOf, buildOrderLines, toBookPricing } from '../core/order-lines';
 import { OrderStockService } from '../core/order-stock.service';
 import { SALES_AUDIT_ENTITY } from '../core/sales.constants';
 import { orderErrors } from '../core/sales.error';
@@ -27,6 +28,7 @@ export class OrderVoidAndPreviewService {
     private readonly stock: OrderStockService,
     private readonly allocator: StockAllocationService,
     private readonly audit: AuditLogService,
+    private readonly priceBooks: PriceBookService,
   ) {}
 
   /** Chiếm đơn bằng cập nhật có điều kiện COMPLETED trước khi đụng kho — bấm đúp → 1701. */
@@ -85,7 +87,11 @@ export class OrderVoidAndPreviewService {
     const branchId = resolveWriteBranch(resolveBranchScope(actor.user), dto.branchId);
     return this.transactions.run(async (ctx) => {
       const units = await this.orders.findSellableUnits(ctx.tx, dto.items.map((i) => i.productUnitId));
-      const lines = buildOrderLines(dto.items, units);
+      // Bảng giá không dùng được -> 1802; hàng ngoài bảng BLOCK -> 1803 như lúc lập đơn.
+      const book = dto.priceBookId
+        ? toBookPricing(await this.priceBooks.getUsableBook(dto.priceBookId, branchId, actor.user.userId))
+        : undefined;
+      const lines = buildOrderLines(dto.items, units, book);
       const { allocations, shortages, batches } = await this.allocator.previewFefo(
         ctx,
         branchId,
@@ -98,6 +104,9 @@ export class OrderVoidAndPreviewService {
         productUnitId: line.productUnitId,
         productId: line.productId,
         baseQuantity: line.baseQuantity,
+        unitPrice: line.unitPrice,
+        bookPrice: bookPriceOf(book, line.productUnitId),
+        outOfBook: !!book && bookPriceOf(book, line.productUnitId) === null,
         allocations: allocations
           .filter((a) => a.lineIndex === index)
           .map((a) => {

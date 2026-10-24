@@ -116,6 +116,11 @@ class OrderLinesRequest {
 export class CreatePosOrderRequest extends OrderLinesRequest {
   @IsOptional()
   @IsUUID()
+  @ApiPropertyOptional({ description: 'Bảng giá áp cho đơn/giỏ. Bỏ trống = Bảng giá chung' })
+  priceBookId?: string;
+
+  @IsOptional()
+  @IsUUID()
   @ApiPropertyOptional({ description: 'Chi nhánh bán. PM/SS bỏ trống = chi nhánh mình; ADMIN bắt buộc.' })
   branchId?: string;
 
@@ -167,6 +172,11 @@ export class PayOrderRequest {
 
 /** Xem trước lô FEFO cho giỏ hàng (không giữ hàng). */
 export class PreviewAllocationRequest {
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ description: 'Bảng giá áp cho đơn/giỏ. Bỏ trống = Bảng giá chung' })
+  priceBookId?: string;
+
   @IsOptional()
   @IsUUID()
   @ApiPropertyOptional({ description: 'Chi nhánh bán. PM/SS bỏ trống = chi nhánh mình; ADMIN bắt buộc.' })
@@ -221,6 +231,11 @@ export class OrderQuery extends AbstractBaseQuery {
  * (lưới sản phẩm, lọc `categoryId`). Có `barcode` thì bỏ qua `search`/`categoryId`.
  */
 export class PosProductQuery extends AbstractBaseQuery {
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ description: 'Bảng giá áp cho đơn/giỏ. Bỏ trống = Bảng giá chung' })
+  priceBookId?: string;
+
   @IsOptional()
   @IsUUID()
   @ApiPropertyOptional({ description: 'Chi nhánh bán. PM/SS bỏ trống = chi nhánh mình; ADMIN bắt buộc.' })

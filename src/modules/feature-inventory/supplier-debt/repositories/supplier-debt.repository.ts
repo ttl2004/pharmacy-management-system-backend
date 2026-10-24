@@ -1,9 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, ReceiptStatus } from '@prisma/client';
+import { AdjustmentType, Prisma, ReceiptStatus } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
 
 export interface DebtFigures {
-  /** Nợ trong phạm vi: phiếu nhập CONFIRMED + điều chỉnh chưa huỷ của chi nhánh đó (không chỉ định chi nhánh = toàn chuỗi). */
+  /**
+   * Nợ trong phạm vi: phiếu nhập CONFIRMED − phiếu trả NCC CONFIRMED (phần NCC chưa hoàn) + điều chỉnh chưa huỷ của chi
+   * nhánh đó (không chỉ định chi nhánh = toàn chuỗi).
+   */
   scoped: bigint;
   /** Nợ toàn chuỗi: mọi phiếu nhập CONFIRMED + mọi điều chỉnh chưa huỷ. */
   chain: bigint;
@@ -53,7 +56,7 @@ export class SupplierDebtRepository {
     client: Prisma.TransactionClient = this.prisma,
   ): Promise<DebtFigures> {
     const adjustmentWhere = { supplierId, cancelledAt: null };
-    const [receipts, chainAdjustments, branchAdjustments] = await Promise.all([
+    const [receipts, returns, chainAdjustments, branchAdjustments] = await Promise.all([
       client.$queryRaw<{ scoped: bigint; chain: bigint }[]>(Prisma.sql`
         SELECT
           COALESCE(SUM(CASE WHEN ${branchId ?? null}::uuid IS NULL OR r."branchId" = ${branchId ?? null}::uuid
@@ -61,6 +64,15 @@ export class SupplierDebtRepository {
           COALESCE(SUM(r."totalAmount" - r."paidAmount"), 0)::bigint AS chain
         FROM "goods_receipts" r
         WHERE r."supplierId" = ${supplierId}::uuid AND r."status" = 'CONFIRMED' AND r."isDeleted" = false`),
+      // Phiếu trả NCC đã xác nhận: phần NCC chưa hoàn tiền (cần trả − đã trả) giảm nợ, gắn với chi nhánh trả.
+      client.$queryRaw<{ scoped: bigint; chain: bigint }[]>(Prisma.sql`
+        SELECT
+          COALESCE(SUM(CASE WHEN ${branchId ?? null}::uuid IS NULL OR a."branchId" = ${branchId ?? null}::uuid
+                            THEN a."totalAmount" - a."supplierPaid" END), 0)::bigint AS scoped,
+          COALESCE(SUM(a."totalAmount" - a."supplierPaid"), 0)::bigint AS chain
+        FROM "stock_adjustments" a
+        WHERE a."supplierId" = ${supplierId}::uuid AND a."type" = 'RETURN_TO_SUPPLIER'
+          AND a."status" = 'CONFIRMED' AND a."isDeleted" = false`),
       client.supplierDebtAdjustment.aggregate({ where: adjustmentWhere, _sum: { delta: true } }),
       branchId
         ? client.supplierDebtAdjustment.aggregate({ where: { ...adjustmentWhere, branchId }, _sum: { delta: true } })
@@ -70,7 +82,11 @@ export class SupplierDebtRepository {
     // Điều chỉnh gắn với chi nhánh lập: nợ của một chi nhánh = phiếu nhập + điều chỉnh CỦA CHI NHÁNH ĐÓ.
     const scopedAdjustment = branchAdjustments ? (branchAdjustments._sum.delta ?? 0n) : chainAdjustment;
     const row = receipts[0] ?? { scoped: 0n, chain: 0n };
-    return { scoped: row.scoped + scopedAdjustment, chain: row.chain + chainAdjustment };
+    const returned = returns[0] ?? { scoped: 0n, chain: 0n };
+    return {
+      scoped: row.scoped - returned.scoped + scopedAdjustment,
+      chain: row.chain - returned.chain + chainAdjustment,
+    };
   }
 
   /** Chi nhánh còn dùng được để ghi chứng từ nợ (tồn tại, chưa xoá, ACTIVE). */
@@ -132,6 +148,21 @@ export class SupplierDebtRepository {
         ...(branchId ? { branchId } : {}),
       },
       select: { id: true, code: true, branchId: true, status: true, confirmedAt: true, totalAmount: true },
+    });
+  }
+
+  /** Phiếu trả NCC đã từng xác nhận (kể cả đã huỷ sau đó) trong phạm vi — dòng "Trả hàng nhập" của sổ nợ. */
+  findLedgerReturns(supplierId: string, branchId: string | undefined) {
+    return this.prisma.stockAdjustment.findMany({
+      where: {
+        supplierId,
+        type: AdjustmentType.RETURN_TO_SUPPLIER,
+        isDeleted: false,
+        confirmedAt: { not: null },
+        status: { in: [ReceiptStatus.CONFIRMED, ReceiptStatus.CANCELLED] },
+        ...(branchId ? { branchId } : {}),
+      },
+      select: { id: true, code: true, status: true, confirmedAt: true, totalAmount: true, supplierPaid: true },
     });
   }
 

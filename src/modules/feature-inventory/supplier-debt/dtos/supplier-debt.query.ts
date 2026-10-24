@@ -3,7 +3,7 @@ import { Transform } from 'class-transformer';
 import { IsIn, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
 import { MAX_PAGE, MAX_PAGE_LIMIT } from 'src/providers/abstract-base/abstract-base.query';
 
-export const LEDGER_KINDS = ['RECEIPT', 'PAYMENT', 'ADJUSTMENT'] as const;
+export const LEDGER_KINDS = ['RECEIPT', 'PAYMENT', 'ADJUSTMENT', 'RETURN'] as const;
 export type LedgerKind = (typeof LEDGER_KINDS)[number];
 
 /** Query của `GET /supplier-debt/:supplierId/ledger`. */

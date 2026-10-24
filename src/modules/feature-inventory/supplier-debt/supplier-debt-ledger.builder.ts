@@ -28,6 +28,16 @@ export interface LedgerAdjustmentSource {
   cancelledAt: Date | null;
 }
 
+/** Phiếu trả NCC đã từng xác nhận; `amount` = phần giảm nợ (cần trả − NCC đã trả). Đã lọc phạm vi ở truy vấn. */
+export interface LedgerReturnSource {
+  id: string;
+  code: string;
+  status: ReceiptStatus;
+  confirmedAt: Date | null;
+  totalAmount: bigint;
+  supplierPaid: bigint;
+}
+
 export interface LedgerRow {
   kind: LedgerKind;
   id: string;
@@ -53,11 +63,13 @@ interface Draft extends Omit<LedgerRow, 'balanceAfter'> {
  *   và lúc lập các điều chỉnh có trước nó.
  * - Điều chỉnh: gắn chi nhánh lập, chỉ hiện điều chỉnh của chi nhánh trong phạm vi (`inScope`); xếp theo LÚC LẬP vì
  *   delta tính theo nợ CỦA CHI NHÁNH tại lúc lập.
+ * - Trả hàng nhập: −(cần trả − NCC đã trả) lúc xác nhận; huỷ sau xác nhận → dòng CANCELLED.
  */
 export function buildLedger(input: {
   receipts: LedgerReceiptSource[];
   payments: LedgerPaymentSource[];
   adjustments: LedgerAdjustmentSource[];
+  returns?: LedgerReturnSource[];
   inScope: (branchId: string) => boolean;
 }): LedgerRow[] {
   const drafts: Draft[] = [];
@@ -86,6 +98,15 @@ export function buildLedger(input: {
       kind: 'PAYMENT', id: p.id, code: p.code, at: p.paidAt, amount: -amount,
       status: p.cancelledAt ? 'CANCELLED' : 'COMPLETED',
       sortAt: Math.max(...floors), created: p.createdAt.getTime(),
+    });
+  }
+
+  for (const r of input.returns ?? []) {
+    const at = r.confirmedAt ?? new Date(0);
+    drafts.push({
+      kind: 'RETURN', id: r.id, code: r.code, at, amount: -Number(r.totalAmount - r.supplierPaid),
+      status: r.status === ReceiptStatus.CANCELLED ? 'CANCELLED' : 'COMPLETED',
+      sortAt: at.getTime(), created: at.getTime(),
     });
   }
 

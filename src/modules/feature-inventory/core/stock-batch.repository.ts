@@ -134,6 +134,24 @@ export class StockBatchRepository {
       FOR UPDATE`);
   }
 
+  /** Như `lockSellable` nhưng KHÔNG khoá — chỉ để xem trước FEFO (không giữ hàng). */
+  findSellable(
+    tx: Prisma.TransactionClient,
+    branchId: string,
+    productIds: readonly string[],
+    today: string,
+  ): Promise<LockedBatch[]> {
+    if (!productIds.length) return Promise.resolve([]);
+    const ids = Prisma.join(productIds.map((id) => Prisma.sql`${id}::uuid`));
+    return tx.$queryRaw<LockedBatch[]>(Prisma.sql`
+      SELECT "id", "branchId", "productId", "batchNumber", "expiryDate", "quantityOnHand", "reservedQuantity",
+             "importPrice", "status"
+      FROM "stock_batches"
+      WHERE "branchId" = ${branchId}::uuid AND "productId" IN (${ids})
+        AND "status" = 'AVAILABLE' AND "expiryDate" > ${today}::date
+        AND "quantityOnHand" > "reservedQuantity" AND "isDeleted" = false`);
+  }
+
   /** Đưa lô vào trạng thái thu hồi theo quyết định đã có (lý do, người thu hồi) — MỘT câu lệnh. */
   async markRecalled(
     tx: Prisma.TransactionClient,

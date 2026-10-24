@@ -92,7 +92,10 @@ export class SupplierListWithTotalsRepository {
     const toCond = p.toDate ? Prisma.sql`AND ${dateExpr} <= ${p.toDate}::date` : Prisma.empty;
 
     const adjBranchCond = p.branchId ? Prisma.sql`AND x."branchId" = ${p.branchId}::uuid` : Prisma.empty;
-    const debtExpr = p.canSeeDebt ? Prisma.sql`COALESCE(d.amt, 0) + COALESCE(a.amt, 0)` : Prisma.sql`0`;
+    const retBranchCond = p.branchId ? Prisma.sql`AND t."branchId" = ${p.branchId}::uuid` : Prisma.empty;
+    const debtExpr = p.canSeeDebt
+      ? Prisma.sql`COALESCE(d.amt, 0) - COALESCE(rt.amt, 0) + COALESCE(a.amt, 0)`
+      : Prisma.sql`0`;
 
     const conds: Prisma.Sql[] = [Prisma.sql`s."isDeleted" = false`];
     if (p.ids) conds.push(Prisma.sql`s."id" = ANY(${p.ids}::uuid[])`);
@@ -117,6 +120,12 @@ export class SupplierListWithTotalsRepository {
         FROM "goods_receipts" r
         WHERE r."status" = 'CONFIRMED' AND r."isDeleted" = false ${branchCond}
         GROUP BY r."supplierId"
+      ), ret AS (
+        -- Phiếu trả NCC đã xác nhận: phần NCC chưa hoàn tiền giảm nợ (như supplier-debt.repository debtOf).
+        SELECT t."supplierId" AS sid, SUM(t."totalAmount" - t."supplierPaid")::bigint AS amt
+        FROM "stock_adjustments" t
+        WHERE t."type" = 'RETURN_TO_SUPPLIER' AND t."status" = 'CONFIRMED' AND t."isDeleted" = false ${retBranchCond}
+        GROUP BY t."supplierId"
       ), adj AS (
         SELECT x."supplierId" AS sid, SUM(x."delta")::bigint AS amt
         FROM "supplier_debt_adjustments" x
@@ -130,6 +139,7 @@ export class SupplierListWithTotalsRepository {
         FROM "suppliers" s
         LEFT JOIN purchase p ON p.sid = s."id"
         LEFT JOIN debt d ON d.sid = s."id"
+        LEFT JOIN ret rt ON rt.sid = s."id"
         LEFT JOIN adj a ON a.sid = s."id"
         WHERE ${Prisma.join(conds, ' AND ')}
       )`;

@@ -12,13 +12,7 @@ import {
 } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorCode } from 'src/common/types/error-code';
-import { escapeLike } from 'src/common/utils/like-pattern.util';
-import {
-  addDaysToDateOnly,
-  toDateOnlyString,
-  todayInVietnam,
-  vietnamDayStartUtc,
-} from 'src/common/utils/date-only.util';
+import { toDateOnlyString, todayInVietnam } from 'src/common/utils/date-only.util';
 import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { DocumentCodeService } from '../core/document-code.service';
@@ -37,6 +31,7 @@ import {
   UpdateGoodsReceiptRequest,
 } from './dtos/goods-receipt.request';
 import { GoodsReceiptQuery } from './dtos/goods-receipt.query';
+import { receiptListWhere } from './goods-receipt-advanced-search';
 import { allocateUnitCosts } from './goods-receipt-cost-allocation';
 import { GoodsReceiptDraftBuilder } from './goods-receipt-draft.builder';
 import { GoodsReceiptLocker } from './goods-receipt-locker';
@@ -67,25 +62,7 @@ export class GoodsReceiptService {
 
   list(query: GoodsReceiptQuery, actor: RequestActor) {
     const branchId = scopedBranchFilter(resolveBranchScope(actor.user), query.branchId);
-    const where: Prisma.GoodsReceiptWhereInput = {};
-    if (branchId) where.branchId = branchId;
-    if (query.supplierId) where.supplierId = query.supplierId;
-    if (query.createdBy) where.createdBy = query.createdBy;
-    if (query.receiverId) where.receiverId = query.receiverId;
-    if (query.status) where.status = query.status;
-    if (query.fromDate || query.toDate) {
-      where.createdAt = {
-        ...(query.fromDate ? { gte: vietnamDayStartUtc(query.fromDate) } : {}),
-        ...(query.toDate ? { lt: vietnamDayStartUtc(addDaysToDateOnly(query.toDate, 1)) } : {}),
-      };
-    }
-    if (query.search) {
-      where.OR = [
-        { code: { contains: escapeLike(query.search), mode: 'insensitive' } },
-        { supplierInvoiceNo: { contains: escapeLike(query.search), mode: 'insensitive' } },
-      ];
-    }
-    return this.receipts.findPage(where, query.page, query.limit, this.toOrder(query.sort));
+    return this.receipts.findPage(receiptListWhere(query, branchId), query.page, query.limit, this.toOrder(query.sort));
   }
 
   async getDetail(id: string, actor: RequestActor): Promise<GoodsReceiptDetail> {

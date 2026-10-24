@@ -21,15 +21,17 @@ export class SupplierDebtLedgerService {
     if (!(await this.debts.supplierExists(supplierId))) throw supplierNotFound();
     const branchId = scope.kind === 'BRANCH' ? scope.branchId : undefined;
 
-    const [receipts, payments, adjustments] = await Promise.all([
+    const [receipts, payments, adjustments, returns] = await Promise.all([
       this.debts.findLedgerReceipts(supplierId, branchId),
       this.debts.findLedgerPayments(supplierId),
       this.debts.findLedgerAdjustments(supplierId),
+      this.debts.findLedgerReturns(supplierId, branchId),
     ]);
     const rows = buildLedger({
       receipts,
       payments,
       adjustments,
+      returns,
       inScope: (id) => isInBranchScope(scope, id),
     }).filter((row) => !query.kind || row.kind === query.kind);
 

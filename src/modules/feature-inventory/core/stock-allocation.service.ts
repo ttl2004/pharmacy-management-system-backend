@@ -47,6 +47,22 @@ export class StockAllocationService {
     const locked = await this.batches.lockSellable(ctx.tx, branchId, productIds, today);
     return { allocations: pickFefo(locked, lines), locked };
   }
+
+  /**
+   * Xem trước FEFO cho giỏ hàng: cùng luật chọn lô với `allocateFefo` nhưng không khoá, không giữ hàng và không ném khi
+   * thiếu — trả lượng thiếu từng dòng để màn hình cảnh báo. Kết quả thật có thể khác nếu tồn đổi trước lúc lập đơn.
+   */
+  async previewFefo(
+    ctx: InventoryTxContext,
+    branchId: string,
+    lines: readonly AllocationLine[],
+    today: string = todayInVietnam(),
+  ): Promise<{ allocations: BatchAllocation[]; shortages: number[]; batches: LockedBatch[] }> {
+    if (!lines.length) return { allocations: [], shortages: [], batches: [] };
+    const productIds = [...new Set(lines.map((line) => line.productId))];
+    const batches = await this.batches.findSellable(ctx.tx, branchId, productIds, today);
+    return { ...planFefo(batches, lines), batches };
+  }
 }
 
 /**
@@ -54,6 +70,22 @@ export class StockAllocationService {
  * dùng chung lượng còn lại của lô. `batches` phải là lô bán được (đã lọc trạng thái/hạn dùng). Thiếu hàng → 1700.
  */
 export function pickFefo(batches: readonly LockedBatch[], lines: readonly AllocationLine[]): BatchAllocation[] {
+  const { allocations, shortages } = planFefo(batches, lines);
+  const short = shortages.findIndex((remaining) => remaining > 0);
+  if (short >= 0) {
+    throw inventoryError(
+      ErrorCode.INSUFFICIENT_STOCK,
+      `dòng ${short + 1} thiếu ${shortages[short]} (đơn vị cơ bản) so với lượng bán được`,
+    );
+  }
+  return allocations;
+}
+
+/** Chọn lô FEFO không ném khi thiếu: `shortages[i]` = lượng dòng i còn thiếu (0 = đủ). */
+export function planFefo(
+  batches: readonly LockedBatch[],
+  lines: readonly AllocationLine[],
+): { allocations: BatchAllocation[]; shortages: number[] } {
   const byProduct = new Map<string, { batch: LockedBatch; free: number }[]>();
   const ordered = [...batches].sort(
     (a, b) => a.expiryDate.getTime() - b.expiryDate.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
@@ -67,6 +99,7 @@ export function pickFefo(batches: readonly LockedBatch[], lines: readonly Alloca
   }
 
   const allocations: BatchAllocation[] = [];
+  const shortages: number[] = [];
   lines.forEach((line, lineIndex) => {
     if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
       throw new Error(`Số lượng xuất phải là số nguyên dương (dòng ${lineIndex + 1}, ${line.quantity})`);
@@ -86,12 +119,7 @@ export function pickFefo(batches: readonly LockedBatch[], lines: readonly Alloca
         unitCost: slot.batch.importPrice,
       });
     }
-    if (remaining > 0) {
-      throw inventoryError(
-        ErrorCode.INSUFFICIENT_STOCK,
-        `dòng ${lineIndex + 1} thiếu ${remaining} (đơn vị cơ bản) so với lượng bán được`,
-      );
-    }
+    shortages.push(remaining);
   });
-  return allocations;
+  return { allocations, shortages };
 }

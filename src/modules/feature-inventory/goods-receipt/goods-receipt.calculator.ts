@@ -63,8 +63,8 @@ export type TotalsError =
   | 'EXPENSE_VALUE_INVALID'
   | 'PAID_EXCEEDS_TOTAL';
 
-/** `base × value / 100`, làm tròn nửa lên, hoàn toàn bằng số nguyên (value tối đa 2 số lẻ). */
-function percentOf(base: bigint, value: number): bigint {
+/** `base × value / 100`, làm tròn nửa lên, hoàn toàn bằng số nguyên (value tối đa 2 số lẻ). Dùng chung với phiếu trả NCC. */
+export function percentOf(base: bigint, value: number): bigint {
   const hundredths = BigInt(Math.round(value * 100));
   return (base * hundredths * 2n + 10_000n) / 20_000n;
 }

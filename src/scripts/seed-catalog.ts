@@ -7,6 +7,7 @@ import { CatalogTransactions, productWriteLocks } from 'src/modules/feature-cata
 import { AppModule } from '../app.module';
 import { SEED_BRANCHES, SEED_CATEGORIES, SEED_MANUFACTURERS, SEED_PRODUCTS, SEED_UNITS } from './data/catalog.seed';
 import type { SeedProductUnit } from './data/catalog.seed';
+import { seedPriceBooks } from './seed-catalog-price-books';
 
 type IdByCode = Map<string, string>;
 
@@ -222,6 +223,7 @@ async function bootstrap() {
     const manufacturers = await seedManufacturers(prisma, logger);
     const units = await seedUnits(prisma, logger);
     await seedProducts(prisma, transactions, { categories, manufacturers, units }, logger);
+    await seedPriceBooks(prisma, logger);
 
     logger.log('Catalog seed completed');
   } catch (error) {

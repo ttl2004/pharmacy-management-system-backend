@@ -7,6 +7,9 @@ import compress from '@fastify/compress';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import fastifyStatic from '@fastify/static';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -14,6 +17,7 @@ import { Logger } from 'nestjs-pino';
 import { AUTH_JWT } from './common/constants/app.constant';
 import { ResolveExceptionFilter } from './common/exceptions/resolve.exception';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { UPLOAD_ROOT } from './modules/feature-catalog/product/product-image.service';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -21,6 +25,8 @@ async function bootstrap() {
     new FastifyAdapter({
       trustProxy: false,
       logger: false,
+      // Mặc định 1MB; ảnh sản phẩm gửi base64 (≤2MB nhị phân ≈ 2.8MB) qua POST /product-image.
+      bodyLimit: 4 * 1024 * 1024,
     }),
     { bufferLogs: true }, // không để bị log kép
   );
@@ -45,6 +51,10 @@ async function bootstrap() {
   });
 
   await app.register(cookie);
+
+  // Ảnh sản phẩm đã tải lên (ProductImageService) — phục vụ tĩnh, không cần đăng nhập như ảnh công khai storefront.
+  await mkdir(join(UPLOAD_ROOT, 'products'), { recursive: true });
+  await app.register(fastifyStatic, { root: UPLOAD_ROOT, prefix: '/uploads/', decorateReply: false });
 
   const pinoLogger = app.get(Logger);
   app.useLogger(pinoLogger);

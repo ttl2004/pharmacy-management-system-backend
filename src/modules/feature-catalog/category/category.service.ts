@@ -20,13 +20,18 @@ export class CategoryService extends AbstractBaseService<Category> {
     if (query.parentId) filter.parentId = query.parentId;
     if (query.status) filter.status = query.status;
 
-    return this.categoryRepository.findManyWithPagination(filter, {
-      page: query.page,
-      limit: query.limit,
-      sort: query.sort,
-      search: query.search,
-      searchFields: ['code', 'name'],
-    });
+    const [page, counts] = await Promise.all([
+      this.categoryRepository.findManyWithPagination(filter, {
+        page: query.page,
+        limit: query.limit,
+        sort: query.sort,
+        search: query.search,
+        searchFields: ['code', 'name'],
+      }),
+      this.categoryRepository.countActiveProductsWithDescendants(),
+    ]);
+    // `productCount`: hàng đang kinh doanh của nhóm, cộng dồn nhóm con cháu.
+    return { ...page, hits: page.hits.map((c) => ({ ...c, productCount: counts.get(c.id) ?? 0 })) };
   }
 
   async getDetail(id: string): Promise<Category> {

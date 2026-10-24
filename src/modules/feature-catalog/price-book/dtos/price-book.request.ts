@@ -6,7 +6,7 @@ import {
   IsBoolean,
   IsDateString,
   IsIn,
-  IsInt,
+  IsNumber,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -32,7 +32,7 @@ export class PriceBookFormulaRequest {
   @ApiProperty({ enum: ['+', '-'] })
   op: '+' | '-';
 
-  @IsInt({ message: 'Giá trị công thức phải là số nguyên' })
+  @IsNumber({ maxDecimalPlaces: 2 }, { message: 'Giá trị công thức phải là số, tối đa 2 chữ số thập phân' })
   @Min(0, { message: 'Giá trị công thức không được âm' })
   @ApiProperty({ example: 10 })
   amount: number;

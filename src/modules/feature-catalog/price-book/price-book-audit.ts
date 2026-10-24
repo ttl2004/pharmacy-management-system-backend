@@ -27,7 +27,7 @@ function snapshot(row: PriceBookRow): Snapshot {
     userIds: row.users.map((u) => u.userId).sort(),
     formulaBase: row.formulaBase,
     formulaOp: row.formulaOp,
-    formulaAmount: row.formulaAmount,
+    formulaAmount: row.formulaAmount === null ? null : Number(row.formulaAmount),
     formulaUnit: row.formulaUnit,
   };
 }

@@ -19,7 +19,7 @@ CREATE TABLE "price_books" (
     "outOfBookPolicy" "PriceBookPolicy" NOT NULL DEFAULT 'ALLOW',
     "formulaBase" VARCHAR(50),
     "formulaOp" VARCHAR(1),
-    "formulaAmount" INTEGER,
+    "formulaAmount" DECIMAL(12,2),
     "formulaUnit" VARCHAR(3),
 
     CONSTRAINT "price_books_pkey" PRIMARY KEY ("id")

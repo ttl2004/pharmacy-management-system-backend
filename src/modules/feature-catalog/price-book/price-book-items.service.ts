@@ -90,7 +90,7 @@ export class PriceBookItemsService {
 
   private termsOf(book: PriceBookRow): FormulaTerms | null {
     if (!book.formulaBase || !book.formulaOp || book.formulaAmount === null || !book.formulaUnit) return null;
-    return { op: book.formulaOp as '+' | '-', amount: book.formulaAmount, unit: book.formulaUnit as 'vnd' | '%' };
+    return { op: book.formulaOp as '+' | '-', amount: Number(book.formulaAmount), unit: book.formulaUnit as 'vnd' | '%' };
   }
 
   private async getEditableBook(bookId: string, user: JwtUser): Promise<PriceBookRow> {

@@ -1054,7 +1054,7 @@ model PriceBook {
   formulaBase     String?         @db.VarChar(50)
   /// '+' | '-'
   formulaOp       String?         @db.VarChar(1)
-  formulaAmount   Int?
+  formulaAmount   Decimal?         @db.Decimal(12, 2)
   /// 'vnd' | '%'
   formulaUnit     String?         @db.VarChar(3)
 

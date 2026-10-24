@@ -48,7 +48,7 @@ export function toPriceBookResponse(row: PriceBookRow, editable: boolean): Price
       ? {
           base: row.formulaBase!,
           op: row.formulaOp as '+' | '-',
-          amount: row.formulaAmount!,
+          amount: Number(row.formulaAmount),
           unit: row.formulaUnit as 'vnd' | '%',
         }
       : undefined,

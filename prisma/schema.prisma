@@ -42,7 +42,15 @@ enum DosageForm {
   INJECTION
   SUPPOSITORY
   POWDER
+  EFFERVESCENT
+  SPRAY
   OTHER
+}
+
+/// Loại hàng như KiotViet: thuốc (có số đăng ký, thường quản lý theo lô) hay hàng hoá thường.
+enum ProductType {
+  DRUG
+  GOODS
 }
 
 model Branch {
@@ -122,6 +130,8 @@ model User {
   stockAdjustmentsCreated     StockAdjustment[]     @relation("StockAdjustmentCreatedBy")
   stockAdjustmentsUpdated     StockAdjustment[]     @relation("StockAdjustmentUpdatedBy")
   stockAdjustmentsConfirmed   StockAdjustment[]     @relation("StockAdjustmentConfirmedBy")
+  stockAdjustmentsHandled     StockAdjustment[]     @relation("StockAdjustmentHandler")
+  stockAdjustmentsReceived    StockAdjustment[]     @relation("StockAdjustmentReceiver")
   stockAdjustmentsCancelled   StockAdjustment[]     @relation("StockAdjustmentCancelledBy")
   stockAdjustmentItemsCreated StockAdjustmentItem[] @relation("StockAdjustmentItemCreatedBy")
   stockAdjustmentItemsUpdated StockAdjustmentItem[] @relation("StockAdjustmentItemUpdatedBy")
@@ -327,11 +337,34 @@ model Product {
   storageNote          String?      @db.Text
   minStockLevel        Int          @default(0)
   status               RecordStatus @default(ACTIVE)
+  /// Không đổi được sau khi tạo.
+  type                 ProductType  @default(DRUG)
+  /// Quản lý theo lô, hạn sử dụng. Không đổi được khi sản phẩm đã phát sinh kho.
+  trackBatches         Boolean      @default(true)
+  /// Thuốc kiểm soát đặc biệt (gây nghiện, hướng thần…).
+  isControlled         Boolean      @default(false)
+  registrationNumber   String?      @db.VarChar(50)
+  countryOfOrigin      String?      @db.VarChar(100)
+  /// Định mức tồn tối đa; null = không giới hạn.
+  maxStockLevel        Int?
+  shortName            String?      @db.VarChar(100)
+  /// Trọng lượng theo `weightUnit` (g | kg).
+  weight               Decimal?     @db.Decimal(12, 3)
+  weightUnit           String       @default("g") @db.VarChar(5)
+  description          String?      @db.Text
+  orderNote            String?      @db.Text
+  /// Đánh dấu sao ở danh sách hàng hóa (dùng chung toàn chuỗi).
+  isFavourite          Boolean      @default(false)
+  /// Mã thuốc CSDL Dược quốc gia (danh mục DQG chưa có ở BE — lưu chuỗi).
+  nationalDrugCode     String?      @db.VarChar(50)
+  routeId              String?      @db.Uuid
 
-  category     Category      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  manufacturer Manufacturer? @relation(fields: [manufacturerId], references: [id], onDelete: Restrict)
-  baseUnit     Unit          @relation("BaseUnit", fields: [baseUnitId], references: [id], onDelete: Restrict)
+  category     Category                 @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  manufacturer Manufacturer?            @relation(fields: [manufacturerId], references: [id], onDelete: Restrict)
+  baseUnit     Unit                     @relation("BaseUnit", fields: [baseUnitId], references: [id], onDelete: Restrict)
+  route        AdministrationRoute?     @relation(fields: [routeId], references: [id], onDelete: Restrict)
   units        ProductUnit[]
+  locations    ProductLocation[]
 
   goodsReceiptItems    GoodsReceiptItem[]
   stockBatches         StockBatch[]
@@ -346,7 +379,52 @@ model Product {
   @@index([baseUnitId])
   @@index([status])
   @@index([requiresPrescription])
+  @@index([type])
   @@map("products")
+}
+
+/// Vị trí (kệ/tủ) dùng chung toàn chuỗi. Một sản phẩm có thể nằm ở nhiều vị trí.
+model ShelfLocation {
+  id        String    @id @default(uuid()) @db.Uuid
+  isDeleted Boolean   @default(false)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy String?   @db.Uuid
+  updatedAt DateTime? @db.Timestamptz(3)
+  updatedBy String?   @db.Uuid
+  name      String    @unique @db.VarChar(100)
+
+  products ProductLocation[]
+
+  @@map("shelf_locations")
+}
+
+/// Đường dùng của thuốc (uống, tiêm bắp…) — danh mục chung, tạo thêm ngay trong form sản phẩm.
+model AdministrationRoute {
+  id        String    @id @default(uuid()) @db.Uuid
+  isDeleted Boolean   @default(false)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy String?   @db.Uuid
+  updatedAt DateTime? @db.Timestamptz(3)
+  updatedBy String?   @db.Uuid
+  name      String    @unique @db.VarChar(100)
+
+  products Product[]
+
+  @@map("administration_routes")
+}
+
+/// Bảng nối sản phẩm ↔ vị trí. Sửa sản phẩm gửi `locationIds` là thay toàn bộ (xoá dòng cũ, ghi dòng mới).
+model ProductLocation {
+  productId  String   @db.Uuid
+  locationId String   @db.Uuid
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  product  Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  location ShelfLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+
+  @@id([productId, locationId])
+  @@index([locationId])
+  @@map("product_locations")
 }
 
 model ProductUnit {
@@ -363,6 +441,10 @@ model ProductUnit {
   barcode        String?      @unique @db.VarChar(50)
   isBaseUnit     Boolean      @default(false)
   status         RecordStatus @default(ACTIVE)
+  /// Cho bán lẻ đơn vị này ở POS (tắt = chỉ dùng để nhập/quy đổi).
+  allowLooseSale   Boolean      @default(true)
+  /// Mã đơn vị tính CSDL Dược quốc gia — chỉ ghi qua màn ghép mã, không qua form sản phẩm.
+  nationalUnitCode String?      @db.VarChar(50)
 
   product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
   unit    Unit    @relation(fields: [unitId], references: [id], onDelete: Restrict)
@@ -434,6 +516,8 @@ enum StockRefType {
   ORDER
   STOCK_TRANSFER
   STOCK_ADJUSTMENT
+  /// Tồn đầu lúc tạo hàng không theo lô; refId = id sản phẩm.
+  OPENING_STOCK
 }
 
 enum AuditAction {
@@ -528,6 +612,7 @@ model GoodsReceipt {
   confirmedByUser    User?                       @relation("GoodsReceiptConfirmedBy", fields: [confirmedBy], references: [id], onDelete: Restrict)
   cancelledByUser    User?                       @relation("GoodsReceiptCancelledBy", fields: [cancelledBy], references: [id], onDelete: Restrict)
   items              GoodsReceiptItem[]
+  purchaseReturns    StockAdjustment[]
 
   @@index([branchId, status, createdAt])
   @@index([supplierId])
@@ -562,6 +647,7 @@ model GoodsReceiptItem {
   createdByUser User?        @relation("GoodsReceiptItemCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
   updatedByUser User?        @relation("GoodsReceiptItemUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
   batches       StockBatch[]
+  returnItems   StockAdjustmentItem[]
 
   @@index([receiptId])
   @@index([productId])
@@ -789,6 +875,10 @@ model StockTransferItem {
   toBatchId  String?   @db.Uuid
   quantity   Int
   note       String?   @db.Text
+  /// Số thực nhận (null = chưa nhận, hoặc phiếu nhận đủ trước khi có cột này).
+  receivedQuantity Int?
+  /// Bắt buộc khi nhận thiếu.
+  varianceReason   String? @db.Text
 
   transfer      StockTransfer @relation(fields: [transferId], references: [id], onDelete: Restrict)
   product       Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
@@ -809,7 +899,8 @@ model StockAdjustment {
   createdBy    String?        @db.Uuid
   updatedAt    DateTime?      @db.Timestamptz(3)
   updatedBy    String?        @db.Uuid
-  code         String         @unique @db.VarChar(20)
+  /// Sinh tự động (KK/XH/TH/XD…) hoặc người dùng nhập; tối đa 40 như FE.
+  code         String         @unique @db.VarChar(40)
   branchId     String         @db.Uuid
   type         AdjustmentType
   status       ReceiptStatus  @default(DRAFT)
@@ -821,9 +912,37 @@ model StockAdjustment {
   cancelledBy  String?        @db.Uuid
   cancelReason String?        @db.Text
   note         String?        @db.Text
+  /// Ngày chứng từ (ngày kiểm/huỷ/trả/xuất) do người dùng chọn; mặc định lúc lập.
+  documentDate      DateTime  @default(now()) @db.Timestamptz(3)
+  /// Người xuất huỷ / người trả / người xuất dùng.
+  handlerId         String?   @db.Uuid
+  /// Người nhận (xuất dùng nội bộ).
+  receiverId        String?   @db.Uuid
+  internalUseTypeId String?   @db.Uuid
+  isFavourite       Boolean   @default(false)
+  // --- Tiền phiếu trả NCC (chỉ RETURN_TO_SUPPLIER; loại khác để 0/null) ---
+  /// Trả theo phiếu nhập gốc (tuỳ chọn): cùng chi nhánh + NCC, phiếu đã xác nhận.
+  goodsReceiptId      String?        @db.Uuid
+  /// Σ SL × giá trả lại.
+  goodsAmount         BigInt         @default(0)
+  discountAmount      BigInt         @default(0)
+  /// Giảm giá % (null = theo VND ở discountAmount).
+  discountPercent     Decimal?       @db.Decimal(5, 2)
+  refundExpenseAmount BigInt         @default(0)
+  /// Bản chụp chi phí nhập hoàn lại: [{code,name,receivedAmount,amount}] — chỉ khi trả theo phiếu nhập.
+  refundExpenses      Json?          @db.JsonB
+  /// NCC cần trả = goodsAmount − discountAmount + refundExpenseAmount.
+  totalAmount         BigInt         @default(0)
+  /// Tiền NCC hoàn ngay; phần còn lại (totalAmount − supplierPaid) giảm công nợ NCC khi phiếu CONFIRMED.
+  supplierPaid        BigInt         @default(0)
+  paymentMethod       PaymentMethod?
 
   branch          Branch                @relation(fields: [branchId], references: [id], onDelete: Restrict)
   supplier        Supplier?             @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  goodsReceipt    GoodsReceipt?         @relation(fields: [goodsReceiptId], references: [id], onDelete: Restrict)
+  handler         User?                 @relation("StockAdjustmentHandler", fields: [handlerId], references: [id], onDelete: Restrict)
+  receiver        User?                 @relation("StockAdjustmentReceiver", fields: [receiverId], references: [id], onDelete: Restrict)
+  internalUseType InternalUseType?      @relation(fields: [internalUseTypeId], references: [id], onDelete: Restrict)
   createdByUser   User?                 @relation("StockAdjustmentCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
   updatedByUser   User?                 @relation("StockAdjustmentUpdatedBy", fields: [updatedBy], references: [id], onDelete: Restrict)
   confirmedByUser User?                 @relation("StockAdjustmentConfirmedBy", fields: [confirmedBy], references: [id], onDelete: Restrict)
@@ -832,6 +951,21 @@ model StockAdjustment {
 
   @@index([branchId, status, createdAt])
   @@map("stock_adjustments")
+}
+
+/// Loại xuất dùng nội bộ (văn phòng phẩm, vệ sinh…) — danh mục chung toàn chuỗi.
+model InternalUseType {
+  id        String    @id @default(uuid()) @db.Uuid
+  isDeleted Boolean   @default(false)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  createdBy String?   @db.Uuid
+  updatedAt DateTime? @db.Timestamptz(3)
+  updatedBy String?   @db.Uuid
+  name      String    @unique @db.VarChar(100)
+
+  adjustments StockAdjustment[]
+
+  @@map("internal_use_types")
 }
 
 model StockAdjustmentItem {
@@ -849,8 +983,13 @@ model StockAdjustmentItem {
   quantity       Int
   unitCost       Int
   reason         String?   @db.Text
+  /// Giá trả lại / đơn vị cơ bản (chỉ trả NCC).
+  returnPrice        Int?
+  /// Dòng phiếu nhập gốc khi trả theo phiếu nhập — trần SL = nhập − đã trả.
+  goodsReceiptItemId String? @db.Uuid
 
   adjustment    StockAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Restrict)
+  goodsReceiptItem GoodsReceiptItem? @relation(fields: [goodsReceiptItemId], references: [id], onDelete: Restrict)
   batch         StockBatch      @relation(fields: [batchId], references: [id], onDelete: Restrict)
   product       Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
   createdByUser User?           @relation("StockAdjustmentItemCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
@@ -858,6 +997,7 @@ model StockAdjustmentItem {
 
   @@unique([adjustmentId, batchId])
   @@index([batchId])
+  @@index([goodsReceiptItemId])
   @@map("stock_adjustment_items")
 }
 
@@ -931,6 +1071,8 @@ enum PaymentMethod {
   CASH
   BANK_TRANSFER
   COD
+  /// Thẻ (POS quẹt thẻ tại quầy).
+  CARD
 }
 
 enum TransactionStatus {
@@ -956,7 +1098,11 @@ model Order {
   status               OrderStatus   @default(PENDING)
   subtotalAmount       BigInt        @default(0)
   shippingFee          Int           @default(0)
+  /// Giảm giá cả đơn (VND, ≤ tạm tính). Tổng = tạm tính + phí ship − giảm giá.
+  discountAmount       BigInt        @default(0)
   totalAmount          BigInt        @default(0)
+  /// Dược sĩ ghi đè cảnh báo tương tác major: {reason, warningIds, warningSummaries, byUserId, at}.
+  interactionOverride  Json?         @db.JsonB
   paymentStatus        PaymentStatus @default(UNPAID)
   prescriptionCode     String?       @db.VarChar(50)
   prescriberName       String?       @db.VarChar(150)

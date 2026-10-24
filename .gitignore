@@ -3,6 +3,9 @@
 /node_modules
 /build
 
+# Ảnh sản phẩm tải lên (POST /product-image)
+/uploads
+
 # Logs
 logs
 *.log

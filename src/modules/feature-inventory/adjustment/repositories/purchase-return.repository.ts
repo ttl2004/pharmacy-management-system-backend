@@ -104,7 +104,7 @@ export class PurchaseReturnRepository {
 
   /** Lô ở chi nhánh phiếu nhập theo (sản phẩm, số lô) — lô nhập có thể đã gộp với lô cùng số từ trước. */
   findReceiptBatches(branchId: string, keys: readonly { productId: string; batchNumber: string }[]) {
-    if (!keys.length) return Promise.resolve([]);
+    // Không trả sớm `Promise.resolve([])` — kiểu suy ra thành `never[]` làm hỏng kiểu của nơi gọi; `OR: []` của Prisma đã ra rỗng.
     return this.prisma.stockBatch.findMany({
       where: { branchId, isDeleted: false, OR: keys.map((k) => ({ productId: k.productId, batchNumber: k.batchNumber })) },
       select: { id: true, productId: true, batchNumber: true, quantityOnHand: true, reservedQuantity: true, importPrice: true },

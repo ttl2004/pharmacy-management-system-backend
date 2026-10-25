@@ -134,8 +134,11 @@ export class PriceBookRepository {
     return db.branch.count({ where: { id: { in: ids }, isDeleted: false } });
   }
 
-  findUsers(ids: string[], db: Prisma.TransactionClient = this.prisma) {
-    if (!ids.length) return Promise.resolve([]);
+  async findUsers(
+    ids: string[],
+    db: Prisma.TransactionClient = this.prisma,
+  ): Promise<{ id: string; branchId: string | null }[]> {
+    if (!ids.length) return [];
     return db.user.findMany({ where: { id: { in: ids }, isDeleted: false }, select: { id: true, branchId: true } });
   }
 

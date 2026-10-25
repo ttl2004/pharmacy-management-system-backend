@@ -123,8 +123,11 @@ export class PriceBookRowsRepository {
   }
 
   /** Giá của các bảng cho một tập dòng đơn vị; chỉ lấy bảng trong `bookIds`. */
-  findBookPrices(bookIds: string[], productUnitIds: string[]) {
-    if (!bookIds.length || !productUnitIds.length) return Promise.resolve([]);
+  async findBookPrices(
+    bookIds: string[],
+    productUnitIds: string[],
+  ): Promise<{ priceBookId: string; productUnitId: string; price: number }[]> {
+    if (!bookIds.length || !productUnitIds.length) return [];
     return this.prisma.priceBookItem.findMany({
       where: { priceBookId: { in: bookIds }, productUnitId: { in: productUnitIds } },
       select: { priceBookId: true, productUnitId: true, price: true },

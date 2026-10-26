@@ -1,12 +1,13 @@
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { Prisma, RecordStatus } from '@prisma/client';
+import { Prisma, ProductType, RecordStatus } from '@prisma/client';
 import { SYSTEM_ACTOR_ID } from 'src/common/constants/app.constant';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { CatalogTransactions, productWriteLocks } from 'src/modules/feature-catalog/catalog-transactions';
 import { AppModule } from '../app.module';
 import { SEED_BRANCHES, SEED_CATEGORIES, SEED_MANUFACTURERS, SEED_PRODUCTS, SEED_UNITS } from './data/catalog.seed';
 import type { SeedProductUnit } from './data/catalog.seed';
+import { seedPriceBooks } from './seed-catalog-price-books';
 
 type IdByCode = Map<string, string>;
 
@@ -169,7 +170,11 @@ async function seedProducts(
       ? (references.manufacturers.get(product.manufacturerCode) ?? null)
       : null;
 
+    // Nhóm THUOC_* là thuốc theo lô; nhóm khác (thiết bị y tế…) là hàng hoá không theo lô — khớp backfill migration.
+    const isDrug = product.categoryCode.startsWith('THUOC');
     const data = {
+      type: isDrug ? ProductType.DRUG : ProductType.GOODS,
+      trackBatches: isDrug,
       code: product.code,
       barcode: product.barcode ?? null,
       name: product.name,
@@ -218,6 +223,7 @@ async function bootstrap() {
     const manufacturers = await seedManufacturers(prisma, logger);
     const units = await seedUnits(prisma, logger);
     await seedProducts(prisma, transactions, { categories, manufacturers, units }, logger);
+    await seedPriceBooks(prisma, logger);
 
     logger.log('Catalog seed completed');
   } catch (error) {

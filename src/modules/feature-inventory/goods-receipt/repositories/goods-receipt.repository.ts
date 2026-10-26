@@ -1,65 +1,15 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, ReceiptStatus, StockMovementType, StockRefType } from '@prisma/client';
+import { PaymentMethod, Prisma, ReceiptStatus, StockMovementType, StockRefType } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
+import {
+  GoodsReceiptDetail,
+  GoodsReceiptSummary,
+  presentReceipt,
+  RECEIPT_DETAIL_SELECT,
+  RECEIPT_LIST_SELECT,
+} from './goods-receipt-select';
 
-const USER_BRIEF = { select: { id: true, fullName: true } } as const;
-
-/** Cột đọc được của phiếu nhập ở danh sách — không lộ `isDeleted`. */
-const RECEIPT_LIST_SELECT = {
-  id: true,
-  code: true,
-  status: true,
-  receivedAt: true,
-  subtotalAmount: true,
-  discountAmount: true,
-  vatAmount: true,
-  totalAmount: true,
-  paidAmount: true,
-  paymentStatus: true,
-  supplierInvoiceNo: true,
-  supplierInvoiceDate: true,
-  confirmedAt: true,
-  cancelledAt: true,
-  createdAt: true,
-  updatedAt: true,
-  branch: { select: { id: true, code: true, name: true } },
-  supplier: { select: { id: true, code: true, name: true } },
-  _count: { select: { items: { where: { isDeleted: false } } } },
-} satisfies Prisma.GoodsReceiptSelect;
-
-const RECEIPT_DETAIL_SELECT = {
-  ...RECEIPT_LIST_SELECT,
-  branchId: true,
-  supplierId: true,
-  note: true,
-  cancelReason: true,
-  createdByUser: USER_BRIEF,
-  updatedByUser: USER_BRIEF,
-  confirmedByUser: USER_BRIEF,
-  cancelledByUser: USER_BRIEF,
-  items: {
-    where: { isDeleted: false },
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    select: {
-      id: true,
-      productId: true,
-      productUnitId: true,
-      quantity: true,
-      conversionRate: true,
-      baseQuantity: true,
-      importPrice: true,
-      totalPrice: true,
-      batchNumber: true,
-      manufacturingDate: true,
-      expiryDate: true,
-      product: { select: { id: true, code: true, name: true } },
-      productUnit: { select: { id: true, unit: { select: { id: true, code: true, name: true } } } },
-    },
-  },
-} satisfies Prisma.GoodsReceiptSelect;
-
-export type GoodsReceiptSummary = Prisma.GoodsReceiptGetPayload<{ select: typeof RECEIPT_LIST_SELECT }>;
-export type GoodsReceiptDetail = Prisma.GoodsReceiptGetPayload<{ select: typeof RECEIPT_DETAIL_SELECT }>;
+export type { GoodsReceiptDetail, GoodsReceiptSummary };
 
 /** Đơn vị nhập kèm sản phẩm — đủ để kiểm "đơn vị thuộc đúng sản phẩm, cả hai còn hoạt động" và lấy hệ số. */
 export type UnitWithProduct = Prisma.ProductUnitGetPayload<{
@@ -75,17 +25,34 @@ export type UnitWithProduct = Prisma.ProductUnitGetPayload<{
 
 /** Đầu phiếu tối thiểu để quyết định chuyển trạng thái — đọc trong transaction, trước khi ghi. */
 export interface ReceiptHead {
+  code: string;
+  paymentMethod: PaymentMethod | null;
   id: string;
   status: ReceiptStatus;
   branchId: string;
   supplierId: string;
   receivedAt: Date | null;
+  receiverId: string | null;
+  note: string | null;
+  discountAmount: bigint;
+  supplierExpenseAmount: bigint;
+  otherExpenseAmount: bigint;
   totalAmount: bigint;
   paidAmount: bigint;
 }
 
+/** Tổng trên mọi phiếu khớp bộ lọc, trừ phiếu huỷ (như mock). */
+export interface ReceiptListSummary {
+  totalAmount: bigint;
+  subtotalAmount: bigint;
+  discountAmount: bigint;
+  paidAmount: bigint;
+  totalQuantity: number;
+}
+
 export interface ReceiptPage {
-  hits: GoodsReceiptSummary[];
+  hits: (GoodsReceiptSummary & { totalQuantity: number })[];
+  summary: ReceiptListSummary;
   total: number;
   page: number;
   totalPages: number;
@@ -103,7 +70,8 @@ export class GoodsReceiptRepository {
     orderBy: Prisma.GoodsReceiptOrderByWithRelationInput[],
   ): Promise<ReceiptPage> {
     const fullWhere = { ...where, isDeleted: false };
-    const [hits, total] = await Promise.all([
+    const counted: Prisma.GoodsReceiptWhereInput = { AND: [fullWhere, { status: { not: ReceiptStatus.CANCELLED } }] };
+    const [rows, total, sums, quantity] = await Promise.all([
       this.prisma.goodsReceipt.findMany({
         where: fullWhere,
         select: RECEIPT_LIST_SELECT,
@@ -112,8 +80,32 @@ export class GoodsReceiptRepository {
         skip: (page - 1) * limit,
       }),
       this.prisma.goodsReceipt.count({ where: fullWhere }),
+      this.prisma.goodsReceipt.aggregate({
+        where: counted,
+        _sum: { totalAmount: true, subtotalAmount: true, discountAmount: true, paidAmount: true },
+      }),
+      this.prisma.goodsReceiptItem.aggregate({
+        where: { isDeleted: false, receipt: counted },
+        _sum: { quantity: true },
+      }),
     ]);
-    return { hits, total, page, totalPages: Math.ceil(total / limit), limit };
+    const perReceipt = rows.length
+      ? await this.prisma.goodsReceiptItem.groupBy({
+          by: ['receiptId'],
+          where: { isDeleted: false, receiptId: { in: rows.map((row) => row.id) } },
+          _sum: { quantity: true },
+        })
+      : [];
+    const quantityById = new Map(perReceipt.map((row) => [row.receiptId, row._sum.quantity ?? 0]));
+    const hits = rows.map((row) => ({ ...presentReceipt(row), totalQuantity: quantityById.get(row.id) ?? 0 }));
+    const summary: ReceiptListSummary = {
+      totalAmount: sums._sum.totalAmount ?? 0n,
+      subtotalAmount: sums._sum.subtotalAmount ?? 0n,
+      discountAmount: sums._sum.discountAmount ?? 0n,
+      paidAmount: sums._sum.paidAmount ?? 0n,
+      totalQuantity: quantity._sum.quantity ?? 0,
+    };
+    return { hits, summary, total, page, totalPages: Math.ceil(total / limit), limit };
   }
 
   /** `scopeWhere` (vd `{ branchId }`) nằm ngay trong `where` — bản ghi ngoài phạm vi coi như không tồn tại. */
@@ -122,10 +114,9 @@ export class GoodsReceiptRepository {
     scopeWhere: { branchId?: string },
     client: Prisma.TransactionClient = this.prisma,
   ): Promise<GoodsReceiptDetail | null> {
-    return client.goodsReceipt.findFirst({
-      where: { id, isDeleted: false, ...scopeWhere },
-      select: RECEIPT_DETAIL_SELECT,
-    });
+    return client.goodsReceipt
+      .findFirst({ where: { id, isDeleted: false, ...scopeWhere }, select: RECEIPT_DETAIL_SELECT })
+      .then((row) => (row ? presentReceipt(row) : null));
   }
 
   findStatus(tx: Prisma.TransactionClient, id: string, scopeWhere: { branchId?: string }): Promise<ReceiptHead | null> {
@@ -133,14 +124,67 @@ export class GoodsReceiptRepository {
       where: { id, isDeleted: false, ...scopeWhere },
       select: {
         id: true,
+        code: true,
+        paymentMethod: true,
         status: true,
         branchId: true,
         supplierId: true,
         receivedAt: true,
+        receiverId: true,
+        note: true,
+        discountAmount: true,
+        supplierExpenseAmount: true,
+        otherExpenseAmount: true,
         totalAmount: true,
         paidAmount: true,
       },
     });
+  }
+
+  /**
+   * Như `findStatus` nhưng KHOÁ dòng phiếu (`FOR UPDATE`) đến hết transaction rồi mới đọc: mọi thao tác đổi phiếu
+   * (xác nhận, huỷ, sửa nháp, trả tiền, sửa meta) xếp hàng, và đầu phiếu đọc được là số mới nhất, không bị cũ.
+   * Câu đọc đứng SAU khoá nên (READ COMMITTED) thấy cả bản commit của request vừa nhả khoá.
+   */
+  async findStatusForUpdate(
+    tx: Prisma.TransactionClient,
+    id: string,
+    scopeWhere: { branchId?: string },
+  ): Promise<ReceiptHead | null> {
+    const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT "id" FROM "goods_receipts"
+      WHERE "id" = ${id}::uuid AND "isDeleted" = false
+        ${scopeWhere.branchId ? Prisma.sql`AND "branchId" = ${scopeWhere.branchId}::uuid` : Prisma.empty}
+      FOR UPDATE`);
+    return locked.length ? this.findStatus(tx, id, scopeWhere) : null;
+  }
+
+  /** Người nhập hợp lệ: ACTIVE, chưa xoá, không phải SUPER_ADMIN/CUSTOMER, thuộc chi nhánh phiếu hoặc vai trò toàn chuỗi. */
+  findReceiverCandidates(branchId?: string) {
+    return this.prisma.user.findMany({
+      where: {
+        isDeleted: false,
+        status: 'ACTIVE',
+        role: { code: { notIn: ['SUPER_ADMIN', 'CUSTOMER'] } },
+        ...(branchId ? { OR: [{ branchId }, { role: { code: 'ADMIN' } }] } : {}),
+      },
+      select: { id: true, fullName: true },
+      orderBy: [{ fullName: 'asc' }, { id: 'asc' }],
+    });
+  }
+
+  async isValidReceiver(tx: Prisma.TransactionClient, userId: string, branchId: string): Promise<boolean> {
+    const found = await tx.user.findFirst({
+      where: {
+        id: userId,
+        isDeleted: false,
+        status: 'ACTIVE',
+        role: { code: { notIn: ['SUPER_ADMIN', 'CUSTOMER'] } },
+        OR: [{ branchId }, { role: { code: 'ADMIN' } }],
+      },
+      select: { id: true },
+    });
+    return !!found;
   }
 
   findBranch(tx: Prisma.TransactionClient, id: string) {
@@ -209,6 +253,8 @@ export class GoodsReceiptRepository {
         quantity: true,
         conversionRate: true,
         importPrice: true,
+        totalPrice: true,
+        unitDiscount: true,
         batchNumber: true,
         manufacturingDate: true,
         expiryDate: true,

@@ -5,6 +5,7 @@ import { daysBetweenDateOnly, toDateOnlyString, todayInVietnam } from 'src/commo
 import type { InventoryTxContext } from 'src/modules/feature-inventory/core/inventory-transactions';
 import { inventoryError } from 'src/modules/feature-inventory/core/inventory.error';
 import { StockAllocationService } from 'src/modules/feature-inventory/core/stock-allocation.service';
+import { StockIntakeService } from 'src/modules/feature-inventory/core/stock-intake.service';
 import type { LockedBatch } from 'src/modules/feature-inventory/core/stock-ledger.repository';
 import { ReservationRef, StockLedgerService } from 'src/modules/feature-inventory/core/stock-ledger.service';
 import { OrderStockRepository } from './order-stock.repository';
@@ -49,6 +50,7 @@ export class OrderStockService {
     private readonly allocator: StockAllocationService,
     private readonly ledger: StockLedgerService,
     private readonly repository: OrderStockRepository,
+    private readonly intake: StockIntakeService,
   ) {}
 
   /** Chọn lô FEFO + giữ hàng + ghi phân bổ: 3 câu lệnh cho cả đơn. Thiếu hàng → 1700 (caller rollback cả đơn). */
@@ -87,6 +89,22 @@ export class OrderStockService {
       orderRef(orderId),
       actorId,
     );
+  }
+
+  /**
+   * Huỷ hoá đơn ĐÃ THU: hàng quay về đúng các lô đã bán (`RETURN_IN`) với giá vốn đã chốt lúc bán — bình quân lại giá
+   * vốn lô qua `returnToBatches`. Phân bổ giữ nguyên làm lịch sử.
+   */
+  async restock(ctx: InventoryTxContext, orderId: string, actorId: string, note: string): Promise<void> {
+    const rows = await this.repository.findAllocations(ctx.tx, orderId);
+    await this.intake.returnToBatches(ctx, {
+      type: StockMovementType.RETURN_IN,
+      refType: StockRefType.ORDER,
+      refId: orderId,
+      actorId,
+      note,
+      lines: rows.map((row) => ({ batchId: row.batchId, quantity: row.quantity, unitCost: row.unitCost, refItemId: row.id })),
+    });
   }
 
   /** Sửa đơn PENDING: nhả rồi xoá phân bổ — caller sẽ chọn lô lại cho danh sách dòng mới. */

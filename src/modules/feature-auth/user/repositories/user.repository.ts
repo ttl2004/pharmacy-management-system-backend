@@ -20,9 +20,15 @@ export class UserRepository extends PrismaBaseRepository<User> {
     return this.prisma.user.findFirst({ where: { email } });
   }
 
-  /** Lấy user kèm vai trò — vai trò nằm ở bảng `roles` từ khi chuyển sang khoá ngoại. */
+  /**
+   * Lấy user kèm vai trò — vai trò nằm ở bảng `roles` từ khi chuyển sang khoá ngoại.
+   * Vai trò đã xoá mềm coi như không có user (fail closed: không cấp quyền nào).
+   */
   async findByIdWithRole(id: string): Promise<(User & { role: Role }) | null> {
-    return this.prisma.user.findFirst({ where: { id, isDeleted: false }, include: { role: true } });
+    return this.prisma.user.findFirst({
+      where: { id, isDeleted: false, role: { isDeleted: false } },
+      include: { role: true },
+    });
   }
 
   /**
@@ -41,7 +47,7 @@ export class UserRepository extends PrismaBaseRepository<User> {
   findByIdWithRoleAndBranch(id: string) {
     return this.prisma.user.findFirst({
       where: { id, isDeleted: false },
-      include: { role: true, branch: true },
+      include: { role: true, branch: true, auth: { select: { username: true } } },
     });
   }
 }

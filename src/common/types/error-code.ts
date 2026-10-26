@@ -46,6 +46,7 @@ export enum ErrorCode {
   BRANCH_NOT_ASSIGNED = 1507,
   ROLE_LEVEL_FORBIDDEN = 1508,
   PERMISSION_NOT_GRANTABLE = 1509,
+  ROLE_IN_USE = 1510,
 
   //- CRUD nghiệp vụ dùng chung
   RECORD_NOT_FOUND = 1600,
@@ -54,6 +55,7 @@ export enum ErrorCode {
   ROLE_NOT_ASSIGNABLE = 1603,
   SUPER_ADMIN_PROTECTED = 1604,
   SELF_OPERATION_FORBIDDEN = 1605,
+  PRICE_BOOK_BASE_IN_USE = 1606,
 
   //- Kho — khai đủ cả dải từ giai đoạn 1 để các giai đoạn sau không tranh số
   INSUFFICIENT_STOCK = 1700,
@@ -69,8 +71,13 @@ export enum ErrorCode {
   SUPPLIER_INACTIVE = 1710,
   STOCK_TAKE_PENDING = 1711,
   RECALL_ADMIN_ONLY = 1712,
+  RECEIPT_HAS_PAYMENTS = 1713,
+  DEBT_EXCEEDED = 1714,
+  DEBT_CHANGED = 1715,
 
   //- Bán hàng — dải 1800–1849, giai đoạn sau khai tiếp không tranh số
   PRESCRIPTION_REQUIRED = 1800,
   PRODUCT_NOT_SELLABLE = 1801,
+  PRICE_BOOK_UNAVAILABLE = 1802,
+  PRODUCT_NOT_IN_PRICE_BOOK = 1803,
 }

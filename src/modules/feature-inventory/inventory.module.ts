@@ -5,6 +5,8 @@ import { BranchProductModule } from './branch-product/branch-product.module';
 import { InventoryCoreModule } from './core/inventory-core.module';
 import { GoodsReceiptModule } from './goods-receipt/goods-receipt.module';
 import { StockModule } from './stock/stock.module';
+import { SupplierDebtModule } from './supplier-debt/supplier-debt.module';
+import { SupplierGroupModule } from './supplier-group/supplier-group.module';
 import { SupplierModule } from './supplier/supplier.module';
 import { TransferModule } from './transfer/transfer.module';
 
@@ -16,6 +18,8 @@ import { TransferModule } from './transfer/transfer.module';
   imports: [
     InventoryCoreModule,
     SupplierModule,
+    SupplierGroupModule,
+    SupplierDebtModule,
     GoodsReceiptModule,
     StockModule,
     BranchProductModule,

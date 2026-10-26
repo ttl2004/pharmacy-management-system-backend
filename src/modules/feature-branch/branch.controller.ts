@@ -34,23 +34,26 @@ export class BranchController {
 
   @RequirePermissions('branch:read')
   @Get()
-  @ApiOperation({ description: 'Danh sách chi nhánh, tìm theo mã/tên/SĐT, lọc theo trạng thái.' })
-  list(@Query() query: BranchQuery) {
-    return this.branchService.list(query);
+  @ApiOperation({
+    description:
+      'Danh sách chi nhánh, tìm theo mã/tên/SĐT, lọc theo trạng thái. Vai trò phạm vi chi nhánh chỉ thấy chi nhánh của mình.',
+  })
+  list(@Query() query: BranchQuery, @CurrentUser() user: JwtUser) {
+    return this.branchService.list(query, user);
   }
 
   @RequirePermissions('branch:read')
   @Get(':id')
-  @ApiOperation({ description: 'Chi tiết chi nhánh.' })
-  detail(@Param('id', new ParseUUIDPipe()) id: string) {
-    return this.branchService.getDetail(id);
+  @ApiOperation({ description: 'Chi tiết chi nhánh. Ngoài phạm vi người gọi → BRANCH_ACCESS_DENIED (1506).' })
+  detail(@Param('id', new ParseUUIDPipe()) id: string, @CurrentUser() user: JwtUser) {
+    return this.branchService.getDetail(id, user);
   }
 
   @RequirePermissions('branch:create')
   @Post()
-  @ApiOperation({ description: 'Tạo chi nhánh.' })
+  @ApiOperation({ description: 'Tạo chi nhánh. Chỉ vai trò phạm vi toàn chuỗi.' })
   create(@Body() dto: CreateBranchRequest, @CurrentUser() user: JwtUser) {
-    return this.branchService.create(dto, user.userId);
+    return this.branchService.create(dto, user);
   }
 
   @RequirePermissions('branch:update')
@@ -61,13 +64,13 @@ export class BranchController {
     @Body() dto: UpdateBranchRequest,
     @CurrentUser() user: JwtUser,
   ) {
-    return this.branchService.update(id, dto, user.userId);
+    return this.branchService.update(id, dto, user);
   }
 
   @RequirePermissions('branch:delete')
   @Delete(':id')
   @ApiOperation({ description: 'Xoá mềm chi nhánh. Từ chối nếu còn người dùng tham chiếu.' })
-  remove(@Param('id', new ParseUUIDPipe()) id: string) {
-    return this.branchService.remove(id);
+  remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentUser() user: JwtUser) {
+    return this.branchService.remove(id, user);
   }
 }

@@ -14,6 +14,7 @@ import { DEFAULT_ROLE_GRANTS, ROLE_CATALOG, RoleCode } from './role.constant';
 import { permissionError } from './permission.error';
 import { branchScopeKindOf, isInBranchScope, resolveBranchScope } from './branch-scope';
 import { assertGrantable, assertOutranks } from './role-hierarchy';
+import { assertRoleWithinCallerGrants } from './role-grant-guard';
 import { RoleRepository } from './repositories/role.repository';
 import { PermissionRepository } from './repositories/permission.repository';
 import { RolePermissionRepository } from './repositories/role-permission.repository';
@@ -53,6 +54,11 @@ export class PermissionService {
     return new Set(codes);
   }
 
+  /** Xoá cache quyền — dịch vụ ghi vai trò (RoleAdminService) gọi sau mỗi lần ghi. */
+  clearGrantCache(): void {
+    this.grantCache.clear();
+  }
+
   async getCatalog() {
     const permissions = await this.permissions.findAllOrdered();
     return permissions.map((permission) => ({
@@ -60,19 +66,6 @@ export class PermissionService {
       name: permission.name,
       module: permission.module,
       sortOrder: permission.sortOrder,
-    }));
-  }
-
-  async getRoles() {
-    const roles = await this.roles.findMany({}, { sort: { level: -1 }, limit: 100 });
-    const counts = await this.rolePermissions.countActivePerRole();
-
-    return roles.map((role) => ({
-      code: role.code,
-      name: role.name,
-      description: role.description,
-      level: role.level,
-      permissionCount: counts.get(role.id) ?? 0,
     }));
   }
 
@@ -88,22 +81,9 @@ export class PermissionService {
     // Rào cấp bậc: chỉ sửa được ma trận của vai trò thấp hơn mình (1508) — kể cả vai trò của chính mình.
     assertOutranks(caller.roleLevel, role.level);
 
-    const catalog = await this.permissions.findAllOrdered();
-    const idByCode = new Map(catalog.map((permission) => [permission.code, permission.id]));
-
     const wanted = [...new Set(codes)];
-    const unknown = wanted.filter((code) => !idByCode.has(code));
-    if (unknown.length) {
-      this.logger.warn(`Mã quyền không có trong danh mục: ${unknown.join(', ')}`);
-      throw permissionError(ErrorCode.PERMISSION_NOT_FOUND);
-    }
-
-    // Chỉ được cấp thêm quyền chính mình đang có (1509), nếu không ai có `permission:update` cũng tự leo thang được.
     const current = new Set(await this.rolePermissions.findGrantedCodes(role.id));
-    const callerCodes = caller.role === AuthRole.SUPER_ADMIN ? null : await this.getGrantedCodes(caller.role);
-    assertGrantable(wanted, current, callerCodes);
-
-    const permissionIds = wanted.map((code) => idByCode.get(code) as string);
+    const permissionIds = await this.resolvePermissionIds(wanted, current, caller);
     try {
       await this.writeRolePermissions(role.id, (tx) =>
         this.rolePermissions.replaceForRole(tx, role.id, permissionIds, caller.userId),
@@ -157,6 +137,8 @@ export class PermissionService {
     // Rào cấp bậc: người bị đổi và vai trò mới đều phải thấp hơn người gọi (1508).
     assertOutranks(caller.roleLevel, target.role.level);
     assertOutranks(caller.roleLevel, role.level);
+    // Vai trò mới không được mang quyền người gọi không có (1509) — chặn leo thang gián tiếp.
+    await assertRoleWithinCallerGrants(this.prisma, role.id, caller);
 
     // Luật 10 phải áp cho MỌI đường đổi vai trò, không chỉ tạo/sửa hồ sơ. Đây là đường DUY NHẤT
     // đổi được vai trò, nên bỏ sót ở đây là tạo ra bản ghi vi phạm bất biến mà `UserService`
@@ -241,7 +223,31 @@ export class PermissionService {
     });
   }
 
-  private async requireRole(code: string): Promise<Role> {
+  /**
+   * Đổi mã quyền thành id, dùng chung cho tạo vai trò và ghi đè ma trận: 1503 nếu mã không có trong danh mục,
+   * 1509 nếu cấp thêm quyền mà chính người gọi không có (SUPER_ADMIN bỏ qua) — chặn leo thang đặc quyền.
+   */
+  async resolvePermissionIds(
+    wanted: PermissionCode[],
+    current: ReadonlySet<string>,
+    caller: JwtUser,
+  ): Promise<string[]> {
+    const catalog = await this.permissions.findAllOrdered();
+    const idByCode = new Map(catalog.map((permission) => [permission.code, permission.id]));
+
+    const unknown = wanted.filter((code) => !idByCode.has(code));
+    if (unknown.length) {
+      this.logger.warn(`Mã quyền không có trong danh mục: ${unknown.join(', ')}`);
+      throw permissionError(ErrorCode.PERMISSION_NOT_FOUND);
+    }
+
+    const callerCodes = caller.role === AuthRole.SUPER_ADMIN ? null : await this.getGrantedCodes(caller.role);
+    assertGrantable(wanted, current, callerCodes);
+
+    return wanted.map((code) => idByCode.get(code) as string);
+  }
+
+  async requireRole(code: string): Promise<Role> {
     const role = await this.roles.findOne({ code });
     if (!role) throw permissionError(ErrorCode.ROLE_NOT_FOUND);
     return role;

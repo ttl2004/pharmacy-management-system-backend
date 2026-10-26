@@ -14,7 +14,10 @@ export type InventoryErrorCode =
   | ErrorCode.PRODUCT_HAS_STOCK
   | ErrorCode.SUPPLIER_INACTIVE
   | ErrorCode.STOCK_TAKE_PENDING
-  | ErrorCode.RECALL_ADMIN_ONLY;
+  | ErrorCode.RECALL_ADMIN_ONLY
+  | ErrorCode.RECEIPT_HAS_PAYMENTS
+  | ErrorCode.DEBT_EXCEEDED
+  | ErrorCode.DEBT_CHANGED;
 
 const inventoryMessages: Record<InventoryErrorCode, string> = {
   [ErrorCode.INSUFFICIENT_STOCK]: 'Tồn kho của lô không đủ',
@@ -30,6 +33,9 @@ const inventoryMessages: Record<InventoryErrorCode, string> = {
   [ErrorCode.SUPPLIER_INACTIVE]: 'Nhà cung cấp đã ngừng hợp tác',
   [ErrorCode.STOCK_TAKE_PENDING]: 'Lô đang có phiếu kiểm kê nháp chưa xác nhận hoặc huỷ',
   [ErrorCode.RECALL_ADMIN_ONLY]: 'Chỉ ADMIN được mở khoá hoặc hạ mức lô đã thu hồi',
+  [ErrorCode.RECEIPT_HAS_PAYMENTS]: 'Phiếu nhập đã có phiếu chi lập tay, hãy huỷ phiếu chi trước',
+  [ErrorCode.DEBT_EXCEEDED]: 'Số tiền trả vượt công nợ hiện tại',
+  [ErrorCode.DEBT_CHANGED]: 'Công nợ đã thay đổi, tải lại rồi thử lại',
 };
 
 /**

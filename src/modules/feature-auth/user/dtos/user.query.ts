@@ -1,15 +1,22 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { UserStatus } from '@prisma/client';
-import { IsEnum, IsOptional, IsUUID } from 'class-validator';
-import { AuthRole } from 'src/common/types/common.enum';
+import { Transform } from 'class-transformer';
+import { IsBoolean, IsEnum, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 import { AbstractBaseQuery } from 'src/providers/abstract-base/abstract-base.query';
 
 export class UserQuery extends AbstractBaseQuery {
-  /** Chặn ở DTO để mã vai trò rác trả 400 rõ ràng, thay vì lặng lẽ ra danh sách rỗng. */
+  /** Mã vai trò lạ cho ra danh sách rỗng (vai trò tự tạo nên không còn là enum cố định). */
   @IsOptional()
-  @IsEnum(AuthRole)
-  @ApiPropertyOptional({ enum: AuthRole, example: 'SALES_STAFF', description: 'Lọc theo mã vai trò' })
-  roleCode?: AuthRole;
+  @IsString()
+  @MaxLength(50)
+  @ApiPropertyOptional({ example: 'SALES_STAFF', description: 'Lọc theo mã vai trò' })
+  roleCode?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => (value === 'true' ? true : value === 'false' ? false : value))
+  @IsBoolean()
+  @ApiPropertyOptional({ description: 'true = loại khách hàng (CUSTOMER) khỏi danh sách' })
+  excludeCustomer?: boolean;
 
   @IsOptional()
   @IsUUID()

@@ -8,7 +8,7 @@ export interface QueryRange {
 /**
  * Danh sách quan hệ cần join, ví dụ `{ user: true }` hoặc `['user']`.
  */
-export type RelationOptions = string[] | Record<string, boolean>;
+export type RelationOptions = string[] | Record<string, unknown>;
 
 export interface BaseFindOptions {
   page?: number;

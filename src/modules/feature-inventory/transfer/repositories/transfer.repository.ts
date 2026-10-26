@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, StockMovementType, StockRefType, TransferStatus } from '@prisma/client';
+import { Prisma, RecordStatus, StockMovementType, StockRefType, TransferStatus } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
 
 const BRANCH_BRIEF = { select: { id: true, code: true, name: true } } as const;
@@ -36,6 +36,8 @@ const TRANSFER_DETAIL_SELECT = {
       id: true,
       quantity: true,
       note: true,
+      receivedQuantity: true,
+      varianceReason: true,
       batchId: true,
       toBatchId: true,
       product: { select: { id: true, code: true, name: true } },
@@ -69,6 +71,15 @@ export type TransferItemWithBatch = Prisma.StockTransferItemGetPayload<{
 export class TransferRepository {
   constructor(private readonly prisma: PrismaService) {}
 
+  /** Chi nhánh nhận được hàng: mọi chi nhánh đang hoạt động (không theo phạm vi người gọi — PM gửi đi chi nhánh khác). */
+  findActiveBranches(): Promise<{ id: string; code: string; name: string }[]> {
+    return this.prisma.branch.findMany({
+      where: { isDeleted: false, status: RecordStatus.ACTIVE },
+      orderBy: { code: 'asc' },
+      select: { id: true, code: true, name: true },
+    });
+  }
+
   async findPage(where: Prisma.StockTransferWhereInput, page: number, limit: number) {
     const fullWhere = { AND: [where, { isDeleted: false }] };
     const [hits, total] = await Promise.all([
@@ -88,6 +99,16 @@ export class TransferRepository {
     return client.stockTransfer.findFirst({
       where: { AND: [{ id, isDeleted: false }, scopeWhere] },
       select: TRANSFER_DETAIL_SELECT,
+    });
+  }
+
+  /** Nhiều phiếu kèm dòng (hàng đi đường) — trần 500 phiếu, cũ trước. */
+  findDetails(where: Prisma.StockTransferWhereInput): Promise<TransferDetail[]> {
+    return this.prisma.stockTransfer.findMany({
+      where: { AND: [where, { isDeleted: false }] },
+      select: TRANSFER_DETAIL_SELECT,
+      orderBy: [{ shippedAt: 'asc' }, { id: 'asc' }],
+      take: 500,
     });
   }
 
@@ -132,6 +153,26 @@ export class TransferRepository {
 
   createItems(tx: Prisma.TransactionClient, rows: Prisma.StockTransferItemCreateManyInput[]) {
     return tx.stockTransferItem.createMany({ data: rows });
+  }
+
+  /** Ghi số thực nhận + lý do lệch từng dòng lúc nhận. */
+  async setReceived(
+    tx: Prisma.TransactionClient,
+    rows: readonly { itemId: string; receivedQuantity: number; varianceReason: string | null }[],
+    actorId: string,
+  ) {
+    for (const row of rows) {
+      await tx.stockTransferItem.update({
+        where: { id: row.itemId },
+        data: { receivedQuantity: row.receivedQuantity, varianceReason: row.varianceReason, updatedBy: actorId, updatedAt: new Date() },
+      });
+    }
+  }
+
+  /** Sửa phiếu PENDING: dòng chưa có bút toán tham chiếu (chỉ ghi lúc gửi) → xoá hẳn rồi ghi lại. */
+  async replaceItems(tx: Prisma.TransactionClient, transferId: string, rows: Prisma.StockTransferItemCreateManyInput[]) {
+    await tx.stockTransferItem.deleteMany({ where: { transferId } });
+    await tx.stockTransferItem.createMany({ data: rows });
   }
 
   /** Chuyển trạng thái có điều kiện — 0 nghĩa là phiếu đã bị người khác xử lý trước. */

@@ -13,11 +13,6 @@ import { permissionError } from './permission.error';
 /** Vai trò thấy dữ liệu của mọi chi nhánh. */
 export const CHAIN_WIDE_ROLES: readonly string[] = [AuthRole.SUPER_ADMIN, AuthRole.ADMIN];
 
-/**
- * Vai trò gắn với đúng một chi nhánh. Cũng là nguồn của luật 10 (`UserService.assertBranchRule`): vai trò
- * trong danh sách này bắt buộc có `branchId`, vai trò ngoài danh sách bắt buộc để trống.
- */
-export const BRANCH_BOUND_ROLES: readonly string[] = [AuthRole.PHARMACY_MANAGER, AuthRole.SALES_STAFF];
 
 export type BranchScopeKind = 'ALL' | 'BRANCH' | 'NONE';
 
@@ -26,8 +21,17 @@ export type BranchScope = { kind: 'ALL' } | { kind: 'BRANCH'; branchId: string }
 /** Loại phạm vi của một vai trò, không ném lỗi — dùng để hiển thị (ví dụ `GET /permission/me`). */
 export function branchScopeKindOf(role: string): BranchScopeKind {
   if (CHAIN_WIDE_ROLES.includes(role)) return 'ALL';
-  if (BRANCH_BOUND_ROLES.includes(role)) return 'BRANCH';
-  return 'NONE';
+  if (role === AuthRole.CUSTOMER) return 'NONE';
+  // Mọi mã còn lại (kể cả vai trò tự tạo) gắn với đúng một chi nhánh.
+  return 'BRANCH';
+}
+
+/**
+ * Vai trò gắn với đúng một chi nhánh. Nguồn của luật 10 (`UserService.assertBranchRule`): vai trò này bắt
+ * buộc có `branchId`, vai trò còn lại bắt buộc để trống.
+ */
+export function isBranchBoundRole(role: string): boolean {
+  return branchScopeKindOf(role) === 'BRANCH';
 }
 
 /**

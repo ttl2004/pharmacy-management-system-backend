@@ -11,7 +11,6 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
-  IsUrl,
   IsUUID,
   Matches,
   MaxLength,
@@ -19,9 +18,12 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import { ProductExtraFieldsRequest } from './product-extra-fields.request';
 
 const CODE_PATTERN = /^[A-Z0-9_-]+$/;
 const MAX_IMAGE_URLS = 10;
+/** URL ảnh ngoài, hoặc đường dẫn ảnh do `POST /product-image` trả về (tên tệp UUID + đuôi ảnh). */
+const IMAGE_URL_PATTERN = /^(https?:\/\/\S+|\/uploads\/products\/[0-9a-f-]{36}\.(png|jpg|webp|gif))$/;
 
 /** `@Transform` chạy trước class-validator nên `sp0001` được đưa về `SP0001` rồi mới qua regex. */
 const normalizeCode = ({ value }: { value: unknown }) =>
@@ -54,12 +56,17 @@ export class ProductUnitRequest {
   isBaseUnit?: boolean;
 
   @IsOptional()
+  @IsBoolean()
+  @ApiPropertyOptional({ default: true, description: 'Cho bán lẻ đơn vị này ở POS' })
+  allowLooseSale?: boolean;
+
+  @IsOptional()
   @IsEnum(RecordStatus)
   @ApiPropertyOptional({ enum: RecordStatus })
   status?: RecordStatus;
 }
 
-export class CreateProductRequest {
+export class CreateProductRequest extends ProductExtraFieldsRequest {
   @Transform(normalizeCode)
   @IsString()
   @IsNotEmpty()
@@ -83,7 +90,7 @@ export class CreateProductRequest {
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MAX_IMAGE_URLS)
-  @IsUrl({}, { each: true })
+  @Matches(IMAGE_URL_PATTERN, { each: true, message: 'imageUrls chỉ nhận URL http(s) hoặc ảnh đã tải lên (/uploads/products/…)' })
   @MaxLength(2048, { each: true })
   @ApiPropertyOptional({ type: [String], description: `Tối đa ${MAX_IMAGE_URLS} URL ảnh` })
   imageUrls?: string[];
@@ -167,7 +174,7 @@ export class CreateProductRequest {
  * DTO sửa sản phẩm. Không gửi `units` là giữ nguyên cấu hình đơn vị bán; có gửi là **thay toàn bộ**
  * (replace-all) — dòng vắng mặt bị xoá mềm. Các trường nullable gửi `null` để xoá giá trị cũ.
  */
-export class UpdateProductRequest {
+export class UpdateProductRequest extends ProductExtraFieldsRequest {
   @ValidateIf((_, value) => value !== undefined)
   @Transform(normalizeCode)
   @IsString()
@@ -193,7 +200,7 @@ export class UpdateProductRequest {
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MAX_IMAGE_URLS)
-  @IsUrl({}, { each: true })
+  @Matches(IMAGE_URL_PATTERN, { each: true, message: 'imageUrls chỉ nhận URL http(s) hoặc ảnh đã tải lên (/uploads/products/…)' })
   @MaxLength(2048, { each: true })
   @ApiPropertyOptional({ type: [String], description: `Tối đa ${MAX_IMAGE_URLS} URL ảnh` })
   imageUrls?: string[];

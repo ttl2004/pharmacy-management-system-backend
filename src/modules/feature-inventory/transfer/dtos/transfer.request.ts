@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional, OmitType } from '@nestjs/swagger';
 import { TransferStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
@@ -62,6 +62,37 @@ export class CreateTransferRequest {
   @ApiProperty({ type: [TransferItemRequest] })
   items: TransferItemRequest[];
 }
+
+export class ReceiveTransferLineRequest {
+  @IsUUID()
+  @ApiProperty({ description: 'Id dòng phiếu (stock_transfer_items)' })
+  itemId: string;
+
+  @IsInt()
+  @Min(0)
+  @Max(MAX_BASE_QUANTITY)
+  @ApiProperty({ description: 'Số thực nhận (≤ số gửi)' })
+  receivedQuantity: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  @ApiPropertyOptional({ description: 'Bắt buộc khi nhận thiếu' })
+  varianceReason?: string;
+}
+
+/** Body tuỳ chọn của `POST /transfer/:id/receive` — bỏ trống = nhận đủ. */
+export class ReceiveTransferRequest {
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ReceiveTransferLineRequest)
+  @ApiPropertyOptional({ type: [ReceiveTransferLineRequest] })
+  lines?: ReceiveTransferLineRequest[];
+}
+
+/** Sửa phiếu PENDING: như lập phiếu nhưng không đổi chi nhánh gửi. */
+export class UpdateTransferRequest extends OmitType(CreateTransferRequest, ['fromBranchId'] as const) {}
 
 export class CancelTransferRequest {
   @IsString()

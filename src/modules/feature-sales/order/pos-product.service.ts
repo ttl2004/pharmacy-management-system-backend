@@ -5,6 +5,8 @@ import { todayInVietnam } from 'src/common/utils/date-only.util';
 import { escapeLike } from 'src/common/utils/like-pattern.util';
 import { resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
 import { resolveWriteBranch } from 'src/modules/feature-inventory/core/inventory-scope';
+import { PriceBookService } from 'src/modules/feature-catalog/price-book/price-book.service';
+import { BookPricing, bookPriceOf, toBookPricing } from '../core/order-lines';
 import { PosProductQuery } from './dtos/order.request';
 import { PosProductRepository, PosProductRow } from './repositories/pos-product.repository';
 
@@ -13,6 +15,10 @@ export interface PosProductUnit {
   unitName: string;
   conversionRate: number;
   salePrice: number;
+  /** Giá theo bảng giá đã chọn; null = không chọn bảng hoặc hàng không có trong bảng. Giá bán hiển thị = bookPrice ?? salePrice. */
+  bookPrice: number | null;
+  /** true = đã chọn bảng mà đơn vị này không có trong bảng (FE xử lý theo policy ALLOW/WARN/BLOCK của bảng). */
+  outOfBook: boolean;
   barcode: string | null;
   isBaseUnit: boolean;
   /** Bán được bao nhiêu theo đơn vị này (làm tròn xuống). */
@@ -25,6 +31,8 @@ export interface PosProduct {
   name: string;
   imageUrl: string | null;
   requiresPrescription: boolean;
+  /** Thuốc kiểm soát đặc biệt — POS bắt buộc tên + SĐT khách (như mock). */
+  isControlled: boolean;
   /** Lượng bán được tại chi nhánh theo đơn vị cơ bản. */
   sellableBaseQuantity: number;
   units: PosProductUnit[];
@@ -40,7 +48,10 @@ export interface PosProduct {
  */
 @Injectable()
 export class PosProductService {
-  constructor(private readonly products: PosProductRepository) {}
+  constructor(
+    private readonly products: PosProductRepository,
+    private readonly priceBooks: PriceBookService,
+  ) {}
 
   async search(query: PosProductQuery, actor: RequestActor, today: string = todayInVietnam()) {
     const branchId = resolveWriteBranch(
@@ -49,10 +60,14 @@ export class PosProductService {
       'Cần chọn chi nhánh bán (branchId)',
     );
     const { page, limit } = query;
+    // Bảng giá không dùng được -> 1802 để FE về Bảng giá chung và báo người dùng.
+    const book = query.priceBookId
+      ? toBookPricing(await this.priceBooks.getUsableBook(query.priceBookId, branchId, actor.user.userId))
+      : undefined;
 
     if (query.barcode) {
       const row = await this.products.findByBarcode(query.barcode.trim());
-      const hits = row ? await this.withStock(branchId, [row], today) : [];
+      const hits = row ? await this.withStock(branchId, [row], today, book) : [];
       if (row) hits[0].matchedUnitId = matchedUnitOf(row, query.barcode.trim());
       return { hits, total: hits.length, page: 1, totalPages: hits.length, limit };
     }
@@ -69,7 +84,7 @@ export class PosProductService {
     }
     const { rows, total } = await this.products.findPage({ AND: conditions }, page, limit);
     return {
-      hits: await this.withStock(branchId, rows, today),
+      hits: await this.withStock(branchId, rows, today, book),
       total,
       page,
       totalPages: Math.ceil(total / limit),
@@ -77,7 +92,12 @@ export class PosProductService {
     };
   }
 
-  private async withStock(branchId: string, rows: readonly PosProductRow[], today: string): Promise<PosProduct[]> {
+  private async withStock(
+    branchId: string,
+    rows: readonly PosProductRow[],
+    today: string,
+    book?: BookPricing,
+  ): Promise<PosProduct[]> {
     const sellable = await this.products.sellableQuantities(
       branchId,
       rows.map((row) => row.id),
@@ -91,16 +111,22 @@ export class PosProductService {
         name: row.name,
         imageUrl: row.imageUrls[0] ?? null,
         requiresPrescription: row.requiresPrescription,
+        isControlled: row.isControlled,
         sellableBaseQuantity: base,
-        units: row.units.map((unit) => ({
-          id: unit.id,
-          unitName: unit.unit.name,
-          conversionRate: unit.conversionRate,
-          salePrice: unit.salePrice,
-          barcode: unit.barcode,
-          isBaseUnit: unit.isBaseUnit,
-          sellableQuantity: Math.floor(base / unit.conversionRate),
-        })),
+        units: row.units.map((unit) => {
+          const bookPrice = bookPriceOf(book, unit.id);
+          return {
+            id: unit.id,
+            unitName: unit.unit.name,
+            conversionRate: unit.conversionRate,
+            salePrice: unit.salePrice,
+            bookPrice,
+            outOfBook: !!book && bookPrice === null,
+            barcode: unit.barcode,
+            isBaseUnit: unit.isBaseUnit,
+            sellableQuantity: Math.floor(base / unit.conversionRate),
+          };
+        }),
       };
     });
   }

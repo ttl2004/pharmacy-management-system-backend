@@ -73,6 +73,24 @@ export const PERMISSION_CATALOG = [
   { code: 'order:create', name: 'Lập và sửa đơn tại quầy', module: 'order', sortOrder: 2 },
   { code: 'order:pay', name: 'Thu tiền đơn tại quầy', module: 'order', sortOrder: 3 },
   { code: 'order:cancel', name: 'Huỷ đơn hàng', module: 'order', sortOrder: 4 },
+  // Khai trước cho các màn giao diện đã có — endpoint sẽ gắn khi làm nghiệp vụ tương ứng (đợt tích hợp FE 0b).
+  { code: 'customer:read', name: 'Xem khách hàng', module: 'customer', sortOrder: 1 },
+  { code: 'customer:create', name: 'Tạo khách hàng', module: 'customer', sortOrder: 2 },
+  { code: 'customer:update', name: 'Sửa khách hàng', module: 'customer', sortOrder: 3 },
+  { code: 'customer:delete', name: 'Ngừng hoạt động / xoá khách hàng', module: 'customer', sortOrder: 4 },
+  { code: 'customer-debt:read', name: 'Xem công nợ khách hàng', module: 'customer-debt', sortOrder: 1 },
+  { code: 'supplier-debt:read', name: 'Xem công nợ nhà cung cấp', module: 'supplier-debt', sortOrder: 1 },
+  {
+    code: 'supplier-debt:write',
+    name: 'Thanh toán, điều chỉnh công nợ nhà cung cấp',
+    module: 'supplier-debt',
+    sortOrder: 2,
+  },
+  { code: 'price-book:update', name: 'Sửa giá bán, tạo / sửa / xoá bảng giá', module: 'price-book', sortOrder: 1 },
+  { code: 'report:read', name: 'Xem báo cáo', module: 'report', sortOrder: 1 },
+  { code: 'dqg:read', name: 'Xem ghép mã và nhật ký liên thông Dược Quốc gia', module: 'dqg', sortOrder: 1 },
+  { code: 'dqg:write', name: 'Ghép mã, gửi liên thông Dược Quốc gia', module: 'dqg', sortOrder: 2 },
+  { code: 'dqg:connect', name: 'Kết nối / huỷ kết nối tài khoản CSDL Dược', module: 'dqg', sortOrder: 3 },
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CATALOG)[number]['code'];

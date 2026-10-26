@@ -1,12 +1,20 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
 import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthzGuard } from '../../feature-auth/authz/guards/auth.guard';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
+import { resolveBranchScope, scopedBranchFilter } from '../../feature-auth/permission/branch-scope';
 import { AdjustmentService } from './adjustment.service';
-import { AdjustmentQuery, CancelAdjustmentRequest, CreateAdjustmentRequest } from './dtos/adjustment.request';
+import { PurchaseReturnMoneyService } from './purchase-return-money.service';
+import {
+  AdjustmentQuery,
+  CancelAdjustmentRequest,
+  CreateAdjustmentRequest,
+  FavouriteAdjustmentRequest,
+  UpdateAdjustmentRequest,
+} from './dtos/adjustment.request';
 
 @Controller('stock-adjustment')
 @ApiTags('StockAdjustment')
@@ -18,13 +26,52 @@ import { AdjustmentQuery, CancelAdjustmentRequest, CreateAdjustmentRequest } fro
 })
 @UseGuards(AuthzGuard, PermissionGuard)
 export class AdjustmentController {
-  constructor(private readonly adjustmentService: AdjustmentService) {}
+  constructor(
+    private readonly adjustmentService: AdjustmentService,
+    private readonly returnMoney: PurchaseReturnMoneyService,
+  ) {}
 
   @RequirePermissions('stock-adjustment:read')
   @Get()
   @ApiOperation({ description: 'Phiếu kiểm kê / huỷ hàng / trả NCC / điều chỉnh khác.' })
   list(@Query() query: AdjustmentQuery, @CurrentActor() actor: RequestActor) {
     return this.adjustmentService.list(query, actor);
+  }
+
+  // Khai báo trước `:id`.
+  @RequirePermissions('stock-adjustment:read')
+  @Get('staff')
+  @ApiOperation({ description: 'Nhân sự chọn làm người xuất/trả/nhận → [{id, fullName}]. PM bị ép về chi nhánh mình.' })
+  staff(@Query('branchId', new ParseUUIDPipe({ optional: true })) branchId: string | undefined, @CurrentActor() actor: RequestActor) {
+    return this.adjustmentService.staff(branchId, actor);
+  }
+
+  @RequirePermissions('stock-adjustment:create')
+  @Get('returnable/:receiptId')
+  @ApiOperation({
+    description:
+      'Trả NCC theo phiếu nhập: từng dòng nhập (nhập / đã trả / tồn lô / còn trả được, giá vốn đã phân bổ) + chi phí NCC còn hoàn được.',
+  })
+  returnable(@Param('receiptId', new ParseUUIDPipe()) receiptId: string, @CurrentActor() actor: RequestActor) {
+    return this.returnMoney.returnable(receiptId, scopedBranchFilter(resolveBranchScope(actor.user), undefined));
+  }
+
+  @RequirePermissions('stock-adjustment:read')
+  @Get(':id/warnings')
+  @ApiOperation({ description: 'Phiếu kiểm kê: {newLots, movedLots} — lô mới tạo sau lúc lập, lô đã đổi tồn so với số chụp.' })
+  warnings(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
+    return this.adjustmentService.stockTakeWarnings(id, actor);
+  }
+
+  @RequirePermissions('stock-adjustment:read')
+  @Post(':id/favourite')
+  @ApiOperation({ description: 'Bật/tắt sao của phiếu (cờ chung) → {isFavourite}.' })
+  favourite(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: FavouriteAdjustmentRequest,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.adjustmentService.setFavourite(id, dto.isFavourite, actor);
   }
 
   @RequirePermissions('stock-adjustment:read')
@@ -44,6 +91,17 @@ export class AdjustmentController {
     return this.adjustmentService.create(dto, actor);
   }
 
+  @RequirePermissions('stock-adjustment:create')
+  @Put(':id')
+  @ApiOperation({ description: 'Sửa phiếu NHÁP: thay toàn bộ dòng + thông tin đầu phiếu (không đổi chi nhánh, loại). 1701 nếu không còn nháp.' })
+  update(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: UpdateAdjustmentRequest,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.adjustmentService.update(id, dto, actor);
+  }
+
   @RequirePermissions('stock-adjustment:confirm')
   @Post(':id/confirm')
   @ApiOperation({
@@ -55,7 +113,10 @@ export class AdjustmentController {
 
   @RequirePermissions('stock-adjustment:cancel')
   @Post(':id/cancel')
-  @ApiOperation({ description: 'Huỷ phiếu NHÁP. Phiếu đã xác nhận không huỷ — lập phiếu bù.' })
+  @ApiOperation({
+    description:
+      'Huỷ phiếu NHÁP; hoặc phiếu ĐÃ XÁC NHẬN loại xuất huỷ / trả NCC / xuất nội bộ (đảo bút toán về đúng lô, 1700 nếu thiếu tồn). Kiểm kê đã xác nhận không huỷ.',
+  })
   cancel(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: CancelAdjustmentRequest,

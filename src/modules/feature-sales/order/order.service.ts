@@ -21,15 +21,17 @@ import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth
 import { DocumentCodeService } from 'src/modules/feature-inventory/core/document-code.service';
 import { branchWhere, resolveWriteBranch } from 'src/modules/feature-inventory/core/inventory-scope';
 import { InventoryTransactions, InventoryTxContext } from 'src/modules/feature-inventory/core/inventory-transactions';
-import { inventoryError, invalidReference } from 'src/modules/feature-inventory/core/inventory.error';
+import { badRequest, inventoryError, invalidReference } from 'src/modules/feature-inventory/core/inventory.error';
+import { ApplicableBook, PriceBookService } from 'src/modules/feature-catalog/price-book/price-book.service';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
-import { buildOrderLines, OrderLine, orderTotals } from '../core/order-lines';
+import { buildOrderLines, deletedPriceBookError, OrderLine, orderTotals, toBookPricing } from '../core/order-lines';
 import { OrderStockService } from '../core/order-stock.service';
 import { EXPIRY_BATCH_SIZE, POS_ABANDON_MINUTES, SALES_AUDIT_ENTITY } from '../core/sales.constants';
 import { orderErrors, salesError } from '../core/sales.error';
 import {
   CancelOrderRequest,
   CreatePosOrderRequest,
+  InteractionOverrideRequest,
   OrderQuery,
   PayOrderRequest,
   PrescriptionRequest,
@@ -55,6 +57,13 @@ function prescriptionData(prescription: PrescriptionRequest | undefined) {
   };
 }
 
+/** Ghi đè cảnh báo tương tác: server tự điền người ghi đè + thời điểm. Không gửi → `{}` (giữ giá trị cũ khi sửa đơn). */
+function overrideData(override: InteractionOverrideRequest | undefined, actorId: string) {
+  if (!override) return {};
+  const value = { ...override, byUserId: actorId, at: new Date().toISOString() };
+  return { interactionOverride: value as unknown as Prisma.InputJsonValue };
+}
+
 function isDuplicateTransactionCode(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
 }
@@ -74,6 +83,7 @@ export class OrderService {
     private readonly stock: OrderStockService,
     private readonly codes: DocumentCodeService,
     private readonly audit: AuditLogService,
+    private readonly priceBooks: PriceBookService,
   ) {}
 
   list(query: OrderQuery, actor: RequestActor) {
@@ -114,8 +124,18 @@ export class OrderService {
       const customer = dto.customerPhone
         ? await this.walkInCustomerOf(tx, dto.customerPhone, dto.customerName, actorId)
         : null;
-      const lines = buildOrderLines(dto.items, await this.orders.findSellableUnits(tx, this.unitIdsOf(dto)));
-      const totals = orderTotals(lines);
+      // Bảng giá không dùng được (hết hạn, sai chi nhánh/người bán...) -> 1802, KHÔNG im lặng về giá chung.
+      const book = dto.priceBookId ? await this.priceBooks.getUsableBook(dto.priceBookId, branchId, actorId) : null;
+      const lines = buildOrderLines(
+        dto.items,
+        await this.orders.findSellableUnits(tx, this.unitIdsOf(dto)),
+        book ? toBookPricing(book) : undefined,
+      );
+      const totals = orderTotals(lines, 0, dto.discountAmount ?? 0);
+      // Thuốc kiểm soát đặc biệt: phải biết người mua (như mock — chặn khách lẻ).
+      if (!customer && lines.some((line) => line.isControlled)) {
+        throw badRequest('Đơn có thuốc kiểm soát đặc biệt phải nhập SĐT khách mua');
+      }
 
       const code = await this.codes.next(tx, 'ORDER');
       const { id } = await this.orders.createHeader(tx, {
@@ -124,9 +144,13 @@ export class OrderService {
         customerId: customer?.id ?? null,
         staffId: actorId,
         channel: OrderChannel.POS,
+        priceBookId: book?.id ?? null,
+        priceBookName: book?.name ?? null,
         subtotalAmount: totals.subtotalAmount,
+        discountAmount: totals.discountAmount,
         totalAmount: totals.totalAmount,
         ...prescriptionData(dto.prescription),
+        ...overrideData(dto.interactionOverride, actorId),
         note: dto.note ?? null,
         createdBy: actorId,
       });
@@ -170,8 +194,19 @@ export class OrderService {
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
       const head = await this.loadEditablePos(tx, id, branchWhere(scope));
-      const lines = buildOrderLines(dto.items, await this.orders.findSellableUnits(tx, this.unitIdsOf(dto)));
-      const totals = orderTotals(lines);
+      // D10: đơn đã gắn bảng thì kiểm lại bảng (theo người tạo + chi nhánh đơn); lỗi -> 1802, giữ nguyên bảng của đơn.
+      let book: ApplicableBook | null = null;
+      if (head.priceBookId) {
+        book = await this.priceBooks.getUsableBook(head.priceBookId, head.branchId, head.createdBy ?? actorId);
+      } else if (head.priceBookName) {
+        throw deletedPriceBookError(head.priceBookName);
+      }
+      const lines = buildOrderLines(
+        dto.items,
+        await this.orders.findSellableUnits(tx, this.unitIdsOf(dto)),
+        book ? toBookPricing(book) : undefined,
+      );
+      const totals = orderTotals(lines, 0, dto.discountAmount ?? 0);
 
       // Chiếm trước khi đụng kho: request thu tiền/huỷ cùng lúc phải chờ, rồi thấy đơn đã đổi.
       const claimed = await this.orders.claim(
@@ -180,8 +215,10 @@ export class OrderService {
         { status: OrderStatus.PENDING, channel: OrderChannel.POS },
         {
           subtotalAmount: totals.subtotalAmount,
+          discountAmount: totals.discountAmount,
           totalAmount: totals.totalAmount,
           ...prescriptionData(dto.prescription),
+          ...overrideData(dto.interactionOverride, actorId),
           updatedAt: now,
           updatedBy: actorId,
         },
@@ -237,17 +274,20 @@ export class OrderService {
           throw salesError(ErrorCode.PRESCRIPTION_REQUIRED);
         }
 
-        await this.orders.createPayment(tx, {
-          orderId: id,
-          method: dto.method,
-          amount: head.totalAmount,
-          status: TransactionStatus.SUCCESS,
-          transactionCode: dto.transactionCode ?? null,
-          paidAt: now,
-          updatedAt: now,
-          note: dto.note ?? null,
-          createdBy: actorId,
-        });
+        // Đơn 0đ (giảm giá hết): không có lượt thu nào — CHECK `payments_amount_positive_chk`.
+        if (head.totalAmount > 0n) {
+          await this.orders.createPayment(tx, {
+            orderId: id,
+            method: dto.method,
+            amount: head.totalAmount,
+            status: TransactionStatus.SUCCESS,
+            transactionCode: dto.transactionCode ?? null,
+            paidAt: now,
+            updatedAt: now,
+            note: dto.note ?? null,
+            createdBy: actorId,
+          });
+        }
         await this.stock.consume(ctx, id, actorId);
 
         await this.audit.record(tx, [

@@ -37,18 +37,16 @@ export type RoleCode = (typeof ROLE_CATALOG)[number]['code'];
  * đây rồi chạy lại `npm run seed:permissions` là vai trò đã có ma trận cũng nhận được; quyền đã bị thu hồi trên
  * giao diện thì không bị cấp lại.
  *
- * SUPER_ADMIN không có mặt vì luôn bỏ qua mọi kiểm tra quyền. `permission:update` và
- * `user:role:update` cố ý không cấp cho ai: SUPER_ADMIN vẫn làm được nhờ luật bỏ qua, còn
- * ADMIN chỉ xem được ma trận. Muốn mở cho vai trò khác thì tự tick trên giao diện.
+ * SUPER_ADMIN không có mặt vì luôn bỏ qua mọi kiểm tra quyền. `permission:update` cố ý không cấp cho ai
+ * (ADMIN chỉ xem được ma trận); muốn mở cho vai trò khác thì tự tick trên giao diện. `user:role:update` đã
+ * cấp cho ADMIN và PHARMACY_MANAGER (đợt 1 tích hợp).
  *
- * CẢNH BÁO khi mở `permission:update` cho vai trò khác: dịch vụ chưa có rào chống leo thang
- * đặc quyền. Ai có `permission:update` thì cấp được `user:role:update` cho chính vai trò mình,
- * rồi dùng quyền đó gán vai trò SUPER_ADMIN cho một tài khoản khác và đăng nhập bằng tài khoản
- * đó. Muốn mở thì phải thêm rào so cấp bậc (`level`) trước — xem mục 7 của spec.
+ * Rào chống leo thang đặc quyền đã có: (1) cấp bậc `level` — `assertOutranks` ở `role-hierarchy.ts`; (2) chỉ
+ * cấp được quyền mình đang có — `assertGrantable` cho ma trận quyền; (3) gán vai trò / tạo người dùng chỉ với
+ * vai trò có tập quyền ⊆ quyền người gọi — `role-grant-guard.ts` (1509). SUPER_ADMIN bỏ qua (2) và (3).
  */
 export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCode[]>> = {
-  // `user:create` cố ý KHÔNG có mặt: tài khoản các vai trò nội bộ chỉ super admin tạo.
-  // Xem spec mục 4.5 — cùng nhóm với `permission:update` và `user:role:update`.
+  // Đợt 1 tích hợp: ADMIN được tạo người dùng và đổi vai trò (luật cấp bậc ở `role-hierarchy.ts` vẫn áp dụng).
   [AuthRole.ADMIN]: [
     'permission:read',
     'branch:read',
@@ -56,8 +54,10 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'branch:update',
     'branch:delete',
     'user:read',
+    'user:create',
     'user:update',
     'user:delete',
+    'user:role:update',
     'category:read',
     'category:create',
     'category:update',
@@ -101,11 +101,29 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'order:create',
     'order:pay',
     'order:cancel',
+    // Khai trước cho màn giao diện đã có (khách hàng, công nợ, giá, báo cáo, DQG).
+    'customer:read',
+    'customer:create',
+    'customer:update',
+    'customer:delete',
+    'customer-debt:read',
+    'supplier-debt:read',
+    'supplier-debt:write',
+    'price-book:update',
+    'report:read',
+    'dqg:read',
+    'dqg:write',
+    'dqg:connect',
   ],
   [AuthRole.PHARMACY_MANAGER]: [
     'branch:read',
-    // Chỉ thấy người dùng thuộc chi nhánh mình — phạm vi do branch-scope.ts ép ở tầng service.
+    'permission:read',
+    // Quản lý nhân viên chi nhánh mình — phạm vi do branch-scope.ts, cấp bậc do role-hierarchy.ts ép ở tầng service.
     'user:read',
+    'user:create',
+    'user:update',
+    'user:delete',
+    'user:role:update',
     'category:read',
     'manufacturer:read',
     'unit:read',
@@ -135,6 +153,18 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'order:create',
     'order:pay',
     'order:cancel',
+    // Kết nối tài khoản CSDL Dược là việc cấp chuỗi — chỉ ADMIN.
+    'customer:read',
+    'customer:create',
+    'customer:update',
+    'customer:delete',
+    'customer-debt:read',
+    'supplier-debt:read',
+    'supplier-debt:write',
+    'price-book:update',
+    'report:read',
+    'dqg:read',
+    'dqg:write',
   ],
   // Dược sĩ chỉ ĐỌC dữ liệu kho của chi nhánh mình; mọi thao tác ghi kho là của PM hoặc ADMIN (K9, K10).
   [AuthRole.SALES_STAFF]: [
@@ -154,5 +184,10 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'order:create',
     'order:pay',
     'order:cancel',
+    // Tại quầy: tra cứu / thêm khách và xem công nợ, không xoá khách.
+    'customer:read',
+    'customer:create',
+    'customer:update',
+    'customer-debt:read',
   ],
 };

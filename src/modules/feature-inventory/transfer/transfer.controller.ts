@@ -1,11 +1,13 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
 import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthzGuard } from '../../feature-auth/authz/guards/auth.guard';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
-import { CancelTransferRequest, CreateTransferRequest, TransferQuery } from './dtos/transfer.request';
+import {
+  CancelTransferRequest, CreateTransferRequest, ReceiveTransferRequest, TransferQuery, UpdateTransferRequest,
+} from './dtos/transfer.request';
 import { TransferService } from './transfer.service';
 
 @Controller('transfer')
@@ -29,11 +31,36 @@ export class TransferController {
     return this.transferService.list(query, actor);
   }
 
+  // Khai báo trước `:id` để không bị bắt làm id.
+  @RequirePermissions('transfer:create')
+  @Get('destinations')
+  @ApiOperation({ description: 'Mọi chi nhánh đang hoạt động {id, code, name} — nơi nhận khi lập phiếu (cả cho PM).' })
+  destinations() {
+    return this.transferService.destinations();
+  }
+
+  @RequirePermissions('transfer:read')
+  @Get('in-transit')
+  @ApiOperation({ description: 'Phiếu IN_TRANSIT (kèm dòng, lô) mà chi nhánh gửi đi hoặc sẽ nhận — hàng đi đường.' })
+  inTransit(
+    @Query('branchId', new ParseUUIDPipe({ optional: true })) branchId: string | undefined,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.transferService.inTransit(branchId, actor);
+  }
+
   @RequirePermissions('transfer:read')
   @Get(':id')
   @ApiOperation({ description: 'Chi tiết phiếu kèm lô gửi và lô nhận (toBatchId).' })
   detail(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
     return this.transferService.getDetail(id, actor);
+  }
+
+  @RequirePermissions('transfer:create')
+  @Put(':id')
+  @ApiOperation({ description: 'Sửa phiếu PENDING (phía gửi): chi nhánh nhận, ghi chú, toàn bộ dòng. 1701 nếu đã gửi/huỷ.' })
+  update(@Param('id', new ParseUUIDPipe()) id: string, @Body() dto: UpdateTransferRequest, @CurrentActor() actor: RequestActor) {
+    return this.transferService.update(id, dto, actor);
   }
 
   @RequirePermissions('transfer:create')
@@ -52,9 +79,15 @@ export class TransferController {
 
   @RequirePermissions('transfer:receive')
   @Post(':id/receive')
-  @ApiOperation({ description: 'Nhận đủ hàng (không hỗ trợ nhận thiếu): cộng kho nhận (TRANSFER_IN).' })
-  receive(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
-    return this.transferService.receive(id, actor);
+  @ApiOperation({
+    description: 'Nhận hàng: body rỗng = nhận đủ; `lines` = số thực nhận từng dòng, nhận thiếu bắt buộc lý do. Cộng kho nhận (TRANSFER_IN) theo số thực nhận.',
+  })
+  receive(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: ReceiveTransferRequest,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.transferService.receive(id, actor, dto);
   }
 
   @RequirePermissions('transfer:cancel')

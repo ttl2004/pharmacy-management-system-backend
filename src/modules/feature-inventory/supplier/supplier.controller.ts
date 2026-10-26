@@ -7,6 +7,7 @@ import { RequirePermissions } from '../../feature-auth/permission/decorators/req
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
 import { CreateSupplierRequest, UpdateSupplierRequest } from './dtos/supplier.request';
 import { SupplierQuery } from './dtos/supplier.query';
+import { SupplierListService } from './supplier-list.service';
 import { SupplierService } from './supplier.service';
 
 @Controller('supplier')
@@ -18,20 +19,25 @@ import { SupplierService } from './supplier.service';
 })
 @UseGuards(AuthzGuard, PermissionGuard)
 export class SupplierController {
-  constructor(private readonly supplierService: SupplierService) {}
+  constructor(
+    private readonly supplierService: SupplierService,
+    private readonly supplierList: SupplierListService,
+  ) {}
 
   @RequirePermissions('supplier:read')
   @Get()
-  @ApiOperation({ description: 'Danh sách nhà cung cấp, tìm theo mã/tên/SĐT/mã số thuế, lọc theo trạng thái.' })
-  list(@Query() query: SupplierQuery) {
-    return this.supplierService.list(query);
+  @ApiOperation({ description:
+      'Danh sách NCC kèm group, createdByUser, totalPurchase, currentDebt và summary (tổng trên mọi dòng khớp lọc). Lọc: status, groupId (hoặc none), note, purchaseMin/Max, debtMin/Max, fromDate/toDate; sort thêm totalPurchase|currentDebt. Thiếu quyền supplier-debt:read thì nợ = 0.',
+  })
+  list(@Query() query: SupplierQuery, @CurrentActor() actor: RequestActor) {
+    return this.supplierList.list(query, actor);
   }
 
   @RequirePermissions('supplier:read')
   @Get(':id')
-  @ApiOperation({ description: 'Chi tiết nhà cung cấp.' })
-  detail(@Param('id', new ParseUUIDPipe()) id: string) {
-    return this.supplierService.getDetail(id);
+  @ApiOperation({ description: 'Chi tiết nhà cung cấp (cùng các trường như danh sách).' })
+  detail(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
+    return this.supplierList.getDetail(id, actor);
   }
 
   @RequirePermissions('supplier:create')

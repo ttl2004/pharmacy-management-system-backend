@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, StockRefType } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { containsPattern } from 'src/common/utils/like-pattern.util';
 
@@ -60,10 +60,16 @@ export interface MovementSummaryRow {
   productId: string;
   productCode: string;
   productName: string;
+  baseUnitName: string;
   opening: number;
   inQuantity: number;
   outQuantity: number;
   closing: number;
+  /** Giá trị tiền (đồng) theo giá vốn ghi trên từng bút toán. */
+  openingValue: number;
+  inValue: number;
+  outValue: number;
+  closingValue: number;
   importQty: number;
   saleQty: number;
   transferInQty: number;
@@ -109,6 +115,24 @@ export class StockQueryRepository {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take,
     });
+  }
+
+  /**
+   * Mã chứng từ đọc được của các dòng sổ kho (sổ kho chỉ lưu `refType` + `refId`). Gom theo loại → một truy vấn mỗi
+   * loại có mặt; tồn đầu tham chiếu sản phẩm nên lấy mã hàng. Không lọc xoá mềm: chứng từ đã xoá vẫn là nguồn bút toán.
+   */
+  async findRefCodes(refs: readonly { refType: StockRefType; refId: string }[]): Promise<Map<string, string>> {
+    const idsOf = (type: StockRefType) => [...new Set(refs.filter((r) => r.refType === type).map((r) => r.refId))];
+    const pick = { id: true, code: true } as const;
+    const query = <T>(ids: string[], run: (ids: string[]) => Promise<T[]>) => (ids.length ? run(ids) : Promise.resolve([]));
+    const groups = await Promise.all([
+      query(idsOf(StockRefType.GOODS_RECEIPT), (ids) => this.prisma.goodsReceipt.findMany({ where: { id: { in: ids } }, select: pick })),
+      query(idsOf(StockRefType.ORDER), (ids) => this.prisma.order.findMany({ where: { id: { in: ids } }, select: pick })),
+      query(idsOf(StockRefType.STOCK_TRANSFER), (ids) => this.prisma.stockTransfer.findMany({ where: { id: { in: ids } }, select: pick })),
+      query(idsOf(StockRefType.STOCK_ADJUSTMENT), (ids) => this.prisma.stockAdjustment.findMany({ where: { id: { in: ids } }, select: pick })),
+      query(idsOf(StockRefType.OPENING_STOCK), (ids) => this.prisma.product.findMany({ where: { id: { in: ids } }, select: pick })),
+    ]);
+    return new Map(groups.flat().map((row) => [row.id, row.code]));
   }
 
   /** Tồn gộp theo (chi nhánh, sản phẩm) kèm ngưỡng của chi nhánh (rơi về ngưỡng chung của sản phẩm). */
@@ -196,12 +220,19 @@ export class StockQueryRepository {
     const inPeriod = Prisma.sql`m."createdAt" >= ${filter.from}`;
     const sumType = (type: string) =>
       Prisma.sql`SUM(CASE WHEN ${inPeriod} AND m."type" = ${type}::"StockMovementType" THEN m."quantity" ELSE 0 END)::int`;
+    // Giá trị = SL × giá vốn ghi trên bút toán (giá vốn lô lúc biến động). float8 thay bigint: BigInt không ra JSON.
+    // Nhân ở float8 ngay từ đầu: int4 × int4 tràn khi SL × giá lớn (vd. 10 000 × 1 000 000).
+    const value = Prisma.sql`(m."quantity"::float8 * COALESCE(m."unitCost", 0)::float8)`;
     return this.prisma.$queryRaw<MovementSummaryRow[]>(Prisma.sql`
-      SELECT m."productId", p."code" AS "productCode", p."name" AS "productName",
+      SELECT m."productId", p."code" AS "productCode", p."name" AS "productName", u."name" AS "baseUnitName",
              SUM(CASE WHEN m."createdAt" < ${filter.from} THEN m."quantity" ELSE 0 END)::int AS "opening",
              SUM(CASE WHEN ${inPeriod} AND m."quantity" > 0 THEN m."quantity" ELSE 0 END)::int AS "inQuantity",
              SUM(CASE WHEN ${inPeriod} AND m."quantity" < 0 THEN -m."quantity" ELSE 0 END)::int AS "outQuantity",
              SUM(m."quantity")::int AS "closing",
+             SUM(CASE WHEN m."createdAt" < ${filter.from} THEN ${value} ELSE 0 END)::float8 AS "openingValue",
+             SUM(CASE WHEN ${inPeriod} AND m."quantity" > 0 THEN ${value} ELSE 0 END)::float8 AS "inValue",
+             SUM(CASE WHEN ${inPeriod} AND m."quantity" < 0 THEN -${value} ELSE 0 END)::float8 AS "outValue",
+             SUM(${value})::float8 AS "closingValue",
              ${sumType('IMPORT')} AS "importQty",
              ${sumType('SALE')} AS "saleQty",
              ${sumType('TRANSFER_IN')} AS "transferInQty",
@@ -212,8 +243,9 @@ export class StockQueryRepository {
              ${sumType('RETURN_OUT')} AS "returnOutQty"
       FROM "stock_movements" m
       JOIN "products" p ON p."id" = m."productId"
+      JOIN "units" u ON u."id" = p."baseUnitId"
       WHERE m."createdAt" < ${filter.toExclusive} ${branchCondition}
-      GROUP BY m."productId", p."code", p."name"
+      GROUP BY m."productId", p."code", p."name", u."name"
       ORDER BY p."name"`);
   }
 }

@@ -4,10 +4,13 @@ import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { CatalogTransactions, productWriteLocks } from '../catalog-transactions';
 import { CreateProductRequest, ProductUnitRequest, UpdateProductRequest } from './dtos/product.request';
 import { ProductQuery } from './dtos/product.query';
+import { productCreatedEntry, productDeletedEntry, productUpdatedEntry } from './product-audit';
+import { toExtraCreateData, toExtraUpdateData } from './product-extra-fields.mapper';
 import { ProductDetail, ProductRepository } from './repositories/product.repository';
 
 @Injectable()
@@ -15,6 +18,7 @@ export class ProductService extends AbstractBaseService<Product> {
   constructor(
     private readonly productRepository: ProductRepository,
     private readonly transactions: CatalogTransactions,
+    private readonly audit: AuditLogService,
   ) {
     super(productRepository);
   }
@@ -56,6 +60,8 @@ export class ProductService extends AbstractBaseService<Product> {
           unitIds: [dto.baseUnitId, ...dto.units.map((unit) => unit.unitId)],
         });
         await this.assertBarcodesAvailable(tx, [dto.barcode, ...dto.units.map((unit) => unit.barcode)]);
+        const locationIds = await this.assertLocations(tx, dto.locationIds ?? []);
+        await this.assertRoute(tx, dto.routeId);
 
         const product = await this.productRepository.createProduct(tx, {
           code: dto.code,
@@ -75,8 +81,10 @@ export class ProductService extends AbstractBaseService<Product> {
           storageNote: dto.storageNote ?? null,
           minStockLevel: dto.minStockLevel ?? 0,
           status: dto.status ?? RecordStatus.ACTIVE,
+          ...toExtraCreateData(dto),
           createdBy: callerId,
         });
+        await this.productRepository.replaceLocations(tx, product.id, locationIds);
 
         await this.productRepository.createUnits(
           tx,
@@ -87,12 +95,15 @@ export class ProductService extends AbstractBaseService<Product> {
             salePrice: unit.salePrice,
             barcode: unit.barcode ?? null,
             isBaseUnit: unit.isBaseUnit ?? false,
+            allowLooseSale: unit.allowLooseSale ?? true,
             status: unit.status ?? RecordStatus.ACTIVE,
             createdBy: callerId,
           })),
         );
 
-        return this.productRepository.findDetailWith(tx, product.id);
+        const detail = await this.productRepository.findDetailWith(tx, product.id);
+        if (detail) await this.audit.record(tx, [productCreatedEntry(callerId, product.id, detail)]);
+        return detail;
       });
     } catch (error) {
       rethrowDuplicate(error);
@@ -131,16 +142,34 @@ export class ProductService extends AbstractBaseService<Product> {
           if (dto.units.length === 0) throw this.badRequest('Sản phẩm phải có ít nhất một đơn vị bán');
           this.assertUnitConfig(dto.units, baseUnitId, dto.barcode ?? null);
         }
+        // Loại hàng quyết định bộ trường bắt buộc (số đăng ký, kê đơn…) — đổi sau khi tạo làm lệch dữ liệu đã nhập.
+        if (dto.type !== undefined && dto.type !== existing.type) {
+          throw this.badRequest('Không thể đổi loại hàng sau khi tạo');
+        }
+        // Lô đã ghi theo chế độ cũ (có/không số lô thật) — bật/tắt lúc này làm sai tồn theo lô và hạn dùng.
+        const trackChanged = dto.trackBatches !== undefined && dto.trackBatches !== existing.trackBatches;
+        if (trackChanged && (await this.productRepository.hasInventoryHistory(tx, id))) {
+          throw new ErrorException({
+            code: ErrorCode.PRODUCT_HAS_STOCK,
+            message: 'Sản phẩm đã phát sinh kho, không thể đổi chế độ quản lý theo lô',
+          });
+        }
 
         await this.assertUpdatedReferences(tx, dto, baseUnitId);
         await this.assertUpdatedBarcodes(tx, id, dto);
+        const locationIds = dto.locationIds && (await this.assertLocations(tx, dto.locationIds));
+        await this.assertRoute(tx, dto.routeId);
 
         const written = await this.productRepository.updateProduct(tx, id, this.toUpdateData(dto, callerId));
         if (!written) throw this.notFound();
 
         if (dto.units) await this.replaceUnits(tx, id, dto.units, callerId);
+        if (locationIds) await this.productRepository.replaceLocations(tx, id, locationIds);
 
-        return this.productRepository.findDetailWith(tx, id);
+        const detail = await this.productRepository.findDetailWith(tx, id);
+        const entry = detail && productUpdatedEntry(callerId, id, existing, detail);
+        if (entry) await this.audit.record(tx, [entry]);
+        return detail;
       });
     } catch (error) {
       rethrowDuplicate(error);
@@ -170,6 +199,7 @@ export class ProductService extends AbstractBaseService<Product> {
 
       await this.productRepository.softDeleteUnits(tx, activeIds, callerId);
       await this.productRepository.softDeleteProduct(tx, id, callerId);
+      await this.audit.record(tx, [productDeletedEntry(callerId, id, existing)]);
     });
 
     return { success: true };
@@ -300,7 +330,24 @@ export class ProductService extends AbstractBaseService<Product> {
     if (dto.minStockLevel !== undefined) data.minStockLevel = dto.minStockLevel;
     if (dto.status !== undefined) data.status = dto.status;
 
-    return data;
+    return { ...data, ...toExtraUpdateData(dto) };
+  }
+
+  /** Đường dùng gửi lên (khác null) phải tồn tại và chưa xoá. */
+  private async assertRoute(client: Prisma.TransactionClient, routeId: string | null | undefined): Promise<void> {
+    if (!routeId) return;
+    if (!(await this.productRepository.findRoute(client, routeId))) {
+      throw this.invalidReference('Đường dùng không tồn tại hoặc đã bị xoá');
+    }
+  }
+
+  /** Vị trí gửi lên phải tồn tại (bỏ trùng trước khi kiểm). Trả danh sách đã bỏ trùng để ghi. */
+  private async assertLocations(client: Prisma.TransactionClient, ids: string[]): Promise<string[]> {
+    const wanted = [...new Set(ids)];
+    if (!wanted.length) return wanted;
+    const found = await this.productRepository.findLocations(client, wanted);
+    if (found.length !== wanted.length) throw this.invalidReference('Vị trí không tồn tại hoặc đã bị xoá');
+    return wanted;
   }
 
   /** Replace-all: dòng có trong payload được cập nhật hoặc kích hoạt lại, dòng vắng mặt bị xoá mềm. */
@@ -326,6 +373,7 @@ export class ProductService extends AbstractBaseService<Product> {
         isDeleted: false,
         updatedBy: callerId,
       };
+      if (unit.allowLooseSale !== undefined) data.allowLooseSale = unit.allowLooseSale;
       // Mặc định ACTIVE chỉ dành cho dòng mới hoặc dòng vừa được kích hoạt lại; dòng đang hoạt động
       // mà client không gửi status thì giữ nguyên trạng thái cũ, tránh bật lại dòng INACTIVE ngoài ý muốn.
       if (unit.status !== undefined) data.status = unit.status;
@@ -345,6 +393,7 @@ export class ProductService extends AbstractBaseService<Product> {
           salePrice: unit.salePrice,
           barcode: unit.barcode ?? null,
           isBaseUnit: unit.isBaseUnit ?? false,
+          allowLooseSale: unit.allowLooseSale ?? true,
           status: unit.status ?? RecordStatus.ACTIVE,
           createdBy: callerId,
         })),

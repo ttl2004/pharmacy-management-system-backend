@@ -21,7 +21,7 @@ const boolStr = (defaultValue: 'true' | 'false') =>
 export const envSchema = z
   .object({
     //- Ứng dụng
-    PORT: z.coerce.number().int().positive().default(3000),
+    PORT: z.coerce.number().int().positive().default(3790),
     // Origin được gọi API kèm cookie, ngăn cách bằng dấu phẩy. Để trống: không cho trình duyệt gọi chéo origin.
     CORS_ORIGINS: z
       .string()

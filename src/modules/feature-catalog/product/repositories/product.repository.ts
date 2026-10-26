@@ -24,6 +24,18 @@ const PRODUCT_BASE_SELECT = {
   requiresPrescription: true,
   minStockLevel: true,
   status: true,
+  type: true,
+  trackBatches: true,
+  isControlled: true,
+  registrationNumber: true,
+  countryOfOrigin: true,
+  maxStockLevel: true,
+  shortName: true,
+  weight: true,
+  weightUnit: true,
+  isFavourite: true,
+  nationalDrugCode: true,
+  routeId: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.ProductSelect;
@@ -40,6 +52,9 @@ const PRODUCT_DETAIL_SELECT = {
   indications: true,
   dosageNote: true,
   storageNote: true,
+  description: true,
+  orderNote: true,
+  route: { select: { id: true, name: true } },
   units: {
     where: { isDeleted: false },
     orderBy: [{ isBaseUnit: 'desc' }, { conversionRate: 'asc' }],
@@ -49,9 +64,15 @@ const PRODUCT_DETAIL_SELECT = {
       salePrice: true,
       barcode: true,
       isBaseUnit: true,
+      allowLooseSale: true,
+      nationalUnitCode: true,
       status: true,
       unit: { select: { id: true, code: true, name: true } },
     },
+  },
+  locations: {
+    orderBy: { location: { name: 'asc' } },
+    select: { location: { select: { id: true, name: true } } },
   },
 } satisfies Prisma.ProductSelect;
 
@@ -207,6 +228,23 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
   /** Đơn vị chỉ cần tồn tại và chưa xoá mềm — bảng `units` không có cột trạng thái. */
   findUnits(client: Prisma.TransactionClient, ids: string[]): Promise<{ id: string }[]> {
     return client.unit.findMany({ where: { id: { in: ids }, isDeleted: false }, select: { id: true } });
+  }
+
+  /** Vị trí dùng được làm tham chiếu: chưa xoá mềm. */
+  findLocations(client: Prisma.TransactionClient, ids: string[]): Promise<{ id: string }[]> {
+    return client.shelfLocation.findMany({ where: { id: { in: ids }, isDeleted: false }, select: { id: true } });
+  }
+
+  /** Đường dùng dùng được làm tham chiếu: chưa xoá mềm. */
+  findRoute(client: Prisma.TransactionClient, id: string): Promise<{ id: string } | null> {
+    return client.administrationRoute.findFirst({ where: { id, isDeleted: false }, select: { id: true } });
+  }
+
+  /** Thay toàn bộ vị trí của sản phẩm (bảng nối không xoá mềm — không có lịch sử cần giữ). */
+  async replaceLocations(client: Prisma.TransactionClient, productId: string, locationIds: string[]): Promise<void> {
+    await client.productLocation.deleteMany({ where: { productId } });
+    if (!locationIds.length) return;
+    await client.productLocation.createMany({ data: locationIds.map((locationId) => ({ productId, locationId })) });
   }
 
   /**

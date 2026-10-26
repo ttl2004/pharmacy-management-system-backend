@@ -101,7 +101,10 @@ export class StockQueryService {
     if (query.cursor) conditions.push(afterCursorDesc(decodeCursor(query.cursor)));
 
     const rows = await this.stock.findMovements({ AND: conditions }, query.limit + 1);
-    return toKeysetPage(rows, query.limit);
+    const page = toKeysetPage(rows, query.limit);
+    // `refCode`: mã chứng từ đọc được (PN…, HD…, mã hàng với tồn đầu); null khi chứng từ không còn.
+    const codes = await this.stock.findRefCodes(page.items);
+    return { ...page, items: page.items.map((row) => ({ ...row, refCode: codes.get(row.refId) ?? null })) };
   }
 
   async lowStock(query: LowStockQuery, actor: RequestActor) {
@@ -142,7 +145,8 @@ export class StockQueryService {
     const isExpired = daysToExpiry <= 0;
     return {
       ...row,
-      availableQuantity: row.quantityOnHand - row.reservedQuantity,
+      // Lô bị khoá (cách ly / thu hồi) không xuất được → khả dụng 0, dù còn tồn thực tế.
+      availableQuantity: row.status === BatchStatus.AVAILABLE ? row.quantityOnHand - row.reservedQuantity : 0,
       daysToExpiry,
       isExpired,
       isSellable: row.status === BatchStatus.AVAILABLE && !isExpired,

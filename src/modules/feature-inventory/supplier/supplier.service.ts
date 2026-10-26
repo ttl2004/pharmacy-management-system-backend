@@ -1,16 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import { AuditAction, RecordStatus, Supplier } from '@prisma/client';
+import { AuditAction, Prisma, RecordStatus, Supplier } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
-import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { diffFields, pickAuditFields } from 'src/providers/audit-log/audit-diff';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { AUDIT_ENTITY } from '../core/inventory.constants';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { CreateSupplierRequest, UpdateSupplierRequest } from './dtos/supplier.request';
-import { SupplierQuery } from './dtos/supplier.query';
 import { SupplierRepository } from './repositories/supplier.repository';
 
 /** Trường được theo dõi trong nhật ký thao tác. */
@@ -24,6 +22,9 @@ const AUDITED_FIELDS = [
   'contactName',
   'note',
   'status',
+  'groupId',
+  'companyName',
+  'idNumber',
 ] as const;
 
 /**
@@ -38,27 +39,10 @@ export class SupplierService {
     private readonly audit: AuditLogService,
   ) {}
 
-  list(query: SupplierQuery) {
-    const filter: BaseWhere<Supplier> = {};
-    if (query.status) filter.status = query.status;
-    return this.suppliers.findManyWithPagination(filter, {
-      page: query.page,
-      limit: query.limit,
-      sort: query.sort,
-      search: query.search,
-      searchFields: ['code', 'name', 'phone', 'taxCode'],
-    });
-  }
-
-  async getDetail(id: string): Promise<Supplier> {
-    const supplier = await this.suppliers.findOne({ id });
-    if (!supplier) throw this.notFound();
-    return supplier;
-  }
-
   async create(dto: CreateSupplierRequest, actor: RequestActor): Promise<Supplier> {
     try {
       return await this.transactions.run(async ({ tx }) => {
+        await this.assertGroupExists(tx, dto.groupId);
         const created = await this.suppliers.createWith(tx, {
           code: dto.code,
           name: dto.name,
@@ -68,6 +52,9 @@ export class SupplierService {
           taxCode: dto.taxCode ?? null,
           contactName: dto.contactName ?? null,
           note: dto.note ?? null,
+          groupId: dto.groupId ?? null,
+          companyName: dto.companyName ?? null,
+          idNumber: dto.idNumber ?? null,
           status: dto.status ?? RecordStatus.ACTIVE,
           createdBy: actor.user.userId,
         });
@@ -97,6 +84,7 @@ export class SupplierService {
       return await this.transactions.run(async ({ tx }) => {
         const existing = await this.suppliers.findActiveWith(tx, id);
         if (!existing) throw this.notFound();
+        await this.assertGroupExists(tx, dto.groupId);
 
         const changes: Partial<Supplier> = {};
         for (const field of AUDITED_FIELDS) {
@@ -154,6 +142,13 @@ export class SupplierService {
       ]);
     });
     return { success: true };
+  }
+
+  /** `groupId` lạ hoặc đã xoá -> 1602. */
+  private async assertGroupExists(tx: Prisma.TransactionClient, groupId?: string | null): Promise<void> {
+    if (groupId && !(await this.suppliers.groupExistsWith(tx, groupId))) {
+      throw new ErrorException({ code: ErrorCode.INVALID_REFERENCE, message: 'Nhóm nhà cung cấp không tồn tại' });
+    }
   }
 
   private notFound(): ErrorException {

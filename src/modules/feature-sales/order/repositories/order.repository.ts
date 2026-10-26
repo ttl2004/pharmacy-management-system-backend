@@ -14,6 +14,8 @@ const ORDER_LIST_SELECT = {
   status: true,
   paymentStatus: true,
   totalAmount: true,
+  priceBookId: true,
+  priceBookName: true,
   createdAt: true,
   completedAt: true,
   cancelledAt: true,
@@ -28,6 +30,8 @@ const ORDER_DETAIL_SELECT = {
   branchId: true,
   subtotalAmount: true,
   shippingFee: true,
+  discountAmount: true,
+  interactionOverride: true,
   prescriptionCode: true,
   prescriberName: true,
   prescriptionImageUrl: true,
@@ -98,6 +102,10 @@ export interface OrderHead {
   prescriptionCode: string | null;
   prescriberName: string | null;
   updatedAt: Date | null;
+  /** Bảng giá lúc tạo đơn (null + tên còn = bảng đã bị xoá) và người tạo — để kiểm lại bảng khi sửa dòng. */
+  priceBookId: string | null;
+  priceBookName: string | null;
+  createdBy: string | null;
   lineCount: number;
   prescriptionLineCount: number;
 }
@@ -145,6 +153,9 @@ export class OrderRepository {
         prescriptionCode: true,
         prescriberName: true,
         updatedAt: true,
+        priceBookId: true,
+        priceBookName: true,
+        createdBy: true,
         _count: { select: { items: { where: { isDeleted: false } } } },
       },
     });
@@ -197,7 +208,7 @@ export class OrderRepository {
         salePrice: true,
         status: true,
         unit: { select: { name: true } },
-        product: { select: { id: true, name: true, status: true, requiresPrescription: true } },
+        product: { select: { id: true, name: true, status: true, requiresPrescription: true, isControlled: true } },
       },
     });
   }

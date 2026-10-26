@@ -28,6 +28,8 @@ export const DOCUMENT_CODE_FORMATS = {
   STOCK_TRANSFER: { prefix: 'DC', sequence: 'stock_transfer_code_seq' },
   STOCK_ADJUSTMENT: { prefix: 'DCK', sequence: 'stock_adjustment_code_seq' },
   ORDER: { prefix: 'HD', sequence: 'order_code_seq' },
+  SUPPLIER_PAYMENT: { prefix: 'TTPN', sequence: 'supplier_payment_code_seq' },
+  SUPPLIER_DEBT_ADJUSTMENT: { prefix: 'DCN', sequence: 'supplier_debt_adjustment_code_seq' },
 } as const;
 
 export type DocumentKind = keyof typeof DOCUMENT_CODE_FORMATS;
@@ -35,9 +37,12 @@ export type DocumentKind = keyof typeof DOCUMENT_CODE_FORMATS;
 /** Tên bảng ghi vào `audit_logs.entityType` — một chỗ khai, tránh gõ sai chuỗi rải rác. */
 export const AUDIT_ENTITY = {
   SUPPLIER: 'suppliers',
+  SUPPLIER_GROUP: 'supplier_groups',
   GOODS_RECEIPT: 'goods_receipts',
   STOCK_BATCH: 'stock_batches',
   STOCK_TRANSFER: 'stock_transfers',
   STOCK_ADJUSTMENT: 'stock_adjustments',
   BRANCH_PRODUCT: 'branch_products',
+  SUPPLIER_PAYMENT: 'supplier_payments',
+  SUPPLIER_DEBT_ADJUSTMENT: 'supplier_debt_adjustments',
 } as const;

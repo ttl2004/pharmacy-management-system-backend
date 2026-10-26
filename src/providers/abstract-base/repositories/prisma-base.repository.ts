@@ -196,10 +196,11 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
     return order;
   }
 
-  protected toInclude(relations?: RelationOptions): Record<string, boolean> | undefined {
+  protected toInclude(relations?: RelationOptions): Record<string, unknown> | undefined {
     if (!relations) return undefined;
 
-    const result: Record<string, boolean> = {};
+    // Giá trị có thể là `true` hoặc object lồng nhau của Prisma (vd `{ select: { username: true } }`).
+    const result: Record<string, unknown> = {};
 
     if (Array.isArray(relations)) {
       for (const name of relations) result[name] = true;

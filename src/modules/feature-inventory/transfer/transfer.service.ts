@@ -22,14 +22,18 @@ import { permissionError } from 'src/modules/feature-auth/permission/permission.
 import { BranchScope, isInBranchScope, resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { DocumentCodeService } from '../core/document-code.service';
-import { assertNoDuplicateBatches, documentErrors, invalidReference, inventoryError } from '../core/inventory.error';
+import {
+  assertNoDuplicateBatches, badRequest, documentErrors, invalidReference, inventoryError,
+} from '../core/inventory.error';
 import { resolveWriteBranch, TransferSide, transferWhere } from '../core/inventory-scope';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { AUDIT_ENTITY, MAX_DOCUMENT_LINES } from '../core/inventory.constants';
 import { StockIntakeService } from '../core/stock-intake.service';
 import type { LockedBatch } from '../core/stock-ledger.repository';
 import { StockLedgerService } from '../core/stock-ledger.service';
-import { CancelTransferRequest, CreateTransferRequest, TransferQuery } from './dtos/transfer.request';
+import {
+  CancelTransferRequest, CreateTransferRequest, ReceiveTransferRequest, TransferQuery, UpdateTransferRequest,
+} from './dtos/transfer.request';
 import { TransferDetail, TransferHead, TransferRepository } from './repositories/transfer.repository';
 
 interface StatusChange {
@@ -48,6 +52,25 @@ function shipCostOf(costs: Map<string, number | null>, itemId: string): number {
   const cost = costs.get(itemId);
   if (cost === undefined || cost === null) throw new Error(`Dòng điều chuyển ${itemId} không có giá vốn lúc xuất`);
   return cost;
+}
+
+/** Số thực nhận từng dòng: không gửi = nhận đủ; nhận > gửi → 1002; nhận thiếu thiếu lý do → 1002. */
+function receivedLines(
+  items: readonly { id: string; quantity: number }[],
+  dto: ReceiveTransferRequest | undefined,
+): { itemId: string; receivedQuantity: number; varianceReason: string | null }[] {
+  const byItem = new Map((dto?.lines ?? []).map((l) => [l.itemId, l]));
+  for (const itemId of byItem.keys()) {
+    if (!items.some((i) => i.id === itemId)) throw badRequest(`dòng ${itemId} không thuộc phiếu`);
+  }
+  return items.map((item, index) => {
+    const line = byItem.get(item.id);
+    const qty = line?.receivedQuantity ?? item.quantity;
+    if (qty > item.quantity) throw badRequest(`Dòng ${index + 1}: số nhận vượt số gửi (${item.quantity})`);
+    const reason = line?.varianceReason?.trim() || null;
+    if (qty < item.quantity && !reason) throw badRequest(`Dòng ${index + 1}: nhận thiếu phải ghi lý do lệch`);
+    return { itemId: item.id, receivedQuantity: qty, varianceReason: qty < item.quantity ? reason : null };
+  });
 }
 
 /** Lô ở chi nhánh nhận của từng dòng. `intake` luôn trả đủ; thiếu là lỗi lập trình (tránh ghi NULL vào toBatchId). */
@@ -72,7 +95,7 @@ const errors = documentErrors('Phiếu điều chuyển');
  * - Lập/xuất/huỷ: chi nhánh GỬI. Nhận: chi nhánh NHẬN. Đọc: cả hai (ma trận kho).
  * - Hàng rời kho gửi ngay lúc xuất — không bán nhầm hàng đang trên đường.
  * - K5: huỷ khi đang IN_TRANSIT → hoàn về ĐÚNG lô gửi bằng bút toán TRANSFER_IN.
- * - K6: không nhận thiếu — nhận đủ cả phiếu hoặc huỷ.
+ * - Nhận: theo số thực nhận từng dòng (nhận thiếu bắt buộc lý do; phần thiếu là hao hụt trên đường, như mock).
  */
 @Injectable()
 export class TransferService {
@@ -95,6 +118,24 @@ export class TransferService {
     if (query.toDate) conditions.push({ createdAt: { lt: vietnamDayStartUtc(addDaysToDateOnly(query.toDate, 1)) } });
     if (query.search) conditions.push({ code: { contains: escapeLike(query.search), mode: 'insensitive' } });
     return this.transfers.findPage({ AND: conditions }, query.page, query.limit);
+  }
+
+  /**
+   * Hàng đi đường: mọi phiếu IN_TRANSIT (kèm dòng + lô) mà chi nhánh `branchId` gửi đi hoặc sẽ nhận, trong phạm vi
+   * người gọi. Một request thay cho list + chi tiết từng phiếu. ADMIN bỏ trống `branchId` = toàn chuỗi.
+   */
+  inTransit(branchId: string | undefined, actor: RequestActor): Promise<TransferDetail[]> {
+    const conditions: Prisma.StockTransferWhereInput[] = [
+      transferWhere(resolveBranchScope(actor.user), 'either'),
+      { status: TransferStatus.IN_TRANSIT },
+    ];
+    if (branchId) conditions.push({ OR: [{ fromBranchId: branchId }, { toBranchId: branchId }] });
+    return this.transfers.findDetails({ AND: conditions });
+  }
+
+  /** Danh sách chi nhánh nhận cho form lập phiếu — `GET /branch` bị ép theo phạm vi nên PM chỉ thấy chi nhánh mình. */
+  destinations() {
+    return this.transfers.findActiveBranches();
   }
 
   async getDetail(id: string, actor: RequestActor): Promise<TransferDetail> {
@@ -160,6 +201,65 @@ export class TransferService {
     });
   }
 
+  /**
+   * Sửa phiếu PENDING (chưa trừ kho): thay chi nhánh nhận, ghi chú, toàn bộ dòng — cùng luật kiểm như lập phiếu. Chỉ phía
+   * gửi sửa được; chiếm phiếu bằng cập nhật có điều kiện PENDING (sửa song song với gửi hàng → 1701).
+   */
+  async update(id: string, dto: UpdateTransferRequest, actor: RequestActor): Promise<TransferDetail> {
+    const scope = resolveBranchScope(actor.user);
+    const actorId = actor.user.userId;
+    if (dto.items.length > MAX_DOCUMENT_LINES) {
+      throw inventoryError(ErrorCode.DOCUMENT_LINE_LIMIT, `tối đa ${MAX_DOCUMENT_LINES} dòng`);
+    }
+    const batchIds = dto.items.map((item) => item.batchId);
+    assertNoDuplicateBatches(batchIds);
+
+    return this.transactions.run(async ({ tx }) => {
+      const head = await this.loadForSide(tx, id, scope, 'from');
+      if (head.status !== TransferStatus.PENDING) throw errors.wrongState(head.status);
+      if (head.fromBranchId === dto.toBranchId) throw inventoryError(ErrorCode.TRANSFER_SAME_BRANCH);
+      await this.assertBranchesActive(tx, [head.fromBranchId, dto.toBranchId]);
+      const claimed = await this.transfers.transition(tx, id, TransferStatus.PENDING, {
+        toBranchId: dto.toBranchId,
+        note: dto.note ?? null,
+        updatedAt: new Date(),
+        updatedBy: actorId,
+      });
+      if (!claimed) throw errors.wrongState();
+
+      const batches = await this.transfers.findBatches(tx, batchIds);
+      const batchById = new Map(batches.map((batch) => [batch.id, batch]));
+      const today = todayInVietnam();
+      const items = dto.items.map((item, index) => {
+        const batch = batchById.get(item.batchId);
+        if (!batch || batch.branchId !== head.fromBranchId) {
+          throw invalidReference(`dòng ${index + 1}: lô không thuộc chi nhánh gửi`);
+        }
+        this.assertBatchShippable(batch, today);
+        if (batch.quantityOnHand - batch.reservedQuantity < item.quantity) {
+          throw inventoryError(ErrorCode.INSUFFICIENT_STOCK, `lô ${batch.batchNumber}`);
+        }
+        return {
+          transferId: id, batchId: item.batchId, productId: batch.productId, quantity: item.quantity,
+          note: item.note ?? null, createdBy: actorId,
+        };
+      });
+      await this.transfers.replaceItems(tx, id, items);
+      await this.audit.record(tx, [
+        {
+          actorId,
+          action: AuditAction.UPDATE,
+          entityType: AUDIT_ENTITY.STOCK_TRANSFER,
+          entityId: id,
+          branchId: head.fromBranchId,
+          after: { toBranchId: dto.toBranchId, lines: items.length },
+          ipAddress: actor.ip,
+        },
+      ]);
+      return this.mustFind(tx, id);
+    });
+  }
+
   /** PENDING → IN_TRANSIT: khoá lô gửi, kiểm lại trạng thái/hạn/tồn, ghi TRANSFER_OUT (âm). */
   async ship(id: string, actor: RequestActor): Promise<TransferDetail> {
     const scope = resolveBranchScope(actor.user);
@@ -215,8 +315,11 @@ export class TransferService {
     });
   }
 
-  /** IN_TRANSIT → RECEIVED: tạo/gộp lô cùng số ở chi nhánh nhận (giá vốn chốt lúc xuất), ghi TRANSFER_IN. */
-  async receive(id: string, actor: RequestActor): Promise<TransferDetail> {
+  /**
+   * IN_TRANSIT → RECEIVED: tạo/gộp lô cùng số ở chi nhánh nhận (giá vốn chốt lúc xuất), ghi TRANSFER_IN. `dto.lines` (tuỳ chọn): số thực nhận từng dòng (0..số gửi), nhận thiếu bắt buộc lý do — như
+   * mock. Kho nhận chỉ cộng số thực nhận; phần thiếu ghi lý do lệch trên dòng (hao hụt trên đường, như mock).
+   */
+  async receive(id: string, actor: RequestActor, dto?: ReceiveTransferRequest): Promise<TransferDetail> {
     const scope = resolveBranchScope(actor.user);
     const actorId = actor.user.userId;
     const now = new Date();
@@ -238,7 +341,12 @@ export class TransferService {
       });
       if (!claimed) throw errors.wrongState();
 
-      const items = await this.transfers.findItems(tx, id);
+      const allItems = await this.transfers.findItems(tx, id);
+      const received = receivedLines(allItems, dto);
+      await this.transfers.setReceived(tx, received, actorId);
+      const receivedById = new Map(received.map((r) => [r.itemId, r.receivedQuantity]));
+      // Dòng nhận 0 không sinh bút toán, không có lô nhận.
+      const items = allItems.filter((item) => (receivedById.get(item.id) ?? 0) > 0);
       const costs = await this.transfers.findShipCosts(tx, id);
       // `intake` cần mỗi (sản phẩm, số lô) xuất hiện một lần: lúc lập phiếu đã cấm trùng lô, và mỗi lô gửi là duy nhất
       // theo (chi nhánh, sản phẩm, số lô).
@@ -253,7 +361,7 @@ export class TransferService {
           batchNumber: item.batch.batchNumber,
           manufacturingDate: item.batch.manufacturingDate,
           expiryDate: item.batch.expiryDate,
-          quantity: item.quantity,
+          quantity: receivedById.get(item.id) ?? item.quantity,
           unitCost: shipCostOf(costs, item.id),
           // Truy vết: lô MỚI sinh ra ở chi nhánh nhận mang NCC của lô gốc; gộp vào lô đã có thì lô đó giữ NCC của nó.
           supplierId: item.batch.supplierId,

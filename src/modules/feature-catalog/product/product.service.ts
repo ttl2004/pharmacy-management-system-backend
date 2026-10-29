@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, Product, RecordStatus } from '@prisma/client';
+import { Prisma, Product, ProductType, RecordStatus } from '@prisma/client';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
@@ -62,6 +62,7 @@ export class ProductService extends AbstractBaseService<Product> {
         await this.assertBarcodesAvailable(tx, [dto.barcode, ...dto.units.map((unit) => unit.barcode)]);
         const locationIds = await this.assertLocations(tx, dto.locationIds ?? []);
         await this.assertRoute(tx, dto.routeId);
+        await this.assertDrugOnCreate(tx, dto.type ?? ProductType.DRUG, dto.drugId);
 
         const product = await this.productRepository.createProduct(tx, {
           code: dto.code,
@@ -159,6 +160,7 @@ export class ProductService extends AbstractBaseService<Product> {
         await this.assertUpdatedBarcodes(tx, id, dto);
         const locationIds = dto.locationIds && (await this.assertLocations(tx, dto.locationIds));
         await this.assertRoute(tx, dto.routeId);
+        if (dto.drugId !== undefined) await this.assertDrugOnUpdate(tx, existing, dto.drugId);
 
         const written = await this.productRepository.updateProduct(tx, id, this.toUpdateData(dto, callerId));
         if (!written) throw this.notFound();
@@ -338,6 +340,49 @@ export class ProductService extends AbstractBaseService<Product> {
     if (!routeId) return;
     if (!(await this.productRepository.findRoute(client, routeId))) {
       throw this.invalidReference('Đường dùng không tồn tại hoặc đã bị xoá');
+    }
+  }
+
+  /**
+   * Luật liên kết danh mục thuốc (chốt 2026-10-29): hàng DRUG tạo mới bắt buộc trỏ tới thuốc ACTIVE trong danh mục
+   * CSDL Dược; hàng GOODS không được trỏ.
+   */
+  private async assertDrugOnCreate(
+    client: Prisma.TransactionClient,
+    type: ProductType,
+    drugId: string | null | undefined,
+  ): Promise<void> {
+    if (type === ProductType.GOODS) {
+      if (drugId) throw this.badRequest('Chỉ hàng loại thuốc mới liên kết danh mục thuốc');
+      return;
+    }
+    if (!drugId) throw this.invalidReference('Hàng loại thuốc phải chọn thuốc từ danh mục CSDL Dược');
+    await this.assertActiveDrug(client, drugId);
+  }
+
+  /**
+   * Khi sửa: hàng DRUG đã liên kết không được bỏ liên kết. Hàng DRUG cũ chưa liên kết (tạo trước khi có danh mục)
+   * vẫn sửa được bình thường — gửi `null` với nó là không đổi gì.
+   */
+  private async assertDrugOnUpdate(
+    client: Prisma.TransactionClient,
+    existing: { type: ProductType; drugId: string | null },
+    drugId: string | null,
+  ): Promise<void> {
+    if (existing.type === ProductType.GOODS) {
+      if (drugId) throw this.badRequest('Chỉ hàng loại thuốc mới liên kết danh mục thuốc');
+      return;
+    }
+    if (drugId === null) {
+      if (existing.drugId) throw this.invalidReference('Hàng loại thuốc không được bỏ liên kết danh mục thuốc');
+      return;
+    }
+    await this.assertActiveDrug(client, drugId);
+  }
+
+  private async assertActiveDrug(client: Prisma.TransactionClient, drugId: string): Promise<void> {
+    if (!(await this.productRepository.findActiveDrug(client, drugId))) {
+      throw this.invalidReference('Thuốc không tồn tại hoặc đã ngừng lưu hành trong danh mục CSDL Dược');
     }
   }
 

@@ -36,6 +36,7 @@ const PRODUCT_BASE_SELECT = {
   isFavourite: true,
   nationalDrugCode: true,
   routeId: true,
+  drugId: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.ProductSelect;
@@ -55,6 +56,18 @@ const PRODUCT_DETAIL_SELECT = {
   description: true,
   orderNote: true,
   route: { select: { id: true, name: true } },
+  drug: {
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      strength: true,
+      isPrescription: true,
+      registrationNumber: true,
+      registrationExpiresAt: true,
+      status: true,
+    },
+  },
   units: {
     where: { isDeleted: false },
     orderBy: [{ isBaseUnit: 'desc' }, { conversionRate: 'asc' }],
@@ -238,6 +251,14 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
   /** Đường dùng dùng được làm tham chiếu: chưa xoá mềm. */
   findRoute(client: Prisma.TransactionClient, id: string): Promise<{ id: string } | null> {
     return client.administrationRoute.findFirst({ where: { id, isDeleted: false }, select: { id: true } });
+  }
+
+  /** Thuốc trong danh mục CSDL Dược dùng được làm tham chiếu: chưa xoá mềm và đang ACTIVE. */
+  findActiveDrug(client: Prisma.TransactionClient, id: string): Promise<{ id: string } | null> {
+    return client.drug.findFirst({
+      where: { id, isDeleted: false, status: RecordStatus.ACTIVE },
+      select: { id: true },
+    });
   }
 
   /** Thay toàn bộ vị trí của sản phẩm (bảng nối không xoá mềm — không có lịch sử cần giữ). */

@@ -56,6 +56,7 @@ export enum ErrorCode {
   SUPER_ADMIN_PROTECTED = 1604,
   SELF_OPERATION_FORBIDDEN = 1605,
   PRICE_BOOK_BASE_IN_USE = 1606,
+  DRUG_SOURCE_UNAVAILABLE = 1607,
 
   //- Kho — khai đủ cả dải từ giai đoạn 1 để các giai đoạn sau không tranh số
   INSUFFICIENT_STOCK = 1700,

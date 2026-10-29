@@ -24,6 +24,7 @@ export function toExtraCreateData(dto: ProductExtraFieldsRequest) {
     orderNote: text(dto.orderNote) ?? null,
     isFavourite: dto.isFavourite ?? false,
     nationalDrugCode: text(dto.nationalDrugCode) ?? null,
+    drugId: dto.drugId ?? null,
   } satisfies Partial<Prisma.ProductUncheckedCreateInput>;
 }
 
@@ -46,5 +47,6 @@ export function toExtraUpdateData(dto: ProductExtraFieldsRequest): Prisma.Produc
   if (dto.orderNote !== undefined) data.orderNote = text(dto.orderNote);
   if (dto.isFavourite !== undefined) data.isFavourite = dto.isFavourite;
   if (dto.nationalDrugCode !== undefined) data.nationalDrugCode = text(dto.nationalDrugCode);
+  if (dto.drugId !== undefined) data.drugId = dto.drugId;
   return data;
 }

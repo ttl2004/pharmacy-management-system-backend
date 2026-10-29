@@ -10,16 +10,35 @@ export const PRODUCT_AUDIT_ENTITY = 'products';
  * cấu hình đơn vị (đã có trong chi tiết sản phẩm) để dòng log gọn.
  */
 const FIELDS = [
-  'code', 'name', 'barcode', 'categoryId', 'manufacturerId', 'baseUnitId', 'status', 'type', 'trackBatches',
-  'requiresPrescription', 'isControlled', 'registrationNumber', 'minStockLevel', 'maxStockLevel', 'routeId',
-  'dosageForm', 'activeIngredient', 'strength',
+  'code',
+  'name',
+  'barcode',
+  'categoryId',
+  'manufacturerId',
+  'baseUnitId',
+  'status',
+  'type',
+  'trackBatches',
+  'requiresPrescription',
+  'isControlled',
+  'registrationNumber',
+  'minStockLevel',
+  'maxStockLevel',
+  'routeId',
+  'dosageForm',
+  'activeIngredient',
+  'strength',
+  'drugId',
 ] as const;
 
 type Row = Partial<Record<(typeof FIELDS)[number], unknown>>;
 
 export function productCreatedEntry(actorId: string, id: string, row: Row): AuditEntry {
   return {
-    actorId, action: AuditAction.CREATE, entityType: PRODUCT_AUDIT_ENTITY, entityId: id,
+    actorId,
+    action: AuditAction.CREATE,
+    entityType: PRODUCT_AUDIT_ENTITY,
+    entityId: id,
     after: pickAuditFields(row, FIELDS),
   };
 }
@@ -30,14 +49,21 @@ export function productUpdatedEntry(actorId: string, id: string, before: Row, af
   if (!diff) return null;
   const statusOnly = Object.keys(diff.after).length === 1 && 'status' in diff.after;
   return {
-    actorId, action: statusOnly ? AuditAction.STATUS_CHANGE : AuditAction.UPDATE,
-    entityType: PRODUCT_AUDIT_ENTITY, entityId: id, before: diff.before, after: diff.after,
+    actorId,
+    action: statusOnly ? AuditAction.STATUS_CHANGE : AuditAction.UPDATE,
+    entityType: PRODUCT_AUDIT_ENTITY,
+    entityId: id,
+    before: diff.before,
+    after: diff.after,
   };
 }
 
 export function productDeletedEntry(actorId: string, id: string, row: Row): AuditEntry {
   return {
-    actorId, action: AuditAction.DELETE, entityType: PRODUCT_AUDIT_ENTITY, entityId: id,
+    actorId,
+    action: AuditAction.DELETE,
+    entityType: PRODUCT_AUDIT_ENTITY,
+    entityId: id,
     before: pickAuditFields(row, FIELDS),
   };
 }

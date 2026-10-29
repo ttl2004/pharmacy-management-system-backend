@@ -113,6 +113,16 @@ describe('Danh mục quyền và mã lỗi', () => {
     expect(granted.filter((code) => /^(category|manufacturer|unit|product):/.test(code))).toEqual([]);
   });
 
+  it('danh mục thuốc CSDL Dược (2026-10-29): ADMIN đọc + đồng bộ; PM, SS chỉ đọc; CUSTOMER không có', () => {
+    const grants = (role: AuthRole) => [...(DEFAULT_ROLE_GRANTS[role] ?? [])] as string[];
+    expect(grants(AuthRole.ADMIN)).toEqual(expect.arrayContaining(['drug:read', 'drug:sync']));
+    for (const role of [AuthRole.PHARMACY_MANAGER, AuthRole.SALES_STAFF]) {
+      expect(grants(role)).toContain('drug:read');
+      expect(grants(role)).not.toContain('drug:sync');
+    }
+    expect(grants(AuthRole.CUSTOMER).filter((code) => code.startsWith('drug:'))).toEqual([]);
+  });
+
   describe('ma trận quyền kho (duyệt 2026-10-14) — nhà cung cấp và phiếu nhập', () => {
     const grants = (role: AuthRole) => [...(DEFAULT_ROLE_GRANTS[role] ?? [])] as string[];
 

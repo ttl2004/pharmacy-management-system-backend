@@ -91,6 +91,8 @@ const PRODUCT_DETAIL_SELECT = {
 
 export type ProductSummary = Prisma.ProductGetPayload<{ select: typeof PRODUCT_SUMMARY_SELECT }>;
 export type ProductDetail = Prisma.ProductGetPayload<{ select: typeof PRODUCT_DETAIL_SELECT }>;
+/** Phần thuốc trong danh mục mà hàng hoá cần biết khi liên kết. */
+export type LinkedDrug = { id: string; isPrescription: boolean };
 
 /**
  * Bộ trường cho storefront — tách hẳn khỏi bộ nội bộ để mỗi lần thêm cột mới phải chủ động quyết định
@@ -254,10 +256,10 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
   }
 
   /** Thuốc trong danh mục CSDL Dược dùng được làm tham chiếu: chưa xoá mềm và đang ACTIVE. */
-  findActiveDrug(client: Prisma.TransactionClient, id: string): Promise<{ id: string } | null> {
+  findActiveDrug(client: Prisma.TransactionClient, id: string): Promise<LinkedDrug | null> {
     return client.drug.findFirst({
       where: { id, isDeleted: false, status: RecordStatus.ACTIVE },
-      select: { id: true },
+      select: { id: true, isPrescription: true },
     });
   }
 

@@ -11,7 +11,7 @@ import { CreateProductRequest, ProductUnitRequest, UpdateProductRequest } from '
 import { ProductQuery } from './dtos/product.query';
 import { productCreatedEntry, productDeletedEntry, productUpdatedEntry } from './product-audit';
 import { toExtraCreateData, toExtraUpdateData } from './product-extra-fields.mapper';
-import { ProductDetail, ProductRepository } from './repositories/product.repository';
+import { LinkedDrug, ProductDetail, ProductRepository } from './repositories/product.repository';
 
 @Injectable()
 export class ProductService extends AbstractBaseService<Product> {
@@ -62,7 +62,7 @@ export class ProductService extends AbstractBaseService<Product> {
         await this.assertBarcodesAvailable(tx, [dto.barcode, ...dto.units.map((unit) => unit.barcode)]);
         const locationIds = await this.assertLocations(tx, dto.locationIds ?? []);
         await this.assertRoute(tx, dto.routeId);
-        await this.assertDrugOnCreate(tx, dto.type ?? ProductType.DRUG, dto.drugId);
+        const drug = await this.assertDrugOnCreate(tx, dto.type ?? ProductType.DRUG, dto.drugId);
 
         const product = await this.productRepository.createProduct(tx, {
           code: dto.code,
@@ -76,7 +76,9 @@ export class ProductService extends AbstractBaseService<Product> {
           strength: dto.strength ?? null,
           dosageForm: dto.dosageForm ?? null,
           packagingSpec: dto.packagingSpec ?? null,
-          requiresPrescription: dto.requiresPrescription ?? false,
+          requiresPrescription: drug
+            ? this.prescriptionOf(drug, dto.requiresPrescription)
+            : (dto.requiresPrescription ?? false),
           indications: dto.indications ?? null,
           dosageNote: dto.dosageNote ?? null,
           storageNote: dto.storageNote ?? null,
@@ -160,9 +162,12 @@ export class ProductService extends AbstractBaseService<Product> {
         await this.assertUpdatedBarcodes(tx, id, dto);
         const locationIds = dto.locationIds && (await this.assertLocations(tx, dto.locationIds));
         await this.assertRoute(tx, dto.routeId);
-        if (dto.drugId !== undefined) await this.assertDrugOnUpdate(tx, existing, dto.drugId);
+        const newDrug = dto.drugId !== undefined ? await this.assertDrugOnUpdate(tx, existing, dto.drugId) : null;
+        const linkedDrug = newDrug ?? existing.drug;
 
-        const written = await this.productRepository.updateProduct(tx, id, this.toUpdateData(dto, callerId));
+        const data = this.toUpdateData(dto, callerId);
+        if (linkedDrug) data.requiresPrescription = this.prescriptionOf(linkedDrug, dto.requiresPrescription);
+        const written = await this.productRepository.updateProduct(tx, id, data);
         if (!written) throw this.notFound();
 
         if (dto.units) await this.replaceUnits(tx, id, dto.units, callerId);
@@ -351,39 +356,59 @@ export class ProductService extends AbstractBaseService<Product> {
     client: Prisma.TransactionClient,
     type: ProductType,
     drugId: string | null | undefined,
-  ): Promise<void> {
+  ): Promise<LinkedDrug | null> {
     if (type === ProductType.GOODS) {
       if (drugId) throw this.badRequest('Chỉ hàng loại thuốc mới liên kết danh mục thuốc');
-      return;
+      return null;
     }
     if (!drugId) throw this.invalidReference('Hàng loại thuốc phải chọn thuốc từ danh mục CSDL Dược');
-    await this.assertActiveDrug(client, drugId);
+    return this.assertActiveDrug(client, drugId);
   }
 
   /**
-   * Khi sửa: hàng DRUG đã liên kết không được bỏ liên kết. Hàng DRUG cũ chưa liên kết (tạo trước khi có danh mục)
-   * vẫn sửa được bình thường — gửi `null` với nó là không đổi gì.
+   * Khi sửa: hàng DRUG đã liên kết không được bỏ liên kết, và không được đổi sang thuốc khác khi đã phát sinh kho (sổ
+   * kho, đơn bán cũ sẽ bị hiểu là thuốc mới). Hàng DRUG cũ chưa liên kết (tạo trước khi có danh mục) vẫn sửa được bình
+   * thường và được gắn lần đầu — gửi `null` với nó là không đổi gì. Trả thuốc mới khi có gắn/đổi.
    */
   private async assertDrugOnUpdate(
     client: Prisma.TransactionClient,
-    existing: { type: ProductType; drugId: string | null },
+    existing: { id: string; type: ProductType; drugId: string | null },
     drugId: string | null,
-  ): Promise<void> {
+  ): Promise<LinkedDrug | null> {
     if (existing.type === ProductType.GOODS) {
       if (drugId) throw this.badRequest('Chỉ hàng loại thuốc mới liên kết danh mục thuốc');
-      return;
+      return null;
     }
     if (drugId === null) {
       if (existing.drugId) throw this.invalidReference('Hàng loại thuốc không được bỏ liên kết danh mục thuốc');
-      return;
+      return null;
     }
-    await this.assertActiveDrug(client, drugId);
+    const relinked = existing.drugId !== null && drugId !== existing.drugId;
+    if (relinked && (await this.productRepository.hasInventoryHistory(client, existing.id))) {
+      throw new ErrorException({
+        code: ErrorCode.PRODUCT_HAS_STOCK,
+        message: 'Sản phẩm đã phát sinh kho, không thể đổi sang thuốc khác trong danh mục',
+      });
+    }
+    return this.assertActiveDrug(client, drugId);
   }
 
-  private async assertActiveDrug(client: Prisma.TransactionClient, drugId: string): Promise<void> {
-    if (!(await this.productRepository.findActiveDrug(client, drugId))) {
-      throw this.invalidReference('Thuốc không tồn tại hoặc đã ngừng lưu hành trong danh mục CSDL Dược');
+  private async assertActiveDrug(client: Prisma.TransactionClient, drugId: string): Promise<LinkedDrug> {
+    const drug = await this.productRepository.findActiveDrug(client, drugId);
+    if (!drug) throw this.invalidReference('Thuốc không tồn tại hoặc đã ngừng lưu hành trong danh mục CSDL Dược');
+    return drug;
+  }
+
+  /**
+   * Hàng đã gắn thuốc: cờ kê đơn lấy theo danh mục — quầy bán đọc cờ này để đòi đơn, nên client không được ghi đè
+   * thành giá trị khác (vd. thuốc kê đơn mà gửi `false`).
+   */
+  private prescriptionOf(drug: LinkedDrug, requested: boolean | undefined): boolean {
+    if (requested !== undefined && requested !== drug.isPrescription) {
+      const kind = drug.isPrescription ? 'thuốc kê đơn' : 'thuốc không kê đơn';
+      throw this.badRequest(`Theo danh mục CSDL Dược đây là ${kind}, không sửa được cờ kê đơn`);
     }
+    return drug.isPrescription;
   }
 
   /** Vị trí gửi lên phải tồn tại (bỏ trùng trước khi kiểm). Trả danh sách đã bỏ trùng để ghi. */

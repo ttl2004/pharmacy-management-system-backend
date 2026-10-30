@@ -17,3 +17,14 @@ export class DrugQuery extends AbstractBaseQuery {
   @ApiPropertyOptional({ type: Boolean, description: 'Lọc thuốc kê đơn' })
   isPrescription?: boolean;
 }
+
+export class DrugSyncQuery {
+  @IsOptional()
+  @Transform(toBoolean)
+  @IsBoolean()
+  @ApiPropertyOptional({
+    type: Boolean,
+    description: 'Vẫn ghi khi lần đồng bộ này sẽ chuyển INACTIVE quá nhiều thuốc (đã kiểm tra nguồn là đúng)',
+  })
+  force?: boolean;
+}

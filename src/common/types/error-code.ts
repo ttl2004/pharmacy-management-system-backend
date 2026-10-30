@@ -57,6 +57,8 @@ export enum ErrorCode {
   SELF_OPERATION_FORBIDDEN = 1605,
   PRICE_BOOK_BASE_IN_USE = 1606,
   DRUG_SOURCE_UNAVAILABLE = 1607,
+  DRUG_SYNC_IN_PROGRESS = 1608,
+  DRUG_SYNC_SUSPICIOUS = 1609,
 
   //- Kho — khai đủ cả dải từ giai đoạn 1 để các giai đoạn sau không tranh số
   INSUFFICIENT_STOCK = 1700,

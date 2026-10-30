@@ -37,7 +37,10 @@ export class ProductExtraFieldsRequest {
   @IsArray()
   @ArrayMaxSize(MAX_LOCATIONS)
   @IsUUID('all', { each: true })
-  @ApiPropertyOptional({ type: [String], description: `Vị trí (kệ/tủ), tối đa ${MAX_LOCATIONS}; khi sửa là thay toàn bộ` })
+  @ApiPropertyOptional({
+    type: [String],
+    description: `Vị trí (kệ/tủ), tối đa ${MAX_LOCATIONS}; khi sửa là thay toàn bộ`,
+  })
   locationIds?: string[];
 
   @IsOptional()
@@ -49,18 +52,6 @@ export class ProductExtraFieldsRequest {
   @IsBoolean()
   @ApiPropertyOptional({ description: 'Thuốc kiểm soát đặc biệt' })
   isControlled?: boolean;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(50)
-  @ApiPropertyOptional({ nullable: true })
-  registrationNumber?: string | null;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(100)
-  @ApiPropertyOptional({ nullable: true })
-  countryOfOrigin?: string | null;
 
   @IsOptional()
   @IsInt()
@@ -103,8 +94,10 @@ export class ProductExtraFieldsRequest {
   isFavourite?: boolean;
 
   @IsOptional()
-  @IsString()
-  @MaxLength(50)
-  @ApiPropertyOptional({ nullable: true, description: 'Mã thuốc CSDL Dược quốc gia' })
-  nationalDrugCode?: string | null;
+  @IsUUID()
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Thuốc trong danh mục CSDL Dược (`GET /drug`). Bắt buộc khi tạo hàng DRUG; hàng GOODS không được gửi',
+  })
+  drugId?: string | null;
 }

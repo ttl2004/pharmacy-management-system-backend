@@ -1,5 +1,6 @@
 import { DosageForm, RecordStatus } from '@prisma/client';
 import { ErrorCode } from 'src/common/types/error-code';
+import { DRUG_INGREDIENTS_SEARCH_FIELD } from '../../feature-catalog/product/repositories/product.repository';
 import { StorefrontProductService } from './storefront-product.service';
 
 function makeService(repositoryOverrides: Record<string, jest.Mock> = {}) {
@@ -36,7 +37,7 @@ describe('StorefrontProductService — danh sách', () => {
         dosageForm: DosageForm.TABLET,
         requiresPrescription: false,
       },
-      expect.objectContaining({ search: 'paracetamol', searchFields: ['name', 'activeIngredient'] }),
+      expect.objectContaining({ search: 'paracetamol', searchFields: ['name', DRUG_INGREDIENTS_SEARCH_FIELD] }),
     );
   });
 

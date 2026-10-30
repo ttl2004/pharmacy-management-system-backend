@@ -8,7 +8,7 @@ import { AbstractBaseQuery } from 'src/providers/abstract-base/abstract-base.que
  * `Boolean('false')` trả `true` nên chuỗi query phải chuyển tường minh; giá trị khác `true`/`false`
  * được giữ nguyên để `@IsBoolean` báo lỗi 400 thay vì âm thầm thành `true`.
  */
-const toBoolean = ({ value }: { value: unknown }) => {
+export const toBoolean = ({ value }: { value: unknown }) => {
   if (value === 'true' || value === true) return true;
   if (value === 'false' || value === false) return false;
   return value;

@@ -3,7 +3,10 @@ import { Product, RecordStatus } from '@prisma/client';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
-import { ProductRepository } from '../../feature-catalog/product/repositories/product.repository';
+import {
+  DRUG_INGREDIENTS_SEARCH_FIELD,
+  ProductRepository,
+} from '../../feature-catalog/product/repositories/product.repository';
 import { StorefrontProductQuery } from './dtos/storefront-product.query';
 
 @Injectable()
@@ -23,7 +26,7 @@ export class StorefrontProductService {
       limit: query.limit,
       sort: query.sort,
       search: query.search,
-      searchFields: ['name', 'activeIngredient'],
+      searchFields: ['name', DRUG_INGREDIENTS_SEARCH_FIELD],
     });
   }
 

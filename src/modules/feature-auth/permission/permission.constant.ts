@@ -32,6 +32,8 @@ export const PERMISSION_CATALOG = [
   { code: 'product:create', name: 'Tạo sản phẩm', module: 'product', sortOrder: 2 },
   { code: 'product:update', name: 'Sửa sản phẩm', module: 'product', sortOrder: 3 },
   { code: 'product:delete', name: 'Xoá sản phẩm', module: 'product', sortOrder: 4 },
+  { code: 'drug:read', name: 'Xem danh mục thuốc CSDL Dược', module: 'drug', sortOrder: 1 },
+  { code: 'drug:sync', name: 'Đồng bộ danh mục thuốc từ CSDL Dược', module: 'drug', sortOrder: 2 },
   { code: 'supplier:read', name: 'Xem nhà cung cấp', module: 'supplier', sortOrder: 1 },
   { code: 'supplier:create', name: 'Tạo nhà cung cấp', module: 'supplier', sortOrder: 2 },
   { code: 'supplier:update', name: 'Sửa nhà cung cấp', module: 'supplier', sortOrder: 3 },

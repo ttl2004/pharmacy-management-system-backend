@@ -92,6 +92,15 @@ export const envSchema = z
     MAIL_RABBITMQ_URL: z.string().optional(),
     MAIL_RABBITMQ_EXCHANGE: z.string().default('mailer.exchange'),
     MAIL_RABBITMQ_QUEUE: z.string().default('mailer.queue'),
+
+    //- Nguồn danh mục thuốc CSDL Dược quốc gia (hiện là API giả lập ở repo CSDL-Drug)
+    DRUG_SOURCE_URL: z
+      .string()
+      .refine(
+        (url) => URL.canParse(url) && /^https?:$/.test(new URL(url).protocol),
+        'DRUG_SOURCE_URL phải là URL http(s)',
+      )
+      .default('http://localhost:8001'),
   })
   .refine((env) => env.COOKIE_SAMESITE !== 'none' || env.COOKIE_SECURE === 'true', {
     message: 'COOKIE_SAMESITE=none yêu cầu COOKIE_SECURE=true',

@@ -7,7 +7,7 @@ describe('DrugRepository — upsert theo lô', () => {
   it('chia danh mục lớn thành từng lô, mỗi lô một câu lệnh — không vượt giới hạn tham số của Postgres', async () => {
     const executeRaw = jest.fn().mockImplementation((_strings: unknown, ...values: unknown[]) => {
       // Tham số thứ nhất sau mẫu SQL là Prisma.join(rows) — đếm số dòng của lô.
-      return Promise.resolve((values[0] as { values: unknown[] }).values.length / 18);
+      return Promise.resolve((values[0] as { values: unknown[] }).values.length / 25);
     });
     const tx = { $executeRaw: executeRaw };
     const repository = new DrugRepository({} as never);

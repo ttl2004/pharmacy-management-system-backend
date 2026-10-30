@@ -54,18 +54,6 @@ export class ProductExtraFieldsRequest {
   isControlled?: boolean;
 
   @IsOptional()
-  @IsString()
-  @MaxLength(50)
-  @ApiPropertyOptional({ nullable: true })
-  registrationNumber?: string | null;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(100)
-  @ApiPropertyOptional({ nullable: true })
-  countryOfOrigin?: string | null;
-
-  @IsOptional()
   @IsInt()
   @Min(0)
   @ApiPropertyOptional({ nullable: true, description: 'Định mức tồn tối đa; null = không giới hạn' })
@@ -104,12 +92,6 @@ export class ProductExtraFieldsRequest {
   @IsBoolean()
   @ApiPropertyOptional({ description: 'Đánh dấu sao ở danh sách hàng hóa' })
   isFavourite?: boolean;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(50)
-  @ApiPropertyOptional({ nullable: true, description: 'Mã thuốc CSDL Dược quốc gia' })
-  nationalDrugCode?: string | null;
 
   @IsOptional()
   @IsUUID()

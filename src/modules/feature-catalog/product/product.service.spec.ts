@@ -1,6 +1,7 @@
 import { DosageForm, Prisma, ProductType, RecordStatus } from '@prisma/client';
 import { ErrorCode } from 'src/common/types/error-code';
 import { ProductService } from './product.service';
+import { DRUG_INGREDIENTS_SEARCH_FIELD } from './repositories/product.repository';
 
 function makeService(
   repositoryOverrides: Record<string, jest.Mock> = {},
@@ -24,11 +25,17 @@ function makeService(
     hasInventoryHistory: jest.fn().mockResolvedValue(false),
     hasOpenInventory: jest.fn().mockResolvedValue(false),
     findActiveDrug: jest.fn().mockResolvedValue({ id: 'drug-id', isPrescription: false }),
+    findPacksByDrug: jest.fn().mockResolvedValue([]),
     replaceLocations: jest.fn().mockResolvedValue(undefined),
     ...repositoryOverrides,
   } as never;
   const transactions = {
-    write: jest.fn().mockImplementation((_locks: string[], work: (tx: unknown) => unknown) => work({})),
+    // `$executeRaw` cho khoá advisory theo thuốc khi chống trùng.
+    write: jest
+      .fn()
+      .mockImplementation((_locks: string[], work: (tx: unknown) => unknown) =>
+        work({ $executeRaw: jest.fn().mockResolvedValue(0) }),
+      ),
     ...transactionOverrides,
   } as never;
   const audit = { record: jest.fn().mockResolvedValue(undefined) } as never;
@@ -87,7 +94,7 @@ describe('ProductService — danh sách', () => {
         page: 1,
         limit: 10,
         search: 'paracetamol',
-        searchFields: ['code', 'barcode', 'name', 'activeIngredient'],
+        searchFields: ['code', 'barcode', 'name', DRUG_INGREDIENTS_SEARCH_FIELD],
       }),
     );
   });
@@ -335,6 +342,10 @@ const existingProduct = {
   type: ProductType.DRUG,
   drugId: null as string | null,
   drug: null as { id: string; isPrescription: boolean } | null,
+  indications: null as string | null,
+  dosageNote: null as string | null,
+  storageNote: null as string | null,
+  units: [] as { conversionRate: number; unit: { id: string } }[],
 };
 
 describe('ProductService — liên kết danh mục thuốc (luật A)', () => {
@@ -523,6 +534,158 @@ describe('ProductService — cờ kê đơn theo danh mục thuốc', () => {
       'product-id',
       expect.objectContaining({ requiresPrescription: true }),
     );
+  });
+});
+
+describe('ProductService — điền sẵn từ danh mục thuốc', () => {
+  const drugWithTexts = {
+    id: 'drug-id',
+    isPrescription: false,
+    indications: 'Giảm đau, hạ sốt',
+    dosage: '1 viên/lần',
+    storage: 'Nơi khô ráo',
+  };
+
+  it('tạo: không gửi chỉ định/liều/bảo quản thì lấy từ thuốc; gửi thì dùng của ADMIN', async () => {
+    const createProduct = jest.fn().mockResolvedValue({ id: 'product-id' });
+    const service = makeService({
+      createProduct,
+      findActiveDrug: jest.fn().mockResolvedValue(drugWithTexts),
+      findDetailWith: jest.fn().mockResolvedValue({ id: 'product-id' }),
+    });
+
+    await service.create(validCreatePayload({ dosageNote: 'Trẻ em nửa viên' }), 'caller-id');
+
+    expect(createProduct).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        indications: 'Giảm đau, hạ sốt',
+        dosageNote: 'Trẻ em nửa viên',
+        storageNote: 'Nơi khô ráo',
+      }),
+    );
+  });
+
+  it('sửa: gắn thuốc lần đầu chỉ điền ô đang trống, không đè nội dung đã có', async () => {
+    const updateProduct = jest.fn().mockResolvedValue(1);
+    const service = makeService({
+      findDetailWith: jest.fn().mockResolvedValue({
+        ...existingProduct,
+        indications: 'Ghi chú cũ của ADMIN',
+        dosageNote: null,
+        storageNote: null,
+        units: [],
+      }),
+      findActiveDrug: jest.fn().mockResolvedValue(drugWithTexts),
+      updateProduct,
+    });
+
+    await service.update('product-id', { drugId: 'drug-id' }, 'caller-id');
+
+    const data = (updateProduct.mock.calls[0] as unknown[])[2] as Record<string, unknown>;
+    expect(data).not.toHaveProperty('indications');
+    expect(data).toMatchObject({ dosageNote: '1 viên/lần', storageNote: 'Nơi khô ráo' });
+  });
+});
+
+describe('ProductService — chống trùng thuốc + bộ đơn vị', () => {
+  const pack = (code: string, units: [string, number][]) => ({
+    code,
+    units: units.map(([unitId, conversionRate]) => ({ unitId, conversionRate })),
+  });
+  // Cùng bộ đơn vị với validCreatePayload: viên ×1, vỉ ×10.
+  const samePack = pack('SP0099', [
+    ['unit-vi', 10],
+    ['unit-vien', 1],
+  ]);
+
+  it('tạo: cùng thuốc và cùng bộ đơn vị (khác thứ tự) thì báo DUPLICATE_CODE, không ghi gì', async () => {
+    const createProduct = jest.fn();
+    const service = makeService({ createProduct, findPacksByDrug: jest.fn().mockResolvedValue([samePack]) });
+
+    const attempt = service.create(validCreatePayload(), 'caller-id');
+    await expect(attempt).rejects.toMatchObject({ errorCode: ErrorCode.DUPLICATE_CODE });
+    await expect(attempt).rejects.toThrow('SP0099');
+    expect(createProduct).not.toHaveBeenCalled();
+  });
+
+  it('tạo: cùng thuốc nhưng khác tỉ lệ quy đổi là quy cách khác — được tạo', async () => {
+    const createProduct = jest.fn().mockResolvedValue({ id: 'product-id' });
+    const service = makeService({
+      createProduct,
+      findPacksByDrug: jest.fn().mockResolvedValue([
+        pack('SP0099', [
+          ['unit-vien', 1],
+          ['unit-vi', 20],
+        ]),
+      ]),
+      findDetailWith: jest.fn().mockResolvedValue({ id: 'product-id' }),
+    });
+
+    await service.create(validCreatePayload(), 'caller-id');
+
+    expect(createProduct).toHaveBeenCalled();
+  });
+
+  it('tạo: khoá theo thuốc trước khi đọc các quy cách đã có', async () => {
+    const order: string[] = [];
+    const tx = {
+      $executeRaw: jest.fn().mockImplementation(() => {
+        order.push('lock');
+        return 0;
+      }),
+    };
+    const findPacksByDrug = jest.fn().mockImplementation(() => {
+      order.push('read');
+      return [];
+    });
+    const service = makeService(
+      { findPacksByDrug, findDetailWith: jest.fn().mockResolvedValue({ id: 'product-id' }) },
+      { write: jest.fn().mockImplementation((_locks: string[], work: (client: unknown) => unknown) => work(tx)) },
+    );
+
+    await service.create(validCreatePayload(), 'caller-id');
+
+    expect(order).toEqual(['lock', 'read']);
+    expect(findPacksByDrug).toHaveBeenCalledWith(tx, 'drug-id', undefined);
+  });
+
+  it('sửa units thành trùng quy cách hàng khác thì bị chặn; so trừ chính nó', async () => {
+    const findPacksByDrug = jest.fn().mockResolvedValue([samePack]);
+    const service = makeService({
+      findDetailWith: jest
+        .fn()
+        .mockResolvedValue({ ...existingProduct, drugId: 'drug-id', drug: { id: 'drug-id', isPrescription: false } }),
+      findPacksByDrug,
+    });
+
+    await expect(
+      service.update(
+        'product-id',
+        {
+          units: [
+            { unitId: 'unit-vien', conversionRate: 1, salePrice: 500, isBaseUnit: true },
+            { unitId: 'unit-vi', conversionRate: 10, salePrice: 4500, isBaseUnit: false },
+          ],
+        },
+        'caller-id',
+      ),
+    ).rejects.toMatchObject({ errorCode: ErrorCode.DUPLICATE_CODE });
+    expect(findPacksByDrug).toHaveBeenCalledWith(expect.anything(), 'drug-id', 'product-id');
+  });
+
+  it('sửa trường khác (không đổi units, không đổi thuốc) thì không kiểm trùng', async () => {
+    const findPacksByDrug = jest.fn();
+    const service = makeService({
+      findDetailWith: jest
+        .fn()
+        .mockResolvedValue({ ...existingProduct, drugId: 'drug-id', drug: { id: 'drug-id', isPrescription: false } }),
+      findPacksByDrug,
+    });
+
+    await service.update('product-id', { name: 'Tên mới' }, 'caller-id');
+
+    expect(findPacksByDrug).not.toHaveBeenCalled();
   });
 });
 

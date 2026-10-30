@@ -101,6 +101,16 @@ describe('Dữ liệu mẫu nhóm sản phẩm, hãng sản xuất và đơn v�
     expect(new Set(barcodes).size).toBe(barcodes.length);
   });
 
+  it('hàng thuốc nào cũng ghép một mã thuốc CSDL Dược, không hai sản phẩm trùng mã; hàng thường không ghép', () => {
+    const drugs = SEED_PRODUCTS.filter((product) => product.categoryCode.startsWith('THUOC'));
+    const goods = SEED_PRODUCTS.filter((product) => !product.categoryCode.startsWith('THUOC'));
+
+    expect(drugs.every((product) => Boolean(product.drugCode))).toBe(true);
+    expect(goods.every((product) => !product.drugCode)).toBe(true);
+    // Seed chỉ dùng một quy cách mỗi thuốc nên mã không trùng; trùng thì chống trùng quy cách phải xét tới đơn vị.
+    expect(new Set(drugs.map((product) => product.drugCode)).size).toBe(drugs.length);
+  });
+
   it('có sản phẩm không có hãng sản xuất và có cả thuốc kê đơn lẫn không kê đơn', () => {
     expect(SEED_PRODUCTS.some((product) => !product.manufacturerCode)).toBe(true);
     expect(SEED_PRODUCTS.some((product) => product.requiresPrescription)).toBe(true);

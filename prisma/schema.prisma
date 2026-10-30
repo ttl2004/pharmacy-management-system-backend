@@ -331,8 +331,6 @@ model Product {
   categoryId           String       @db.Uuid
   manufacturerId       String?      @db.Uuid
   baseUnitId           String       @db.Uuid
-  activeIngredient     String?      @db.VarChar(250)
-  strength             String?      @db.VarChar(100)
   dosageForm           DosageForm?
   packagingSpec        String?      @db.VarChar(150)
   requiresPrescription Boolean      @default(false)
@@ -347,8 +345,6 @@ model Product {
   trackBatches         Boolean      @default(true)
   /// Thuốc kiểm soát đặc biệt (gây nghiện, hướng thần…).
   isControlled         Boolean      @default(false)
-  registrationNumber   String?      @db.VarChar(50)
-  countryOfOrigin      String?      @db.VarChar(100)
   /// Định mức tồn tối đa; null = không giới hạn.
   maxStockLevel        Int?
   shortName            String?      @db.VarChar(100)
@@ -359,10 +355,9 @@ model Product {
   orderNote            String?      @db.Text
   /// Đánh dấu sao ở danh sách hàng hóa (dùng chung toàn chuỗi).
   isFavourite          Boolean      @default(false)
-  /// Mã thuốc CSDL Dược quốc gia (danh mục DQG chưa có ở BE — lưu chuỗi).
-  nationalDrugCode     String?      @db.VarChar(50)
   routeId              String?      @db.Uuid
-  /// Thuốc trong danh mục DQG mà hàng hoá này ứng với. Bắt buộc khi tạo hàng `DRUG`; hàng thường để null.
+  /// Thuốc trong danh mục DQG mà hàng hoá này ứng với — hoạt chất, hàm lượng, số đăng ký… đọc từ đây, không lưu trùng.
+  /// CHECK `products_drug_link_chk`: hàng DRUG chưa xoá bắt buộc có, hàng GOODS phải null.
   drugId               String?      @db.Uuid
 
   category     Category                 @relation(fields: [categoryId], references: [id], onDelete: Restrict)
@@ -415,6 +410,14 @@ model Drug {
   countryOfOrigin       String?      @db.VarChar(100)
   packagingSpec         String?      @db.VarChar(250)
   route                 String?      @db.VarChar(100)
+  /// 7 cột tra cứu dạng văn bản của nguồn — đủ 21 cột gốc.
+  indications           String?      @db.Text
+  contraindications     String?      @db.Text
+  storage               String?      @db.Text
+  effects               String?      @db.Text
+  sideEffects           String?      @db.Text
+  warnings              String?      @db.Text
+  dosage                String?      @db.Text
   status                RecordStatus @default(ACTIVE)
   /// Lần đồng bộ gần nhất có thuốc này trong nguồn.
   syncedAt              DateTime     @db.Timestamptz(3)
@@ -423,6 +426,11 @@ model Drug {
 
   @@index([name])
   @@index([status])
+  /// Tìm kiếm `ILIKE '%…%'` (search của base repo) — btree không dùng được, cần trigram (extension pg_trgm).
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "drugs_name_trgm_idx")
+  @@index([code(ops: raw("gin_trgm_ops"))], type: Gin, map: "drugs_code_trgm_idx")
+  @@index([ingredients(ops: raw("gin_trgm_ops"))], type: Gin, map: "drugs_ingredients_trgm_idx")
+  @@index([registrationNumber(ops: raw("gin_trgm_ops"))], type: Gin, map: "drugs_registration_number_trgm_idx")
   @@map("drugs")
 }
 

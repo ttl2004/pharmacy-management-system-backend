@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, Product, ProductType, RecordStatus } from '@prisma/client';
+import { lockAdvisoryKeys } from 'src/common/databases/advisory-lock';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
@@ -11,7 +12,12 @@ import { CreateProductRequest, ProductUnitRequest, UpdateProductRequest } from '
 import { ProductQuery } from './dtos/product.query';
 import { productCreatedEntry, productDeletedEntry, productUpdatedEntry } from './product-audit';
 import { toExtraCreateData, toExtraUpdateData } from './product-extra-fields.mapper';
-import { LinkedDrug, ProductDetail, ProductRepository } from './repositories/product.repository';
+import {
+  DRUG_INGREDIENTS_SEARCH_FIELD,
+  LinkedDrug,
+  ProductDetail,
+  ProductRepository,
+} from './repositories/product.repository';
 
 @Injectable()
 export class ProductService extends AbstractBaseService<Product> {
@@ -37,7 +43,7 @@ export class ProductService extends AbstractBaseService<Product> {
       limit: query.limit,
       sort: query.sort,
       search: query.search,
-      searchFields: ['code', 'barcode', 'name', 'activeIngredient'],
+      searchFields: ['code', 'barcode', 'name', DRUG_INGREDIENTS_SEARCH_FIELD],
     });
   }
 
@@ -63,6 +69,7 @@ export class ProductService extends AbstractBaseService<Product> {
         const locationIds = await this.assertLocations(tx, dto.locationIds ?? []);
         await this.assertRoute(tx, dto.routeId);
         const drug = await this.assertDrugOnCreate(tx, dto.type ?? ProductType.DRUG, dto.drugId);
+        if (drug) await this.assertNoDuplicatePack(tx, drug.id, dto.units);
 
         const product = await this.productRepository.createProduct(tx, {
           code: dto.code,
@@ -72,16 +79,15 @@ export class ProductService extends AbstractBaseService<Product> {
           categoryId: dto.categoryId,
           manufacturerId: dto.manufacturerId ?? null,
           baseUnitId: dto.baseUnitId,
-          activeIngredient: dto.activeIngredient ?? null,
-          strength: dto.strength ?? null,
           dosageForm: dto.dosageForm ?? null,
           packagingSpec: dto.packagingSpec ?? null,
           requiresPrescription: drug
             ? this.prescriptionOf(drug, dto.requiresPrescription)
             : (dto.requiresPrescription ?? false),
-          indications: dto.indications ?? null,
-          dosageNote: dto.dosageNote ?? null,
-          storageNote: dto.storageNote ?? null,
+          // Không gửi thì điền sẵn từ danh mục thuốc; ADMIN gửi thì dùng bản của ADMIN (hợp với quy cách cụ thể).
+          indications: dto.indications ?? drug?.indications ?? null,
+          dosageNote: dto.dosageNote ?? drug?.dosage ?? null,
+          storageNote: dto.storageNote ?? drug?.storage ?? null,
           minStockLevel: dto.minStockLevel ?? 0,
           status: dto.status ?? RecordStatus.ACTIVE,
           ...toExtraCreateData(dto),
@@ -164,9 +170,15 @@ export class ProductService extends AbstractBaseService<Product> {
         await this.assertRoute(tx, dto.routeId);
         const newDrug = dto.drugId !== undefined ? await this.assertDrugOnUpdate(tx, existing, dto.drugId) : null;
         const linkedDrug = newDrug ?? existing.drug;
+        if (linkedDrug && (newDrug || dto.units !== undefined)) {
+          const units =
+            dto.units ?? existing.units.map((row) => ({ unitId: row.unit.id, conversionRate: row.conversionRate }));
+          await this.assertNoDuplicatePack(tx, linkedDrug.id, units, id);
+        }
 
         const data = this.toUpdateData(dto, callerId);
         if (linkedDrug) data.requiresPrescription = this.prescriptionOf(linkedDrug, dto.requiresPrescription);
+        if (newDrug && !existing.drugId) Object.assign(data, prefillFromDrug(newDrug, dto, existing));
         const written = await this.productRepository.updateProduct(tx, id, data);
         if (!written) throw this.notFound();
 
@@ -326,8 +338,6 @@ export class ProductService extends AbstractBaseService<Product> {
     if (dto.categoryId !== undefined) data.categoryId = dto.categoryId;
     if (dto.manufacturerId !== undefined) data.manufacturerId = dto.manufacturerId;
     if (dto.baseUnitId !== undefined) data.baseUnitId = dto.baseUnitId;
-    if (dto.activeIngredient !== undefined) data.activeIngredient = dto.activeIngredient;
-    if (dto.strength !== undefined) data.strength = dto.strength;
     if (dto.dosageForm !== undefined) data.dosageForm = dto.dosageForm;
     if (dto.packagingSpec !== undefined) data.packagingSpec = dto.packagingSpec;
     if (dto.requiresPrescription !== undefined) data.requiresPrescription = dto.requiresPrescription;
@@ -403,12 +413,36 @@ export class ProductService extends AbstractBaseService<Product> {
    * Hàng đã gắn thuốc: cờ kê đơn lấy theo danh mục — quầy bán đọc cờ này để đòi đơn, nên client không được ghi đè
    * thành giá trị khác (vd. thuốc kê đơn mà gửi `false`).
    */
-  private prescriptionOf(drug: LinkedDrug, requested: boolean | undefined): boolean {
+  private prescriptionOf(drug: { isPrescription: boolean }, requested: boolean | undefined): boolean {
     if (requested !== undefined && requested !== drug.isPrescription) {
       const kind = drug.isPrescription ? 'thuốc kê đơn' : 'thuốc không kê đơn';
       throw this.badRequest(`Theo danh mục CSDL Dược đây là ${kind}, không sửa được cờ kê đơn`);
     }
     return drug.isPrescription;
+  }
+
+  /**
+   * Chống trùng (chốt 2026-10-30): một thuốc có nhiều sản phẩm (mỗi quy cách một sản phẩm) nhưng không được hai sản phẩm
+   * cùng bộ đơn vị `(đơn vị, tỉ lệ quy đổi)`. Khoá theo thuốc để hai ADMIN tạo cùng lúc vẫn chạy nối tiếp — lấy SAU mọi
+   * khoá đầu transaction và không lấy thêm khoá nào sau nó, nên không tạo vòng chờ.
+   */
+  private async assertNoDuplicatePack(
+    client: Prisma.TransactionClient,
+    drugId: string,
+    units: readonly { unitId: string; conversionRate: number }[],
+    excludeProductId?: string,
+  ): Promise<void> {
+    await lockAdvisoryKeys(client, [`drug:${drugId}`]);
+    const wanted = packKey(units);
+    const twin = (await this.productRepository.findPacksByDrug(client, drugId, excludeProductId)).find(
+      (pack) => packKey(pack.units) === wanted,
+    );
+    if (twin) {
+      throw new ErrorException({
+        code: ErrorCode.DUPLICATE_CODE,
+        message: `Thuốc này đã có sản phẩm ${twin.code} cùng quy cách đơn vị`,
+      });
+    }
   }
 
   /** Vị trí gửi lên phải tồn tại (bỏ trùng trước khi kiểm). Trả danh sách đã bỏ trùng để ghi. */
@@ -487,4 +521,28 @@ export class ProductService extends AbstractBaseService<Product> {
   private badRequest(message: string): ErrorException {
     return new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message });
   }
+}
+
+/** Bộ đơn vị dạng chuỗi so sánh được, không phụ thuộc thứ tự gửi. */
+function packKey(units: readonly { unitId: string; conversionRate: number }[]): string {
+  return units
+    .map((unit) => `${unit.unitId}:${unit.conversionRate}`)
+    .sort()
+    .join('|');
+}
+
+/**
+ * Gắn thuốc lần đầu cho hàng cũ: điền chỉ định / liều / bảo quản từ danh mục vào ô đang trống — không ghi đè nội dung
+ * ADMIN đã nhập, cũng không đè giá trị gửi kèm trong chính request.
+ */
+function prefillFromDrug(
+  drug: LinkedDrug,
+  dto: UpdateProductRequest,
+  existing: { indications: string | null; dosageNote: string | null; storageNote: string | null },
+): Prisma.ProductUncheckedUpdateInput {
+  const data: Prisma.ProductUncheckedUpdateInput = {};
+  if (dto.indications === undefined && existing.indications === null) data.indications = drug.indications;
+  if (dto.dosageNote === undefined && existing.dosageNote === null) data.dosageNote = drug.dosage;
+  if (dto.storageNote === undefined && existing.storageNote === null) data.storageNote = drug.storage;
+  return data;
 }

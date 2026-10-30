@@ -4,14 +4,14 @@ import { z } from 'zod';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 
-/** Chuỗi có thể rỗng phía nguồn; độ dài tối đa theo cột tương ứng của bảng `drugs`. */
-const optionalText = (max?: number) => (max ? z.string().max(max) : z.string()).nullable();
+/** Chuỗi có thể rỗng phía nguồn (thiếu khoá = null); độ dài tối đa theo cột tương ứng của bảng `drugs`. */
+const optionalText = (max?: number) => (max ? z.string().max(max) : z.string()).nullable().default(null);
 const isoDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/)
   .nullable();
 
-/** Một thuốc như nguồn CSDL Dược trả về. Nguồn còn trả thêm cột tra cứu — schema bỏ qua (không strict). */
+/** Một thuốc như nguồn CSDL Dược trả về — đủ 21 cột gốc. Khoá lạ khác bị bỏ qua (không strict). */
 const drugSourceRecordSchema = z.object({
   code: z.string().trim().min(1).max(50),
   name: z.string().trim().min(1).max(250),
@@ -27,6 +27,13 @@ const drugSourceRecordSchema = z.object({
   countryOfOrigin: optionalText(100),
   packagingSpec: optionalText(250),
   route: optionalText(100),
+  indications: optionalText(),
+  contraindications: optionalText(),
+  storage: optionalText(),
+  effects: optionalText(),
+  sideEffects: optionalText(),
+  warnings: optionalText(),
+  dosage: optionalText(),
 });
 
 const drugSourcePageSchema = z.object({

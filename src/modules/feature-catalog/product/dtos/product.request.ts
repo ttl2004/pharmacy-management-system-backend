@@ -90,7 +90,10 @@ export class CreateProductRequest extends ProductExtraFieldsRequest {
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MAX_IMAGE_URLS)
-  @Matches(IMAGE_URL_PATTERN, { each: true, message: 'imageUrls chỉ nhận URL http(s) hoặc ảnh đã tải lên (/uploads/products/…)' })
+  @Matches(IMAGE_URL_PATTERN, {
+    each: true,
+    message: 'imageUrls chỉ nhận URL http(s) hoặc ảnh đã tải lên (/uploads/products/…)',
+  })
   @MaxLength(2048, { each: true })
   @ApiPropertyOptional({ type: [String], description: `Tối đa ${MAX_IMAGE_URLS} URL ảnh` })
   imageUrls?: string[];
@@ -107,18 +110,6 @@ export class CreateProductRequest extends ProductExtraFieldsRequest {
   @IsUUID()
   @ApiProperty({ description: 'Đơn vị nhỏ nhất dùng để đếm tồn kho' })
   baseUnitId: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(250)
-  @ApiPropertyOptional()
-  activeIngredient?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(100)
-  @ApiPropertyOptional()
-  strength?: string;
 
   @IsOptional()
   @IsEnum(DosageForm)
@@ -138,17 +129,17 @@ export class CreateProductRequest extends ProductExtraFieldsRequest {
 
   @IsOptional()
   @IsString()
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'Không gửi thì lấy "Chỉ định" của thuốc trong danh mục' })
   indications?: string;
 
   @IsOptional()
   @IsString()
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'Không gửi thì lấy "Liều lượng" của thuốc trong danh mục' })
   dosageNote?: string;
 
   @IsOptional()
   @IsString()
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'Không gửi thì lấy "Cách bảo quản" của thuốc trong danh mục' })
   storageNote?: string;
 
   @IsOptional()
@@ -200,7 +191,10 @@ export class UpdateProductRequest extends ProductExtraFieldsRequest {
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MAX_IMAGE_URLS)
-  @Matches(IMAGE_URL_PATTERN, { each: true, message: 'imageUrls chỉ nhận URL http(s) hoặc ảnh đã tải lên (/uploads/products/…)' })
+  @Matches(IMAGE_URL_PATTERN, {
+    each: true,
+    message: 'imageUrls chỉ nhận URL http(s) hoặc ảnh đã tải lên (/uploads/products/…)',
+  })
   @MaxLength(2048, { each: true })
   @ApiPropertyOptional({ type: [String], description: `Tối đa ${MAX_IMAGE_URLS} URL ảnh` })
   imageUrls?: string[];
@@ -219,18 +213,6 @@ export class UpdateProductRequest extends ProductExtraFieldsRequest {
   @IsUUID()
   @ApiPropertyOptional({ description: 'Đổi đơn vị cơ bản bắt buộc gửi kèm units' })
   baseUnitId?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(250)
-  @ApiPropertyOptional({ nullable: true, description: 'Gửi null để xoá' })
-  activeIngredient?: string | null;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(100)
-  @ApiPropertyOptional({ nullable: true, description: 'Gửi null để xoá' })
-  strength?: string | null;
 
   @IsOptional()
   @IsEnum(DosageForm)

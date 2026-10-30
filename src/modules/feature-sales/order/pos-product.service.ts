@@ -76,10 +76,13 @@ export class PosProductService {
     if (query.categoryId) conditions.push({ categoryId: query.categoryId });
     if (query.search?.trim()) {
       const keyword = escapeLike(query.search.trim());
+      const matches = { contains: keyword, mode: 'insensitive' } as const;
       conditions.push({
-        OR: ['code', 'barcode', 'name', 'activeIngredient'].map((field) => ({
-          [field]: { contains: keyword, mode: 'insensitive' },
-        })),
+        OR: [
+          ...['code', 'barcode', 'name'].map((field) => ({ [field]: matches })),
+          // Hoạt chất là thông tin của thuốc liên kết, không còn là cột của hàng hoá.
+          { drug: { ingredients: matches } },
+        ],
       });
     }
     const { rows, total } = await this.products.findPage({ AND: conditions }, page, limit);

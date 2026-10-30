@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Drug } from '@prisma/client';
+import { Drug, Prisma } from '@prisma/client';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
@@ -16,6 +16,18 @@ export interface DrugSyncResult {
   productsUpdated: number;
   syncedAt: Date;
 }
+
+/**
+ * Hàng hoá đang dùng thuốc này — ADMIN thấy ngay thuốc đã có những quy cách nào trước khi tạo thêm (đi cùng câu truy vấn
+ * danh sách, không thêm API).
+ */
+const LINKED_PRODUCTS = {
+  products: {
+    where: { isDeleted: false },
+    orderBy: { code: 'asc' },
+    select: { id: true, code: true, name: true, packagingSpec: true, status: true },
+  },
+} satisfies Prisma.DrugInclude;
 
 /** Một lần đồng bộ chuyển INACTIVE quá tỉ lệ này của thuốc đang ACTIVE thì coi là nghi nguồn lỗi, phải `force`. */
 export const MAX_DEACTIVATE_RATIO = 0.1;
@@ -40,11 +52,12 @@ export class DrugService extends AbstractBaseService<Drug> {
       sort: query.sort ?? 'name:asc',
       search: query.search,
       searchFields: ['code', 'name', 'ingredients', 'registrationNumber'],
+      relations: LINKED_PRODUCTS,
     });
   }
 
   async getDetail(id: string): Promise<Drug> {
-    const drug = await this.drugRepository.findOne({ id });
+    const drug = await this.drugRepository.findOne({ id }, { relations: LINKED_PRODUCTS });
     if (!drug) throw new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Thuốc không tồn tại' });
     return drug;
   }

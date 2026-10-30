@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, Product, ReceiptStatus, RecordStatus, TransferStatus } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
+import { containsPattern } from 'src/common/utils/like-pattern.util';
 import { BaseWhere, PaginationResult } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { PrismaBaseRepository } from 'src/providers/abstract-base/repositories/prisma-base.repository';
 
@@ -17,8 +18,6 @@ const PRODUCT_BASE_SELECT = {
   categoryId: true,
   manufacturerId: true,
   baseUnitId: true,
-  activeIngredient: true,
-  strength: true,
   dosageForm: true,
   packagingSpec: true,
   requiresPrescription: true,
@@ -27,14 +26,11 @@ const PRODUCT_BASE_SELECT = {
   type: true,
   trackBatches: true,
   isControlled: true,
-  registrationNumber: true,
-  countryOfOrigin: true,
   maxStockLevel: true,
   shortName: true,
   weight: true,
   weightUnit: true,
   isFavourite: true,
-  nationalDrugCode: true,
   routeId: true,
   drugId: true,
   createdAt: true,
@@ -46,6 +42,8 @@ const PRODUCT_SUMMARY_SELECT = {
   category: { select: { id: true, code: true, name: true } },
   manufacturer: { select: { id: true, code: true, name: true } },
   baseUnit: { select: { id: true, code: true, name: true } },
+  // Hoạt chất, hàm lượng… là thông tin của thuốc, không lưu trùng trên hàng hoá.
+  drug: { select: { id: true, code: true, name: true, ingredients: true, strength: true } },
 } satisfies Prisma.ProductSelect;
 
 const PRODUCT_DETAIL_SELECT = {
@@ -61,10 +59,14 @@ const PRODUCT_DETAIL_SELECT = {
       id: true,
       code: true,
       name: true,
+      ingredients: true,
       strength: true,
       isPrescription: true,
+      controlType: true,
       registrationNumber: true,
       registrationExpiresAt: true,
+      manufacturerName: true,
+      countryOfOrigin: true,
       status: true,
     },
   },
@@ -91,8 +93,22 @@ const PRODUCT_DETAIL_SELECT = {
 
 export type ProductSummary = Prisma.ProductGetPayload<{ select: typeof PRODUCT_SUMMARY_SELECT }>;
 export type ProductDetail = Prisma.ProductGetPayload<{ select: typeof PRODUCT_DETAIL_SELECT }>;
-/** Phần thuốc trong danh mục mà hàng hoá cần biết khi liên kết. */
-export type LinkedDrug = { id: string; isPrescription: boolean };
+/** Phần thuốc trong danh mục mà hàng hoá cần khi liên kết: cờ kê đơn (chép) và văn bản điền sẵn. */
+const LINKED_DRUG_SELECT = {
+  id: true,
+  isPrescription: true,
+  indications: true,
+  dosage: true,
+  storage: true,
+} satisfies Prisma.DrugSelect;
+
+export type LinkedDrug = Prisma.DrugGetPayload<{ select: typeof LINKED_DRUG_SELECT }>;
+
+/** Một hàng hoá cùng thuốc, kèm bộ đơn vị bán — để so quy cách khi chống trùng. */
+export interface DrugPack {
+  code: string;
+  units: { unitId: string; conversionRate: number }[];
+}
 
 /**
  * Bộ trường cho storefront — tách hẳn khỏi bộ nội bộ để mỗi lần thêm cột mới phải chủ động quyết định
@@ -102,11 +118,11 @@ const PUBLIC_PRODUCT_LIST_SELECT = {
   id: true,
   name: true,
   imageUrls: true,
-  activeIngredient: true,
-  strength: true,
   dosageForm: true,
   packagingSpec: true,
   requiresPrescription: true,
+  // Thông tin dược đọc từ danh mục — chỉ hoạt chất và hàm lượng ra công khai.
+  drug: { select: { ingredients: true, strength: true } },
   category: { select: { id: true, name: true } },
   manufacturer: { select: { id: true, name: true } },
   units: {
@@ -134,10 +150,26 @@ export interface ProductPageOptions {
   searchFields?: string[];
 }
 
+/** Trường tìm kiếm ảo: hoạt chất nằm ở thuốc liên kết (`drugs.ingredients`), không còn là cột của hàng hoá. */
+export const DRUG_INGREDIENTS_SEARCH_FIELD = 'drug.ingredients';
+
 @Injectable()
 export class ProductRepository extends PrismaBaseRepository<Product> {
   constructor(prisma: PrismaService) {
     super(prisma, 'Product');
+  }
+
+  /** Như repository nền, cộng thêm hàng hoá có thuốc liên kết khớp hoạt chất khi được yêu cầu. */
+  protected override async resolveSearchIds(search?: string, searchFields?: string[]): Promise<string[] | undefined> {
+    const ownIds = await super.resolveSearchIds(search, searchFields);
+    if (!search || !searchFields?.includes(DRUG_INGREDIENTS_SEARCH_FIELD)) return ownIds;
+
+    // `ILIKE … ESCAPE` cùng lý do với repository nền: `%`, `_` người dùng gõ là chữ, không phải ký tự đại diện.
+    const rows = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT p."id" FROM "products" p
+      JOIN "drugs" d ON d."id" = p."drugId"
+      WHERE p."isDeleted" = false AND d."ingredients" ILIKE ${containsPattern(search)} ESCAPE '\\'`);
+    return [...new Set([...(ownIds ?? []), ...rows.map((row) => row.id)])];
   }
 
   /**
@@ -259,7 +291,18 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
   findActiveDrug(client: Prisma.TransactionClient, id: string): Promise<LinkedDrug | null> {
     return client.drug.findFirst({
       where: { id, isDeleted: false, status: RecordStatus.ACTIVE },
-      select: { id: true, isPrescription: true },
+      select: LINKED_DRUG_SELECT,
+    });
+  }
+
+  /** Các hàng hoá chưa xoá đang trỏ tới thuốc (trừ `excludeProductId`), kèm đơn vị bán chưa xoá. */
+  findPacksByDrug(client: Prisma.TransactionClient, drugId: string, excludeProductId?: string): Promise<DrugPack[]> {
+    return client.product.findMany({
+      where: { drugId, isDeleted: false, ...(excludeProductId && { id: { not: excludeProductId } }) },
+      select: {
+        code: true,
+        units: { where: { isDeleted: false }, select: { unitId: true, conversionRate: true } },
+      },
     });
   }
 

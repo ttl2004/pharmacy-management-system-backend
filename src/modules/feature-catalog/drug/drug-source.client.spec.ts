@@ -16,8 +16,9 @@ const drug = (code: string) => ({
   countryOfOrigin: null,
   packagingSpec: null,
   route: null,
-  // Cột tra cứu nguồn trả thêm — client bỏ qua.
   indications: 'Giảm đau',
+  // Không gửi 6 cột tra cứu còn lại — client coi là null. Khoá lạ bị bỏ qua.
+  unknownField: 'x',
 });
 
 const page = (items: unknown[], total: number) => ({ items, total });
@@ -40,7 +41,7 @@ describe('DrugSourceClient', () => {
     global.fetch = realFetch;
   });
 
-  it('gộp đủ các trang tới khi bằng total, bỏ cột thừa', async () => {
+  it('gộp đủ các trang tới khi bằng total; giữ cột tra cứu, cột thiếu thành null, bỏ khoá lạ', async () => {
     const first = Array.from({ length: 100 }, (_, i) => drug(`A${i}`));
     const { client, fetchMock } = makeClient(page(first, 101), page([drug('B')], 101));
 
@@ -48,7 +49,8 @@ describe('DrugSourceClient', () => {
 
     expect(drugs).toHaveLength(101);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(drugs[0]).not.toHaveProperty('indications');
+    expect(drugs[0]).toMatchObject({ indications: 'Giảm đau', dosage: null, sideEffects: null });
+    expect(drugs[0]).not.toHaveProperty('unknownField');
   });
 
   it('trang rỗng trước khi đủ total thì báo lỗi — không coi danh mục thiếu là trọn vẹn', async () => {
@@ -82,6 +84,7 @@ describe('DrugSourceClient', () => {
     ['ngày sai định dạng', page([{ ...drug('A'), registeredAt: '13/05/2020' }], 1)],
     ['mã dài quá cột', page([drug('X'.repeat(51))], 1)],
     ['thiếu tên', page([{ ...drug('A'), name: '  ' }], 1)],
+    ['cột tra cứu sai kiểu', page([{ ...drug('A'), dosage: 5 }], 1)],
   ])('dữ liệu sai định dạng (%s) thì báo DRUG_SOURCE_UNAVAILABLE', async (_case, body) => {
     const { client } = makeClient(body);
 

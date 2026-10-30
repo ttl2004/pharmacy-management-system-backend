@@ -19,6 +19,13 @@ const sourceDrug = (code: string): DrugSourceRecord => ({
   countryOfOrigin: 'US',
   packagingSpec: 'Hộp 10 vỉ',
   route: 'Uống',
+  indications: 'Giảm đau, hạ sốt',
+  contraindications: null,
+  storage: 'Nơi khô ráo',
+  effects: null,
+  sideEffects: null,
+  warnings: null,
+  dosage: '1 viên/lần',
 });
 
 const TX = { marker: 'tx' };

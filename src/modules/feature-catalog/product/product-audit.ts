@@ -21,13 +21,10 @@ const FIELDS = [
   'trackBatches',
   'requiresPrescription',
   'isControlled',
-  'registrationNumber',
   'minStockLevel',
   'maxStockLevel',
   'routeId',
   'dosageForm',
-  'activeIngredient',
-  'strength',
   'drugId',
 ] as const;
 

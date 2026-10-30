@@ -7,7 +7,7 @@ import { ErrorCode } from 'src/common/types/error-code';
 import { PrismaBaseRepository } from 'src/providers/abstract-base/repositories/prisma-base.repository';
 import type { DrugSourceRecord } from '../drug-source.client';
 
-/** 500 dòng × 18 tham số = 9.000 — xa giới hạn 65.535 tham số của một câu lệnh Postgres. */
+/** 500 dòng × 25 tham số = 12.500 — xa giới hạn 65.535 tham số của một câu lệnh Postgres. */
 export const UPSERT_BATCH_SIZE = 500;
 
 /** Cả lần đồng bộ (tải nguồn + ghi) nằm trong một transaction để giữ khoá — mỗi lượt DB ~100 ms qua pooler. */
@@ -102,7 +102,9 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
         ${randomUUID()}::uuid, ${drug.code}, ${drug.name}, ${drug.drugGroup}, ${drug.controlType},
         ${drug.isPrescription}, ${drug.registrationNumber}, ${drug.registeredAt}::date,
         ${drug.registrationExpiresAt}::date, ${drug.strength}, ${drug.ingredients}, ${drug.manufacturerName},
-        ${drug.countryOfOrigin}, ${drug.packagingSpec}, ${drug.route}, ${syncedAt}, ${syncedAt}, ${actorId}::uuid
+        ${drug.countryOfOrigin}, ${drug.packagingSpec}, ${drug.route}, ${drug.indications}, ${drug.contraindications},
+        ${drug.storage}, ${drug.effects}, ${drug.sideEffects}, ${drug.warnings}, ${drug.dosage},
+        ${syncedAt}, ${syncedAt}, ${actorId}::uuid
       )`,
     );
 
@@ -111,7 +113,9 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
         "id", "code", "name", "drugGroup", "controlType",
         "isPrescription", "registrationNumber", "registeredAt",
         "registrationExpiresAt", "strength", "ingredients", "manufacturerName",
-        "countryOfOrigin", "packagingSpec", "route", "syncedAt", "createdAt", "createdBy"
+        "countryOfOrigin", "packagingSpec", "route", "indications", "contraindications",
+        "storage", "effects", "sideEffects", "warnings", "dosage",
+        "syncedAt", "createdAt", "createdBy"
       )
       VALUES ${Prisma.join(rows)}
       ON CONFLICT ("code") DO UPDATE SET
@@ -128,6 +132,13 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
         "countryOfOrigin" = EXCLUDED."countryOfOrigin",
         "packagingSpec" = EXCLUDED."packagingSpec",
         "route" = EXCLUDED."route",
+        "indications" = EXCLUDED."indications",
+        "contraindications" = EXCLUDED."contraindications",
+        "storage" = EXCLUDED."storage",
+        "effects" = EXCLUDED."effects",
+        "sideEffects" = EXCLUDED."sideEffects",
+        "warnings" = EXCLUDED."warnings",
+        "dosage" = EXCLUDED."dosage",
         "status" = 'ACTIVE',
         "syncedAt" = EXCLUDED."syncedAt",
         "updatedAt" = EXCLUDED."syncedAt",

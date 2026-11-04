@@ -1,4 +1,4 @@
-import { AuditAction, RecordStatus } from '@prisma/client';
+import { RecordStatus } from '@prisma/client';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
@@ -15,7 +15,7 @@ const EXISTING = {
   id: 'sup-1',
   code: 'NCC001',
   name: 'Dược TW1',
-  phone: '0900',
+  phone: '0901234567',
   email: null,
   address: null,
   taxCode: null,
@@ -46,27 +46,86 @@ function makeService(repositoryOverrides: Record<string, jest.Mock> = {}) {
 }
 
 describe('SupplierService', () => {
-  it('tạo: ghi createdBy là người gọi và một dòng nhật ký CREATE kèm IP', async () => {
+  it('tạo: ghi createdBy là người gọi và một dòng SUPPLIER.CREATED, nhãn = mã, SĐT đã che', async () => {
     const { service, repository, audit } = makeService();
 
-    await service.create({ code: 'NCC002', name: 'NCC', phone: '0901' }, ADMIN);
+    await service.create({ code: 'NCC002', name: 'NCC', phone: '0901234567' }, ADMIN);
 
     expect(repository.createWith).toHaveBeenCalledWith({}, expect.objectContaining({ createdBy: 'admin-1' }));
-    const [, entries] = audit.record.mock.calls[0] as [unknown, Record<string, unknown>[]];
-    expect(entries[0]).toMatchObject({ action: AuditAction.CREATE, entityType: 'suppliers', ipAddress: '10.0.0.1' });
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, actor, entries] = audit.record.mock.calls[0] as [
+      unknown,
+      Record<string, unknown>,
+      Record<string, unknown>[],
+    ];
+    expect(actor).toMatchObject({ userId: 'admin-1', type: 'USER', ip: '10.0.0.1' });
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'SUPPLIER.CREATED',
+        entityType: 'suppliers',
+        entityId: 'sup-new',
+        entityLabel: 'NCC002',
+        branchIds: [],
+        searchTerms: ['NCC002', 'NCC'],
+      }),
+    ]);
+    const after = entries[0].after as Record<string, unknown>;
+    expect(after.code).toBe('NCC002');
+    expect(after.phone).not.toBe('0901234567');
+    expect(String(after.phone)).toMatch(/4567$/);
   });
 
-  it('sửa: nhật ký chỉ chứa trường thực sự đổi; đổi status thì ghi STATUS_CHANGE', async () => {
+  it('sửa: nhật ký chỉ chứa trường thực sự đổi; đổi status thì ghi SUPPLIER.STATUS_CHANGED', async () => {
     const { service, audit } = makeService();
 
     await service.update('sup-1', { name: 'Dược TW1', status: RecordStatus.INACTIVE }, ADMIN);
 
-    const [, entries] = audit.record.mock.calls[0] as [unknown, Record<string, unknown>[]];
-    expect(entries[0]).toMatchObject({
-      action: AuditAction.STATUS_CHANGE,
-      before: { status: 'ACTIVE' },
-      after: { status: 'INACTIVE' },
-    });
+    const [, , entries] = audit.record.mock.calls[0] as [unknown, unknown, Record<string, unknown>[]];
+    expect(entries).toEqual([
+      {
+        event: 'SUPPLIER.STATUS_CHANGED',
+        entityType: 'suppliers',
+        entityId: 'sup-1',
+        entityLabel: 'NCC001',
+        branchIds: [],
+        before: { status: 'ACTIVE' },
+        after: { status: 'INACTIVE' },
+        searchTerms: ['NCC001', 'Dược TW1'],
+      },
+    ]);
+  });
+
+  it('sửa tên ghi SUPPLIER.UPDATED; đổi SĐT thì trước/sau đều đã che', async () => {
+    const { service, audit } = makeService();
+
+    await service.update('sup-1', { name: 'Dược TW2', phone: '0987654321' }, ADMIN);
+
+    const [, , entries] = audit.record.mock.calls[0] as [unknown, unknown, Record<string, unknown>[]];
+    expect(entries[0]).toMatchObject({ event: 'SUPPLIER.UPDATED', searchTerms: ['NCC001', 'Dược TW2'] });
+    const { before, after } = entries[0] as { before: Record<string, string>; after: Record<string, string> };
+    expect(before.name).toBe('Dược TW1');
+    expect(after.name).toBe('Dược TW2');
+    expect(before.phone).toMatch(/4567$/);
+    expect(before.phone).not.toBe('0901234567');
+    expect(after.phone).toMatch(/4321$/);
+    expect(after.phone).not.toBe('0987654321');
+  });
+
+  it('xoá ghi SUPPLIER.DELETED với ảnh chụp trước', async () => {
+    const { service, audit } = makeService();
+
+    await service.remove('sup-1', ADMIN);
+
+    const [, , entries] = audit.record.mock.calls[0] as [unknown, unknown, Record<string, unknown>[]];
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'SUPPLIER.DELETED',
+        entityId: 'sup-1',
+        entityLabel: 'NCC001',
+        branchIds: [],
+        before: expect.objectContaining({ code: 'NCC001', name: 'Dược TW1' }) as unknown,
+      }),
+    ]);
   });
 
   it('sửa không đổi gì thì không ghi nhật ký rỗng', async () => {

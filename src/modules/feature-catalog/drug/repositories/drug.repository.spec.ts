@@ -19,3 +19,21 @@ describe('DrugRepository — upsert theo lô', () => {
     expect(upserted).toBe(drugs.length);
   });
 });
+
+describe('DrugRepository — cờ kê đơn hàng hoá', () => {
+  it('một câu UPDATE … RETURNING, trả id/mã/cờ trước-sau của từng hàng bị đổi', async () => {
+    const rows = [{ id: 'p1', code: 'SP1', before: false, after: true }];
+    const queryRaw = jest.fn().mockResolvedValue(rows);
+    const tx = { $queryRaw: queryRaw, $executeRaw: jest.fn() };
+    const repository = new DrugRepository({} as never);
+
+    const changed = await repository.syncProductPrescription(tx as never, new Date(), 'actor-id');
+
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+    const sql = (queryRaw.mock.calls[0] as [TemplateStringsArray])[0].join('?');
+    expect(sql).toMatch(/UPDATE "products"/);
+    expect(sql).toMatch(/RETURNING/);
+    expect(changed).toEqual(rows);
+  });
+});

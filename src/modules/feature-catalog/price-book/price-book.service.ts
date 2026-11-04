@@ -1,10 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, PriceBookPolicy, RecordStatus } from '@prisma/client';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
-import { assertBranchInScope, BranchScope, resolveBranchScope, scopedBranchFilter } from '../../feature-auth/permission/branch-scope';
+import {
+  assertBranchInScope,
+  BranchScope,
+  resolveBranchScope,
+  scopedBranchFilter,
+} from '../../feature-auth/permission/branch-scope';
 import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
 import { permissionError } from '../../feature-auth/permission/permission.error';
 import { PriceBookRequest } from './dtos/price-book.request';
@@ -14,7 +21,12 @@ import {
   PriceBookResponse,
   toPriceBookResponse,
 } from './dtos/price-book.response';
-import { priceBookCreatedEntry, priceBookDeletedEntry, priceBookUpdatedEntry } from './price-book-audit';
+import {
+  priceBookCreatedEntry,
+  priceBookDeletedEntry,
+  priceBookFormulaClearedEntry,
+  priceBookUpdatedEntry,
+} from './price-book-audit';
 import { PriceBookItemsService } from './price-book-items.service';
 import { assertCanEditBook, assertWritableBranchIds, canEditBook } from './price-book-scope';
 import { PriceBookRepository, PriceBookRow, PriceBookScalars } from './repositories/price-book.repository';
@@ -44,16 +56,25 @@ export class PriceBookService {
   async list(user: JwtUser): Promise<PriceBookResponse[]> {
     const scope = resolveBranchScope(user);
     const rows = await this.repository.listVisible(scope);
-    return rows.map((row) => toPriceBookResponse(row, canEditBook(scope, row.branches.map((b) => b.branchId))));
+    return rows.map((row) =>
+      toPriceBookResponse(
+        row,
+        canEditBook(
+          scope,
+          row.branches.map((b) => b.branchId),
+        ),
+      ),
+    );
   }
 
-  async create(dto: PriceBookRequest, user: JwtUser): Promise<PriceBookResponse> {
+  async create(dto: PriceBookRequest, actor: RequestActor): Promise<PriceBookResponse> {
+    const user = actor.user;
     const scope = resolveBranchScope(user);
     const data = await this.prepareWrite(dto, scope, null);
     try {
       const created = await this.repository.transaction(async (tx) => {
         const row = await this.repository.create(tx, data, user.userId);
-        await this.audit.record(tx, [priceBookCreatedEntry(user.userId, row)]);
+        await this.audit.record(tx, auditActorOf(actor), [priceBookCreatedEntry(row)]);
         return row;
       });
       return toPriceBookResponse(created, canEditBook(scope, data.branchIds));
@@ -63,7 +84,8 @@ export class PriceBookService {
   }
 
   /** `branchId` (query) là chi nhánh lấy giá vốn / giá nhập cuối khi `reapplyFormula` tính lại các dòng đang có. */
-  async update(id: string, dto: PriceBookRequest, user: JwtUser, branchId?: string): Promise<PriceBookResponse> {
+  async update(id: string, dto: PriceBookRequest, actor: RequestActor, branchId?: string): Promise<PriceBookResponse> {
+    const user = actor.user;
     const scope = resolveBranchScope(user);
     const existing = await this.getEditable(id, scope);
     const data = await this.prepareWrite(dto, scope, id);
@@ -71,8 +93,8 @@ export class PriceBookService {
     try {
       const updated = await this.repository.transaction(async (tx) => {
         const row = await this.repository.update(tx, id, data, user.userId);
-        const entry = priceBookUpdatedEntry(user.userId, existing, row);
-        if (entry) await this.audit.record(tx, [entry]);
+        const entry = priceBookUpdatedEntry(existing, row);
+        if (entry) await this.audit.record(tx, auditActorOf(actor), [entry]);
         if (!dto.reapplyFormula) return row;
         await this.items.reapplyExisting(tx, row, costBranchId);
         // Đọc lại để `itemCount` đúng sau khi tính lại.
@@ -88,26 +110,37 @@ export class PriceBookService {
    * Xoá cứng bảng (D8). Bảng khác đang lấy bảng này làm giá gốc (D9): gỡ công thức của chúng, trừ khi người gọi
    * không sửa được một trong số đó (quản lý chi nhánh vs bảng toàn hệ thống) → từ chối, không gỡ gì cả.
    */
-  async remove(id: string, user: JwtUser): Promise<{ ok: true }> {
+  async remove(id: string, actor: RequestActor): Promise<{ ok: true }> {
+    const user = actor.user;
     const scope = resolveBranchScope(user);
     const existing = await this.getEditable(id, scope);
     await this.repository.transaction(async (tx) => {
       const dependents = await this.repository.findDependents(tx, id);
-      const blocked = dependents.find((d) => !canEditBook(scope, d.branches.map((b) => b.branchId)));
+      const blocked = dependents.find(
+        (d) =>
+          !canEditBook(
+            scope,
+            d.branches.map((b) => b.branchId),
+          ),
+      );
       if (blocked) {
         throw new ErrorException({
           code: ErrorCode.PRICE_BOOK_BASE_IN_USE,
           message: `Bảng giá đang là giá gốc của bảng "${blocked.name}"`,
         });
       }
-      await this.repository.clearFormula(tx, dependents.map((d) => d.id), user.userId);
+      await this.repository.clearFormula(
+        tx,
+        dependents.map((d) => d.id),
+        user.userId,
+      );
       const cleared = { formulaBase: null, formulaOp: null, formulaAmount: null, formulaUnit: null };
-      const entries: AuditEntry[] = [priceBookDeletedEntry(user.userId, existing)];
+      const entries: AuditEntry[] = [priceBookDeletedEntry(existing)];
       for (const dependent of dependents) {
-        const entry = priceBookUpdatedEntry(user.userId, dependent, { ...dependent, ...cleared });
+        const entry = priceBookFormulaClearedEntry(dependent, { ...dependent, ...cleared });
         if (entry) entries.push(entry);
       }
-      await this.audit.record(tx, entries);
+      await this.audit.record(tx, auditActorOf(actor), entries);
       await this.repository.delete(tx, id);
     });
     return { ok: true };
@@ -124,7 +157,13 @@ export class PriceBookService {
     assertBranchInScope(scope, branchId);
     const rows = await this.repository.findApplicable(branchId, user.userId, new Date());
     return rows.map((row) => ({
-      ...toPriceBookResponse(row, canEditBook(scope, row.branches.map((b) => b.branchId))),
+      ...toPriceBookResponse(
+        row,
+        canEditBook(
+          scope,
+          row.branches.map((b) => b.branchId),
+        ),
+      ),
       items: row.items.map((i) => ({
         priceBookId: row.id,
         drugId: i.productUnit.productId,
@@ -154,11 +193,15 @@ export class PriceBookService {
     if (!book) throw this.unavailable('Bảng giá không tồn tại');
     const now = Date.now();
     const reason =
-      book.status !== RecordStatus.ACTIVE ? 'đang ở trạng thái chưa áp dụng'
-      : now < book.startAt.getTime() || now > book.endAt.getTime() ? 'không còn trong thời gian hiệu lực'
-      : book.branches.length && !book.branches.some((b) => b.branchId === branchId) ? 'không áp dụng cho chi nhánh này'
-      : book.users.length && !book.users.some((u) => u.userId === userId) ? 'không áp dụng cho người bán này'
-      : null;
+      book.status !== RecordStatus.ACTIVE
+        ? 'đang ở trạng thái chưa áp dụng'
+        : now < book.startAt.getTime() || now > book.endAt.getTime()
+          ? 'không còn trong thời gian hiệu lực'
+          : book.branches.length && !book.branches.some((b) => b.branchId === branchId)
+            ? 'không áp dụng cho chi nhánh này'
+            : book.users.length && !book.users.some((u) => u.userId === userId)
+              ? 'không áp dụng cho người bán này'
+              : null;
     if (reason) throw this.unavailable(`Bảng giá "${book.name}" ${reason}`);
     return { id: book.id, name: book.name, outOfBookPolicy: book.outOfBookPolicy, items: book.items };
   }
@@ -167,7 +210,10 @@ export class PriceBookService {
   private async getEditable(id: string, scope: BranchScope): Promise<PriceBookRow> {
     const row = await this.repository.findById(id);
     if (!row) throw new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Bảng giá không tồn tại' });
-    assertCanEditBook(scope, row.branches.map((b) => b.branchId));
+    assertCanEditBook(
+      scope,
+      row.branches.map((b) => b.branchId),
+    );
     return row;
   }
 
@@ -194,7 +240,10 @@ export class PriceBookService {
         throw new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message: 'Không lấy chính bảng này làm giá gốc' });
       }
       if (!FIXED_BASES.has(formula.base) && !(await this.repository.findById(formula.base))) {
-        throw new ErrorException({ code: ErrorCode.INVALID_REFERENCE, message: 'Bảng giá gốc của công thức không tồn tại' });
+        throw new ErrorException({
+          code: ErrorCode.INVALID_REFERENCE,
+          message: 'Bảng giá gốc của công thức không tồn tại',
+        });
       }
     }
     if (await this.repository.findNameConflict(dto.name, selfId)) throw this.duplicateName();

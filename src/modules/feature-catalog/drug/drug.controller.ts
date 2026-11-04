@@ -1,9 +1,8 @@
 import { Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
-import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthzGuard } from '../../feature-auth/authz/guards/auth.guard';
-import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
 import { DrugService } from './drug.service';
@@ -47,7 +46,7 @@ export class DrugController {
       'cờ kê đơn của hàng hoá đã liên kết cập nhật theo danh mục. Chỉ một lần đồng bộ chạy tại một thời điểm (1608). ' +
       'Chuyển INACTIVE quá 10% thuốc đang hoạt động thì từ chối (1609) trừ khi `force=true`.',
   })
-  sync(@Query() query: DrugSyncQuery, @CurrentUser() user: JwtUser) {
-    return this.drugService.sync(user.userId, query.force ?? false);
+  sync(@Query() query: DrugSyncQuery, @CurrentActor() actor: RequestActor) {
+    return this.drugService.sync(actor, query.force ?? false);
   }
 }

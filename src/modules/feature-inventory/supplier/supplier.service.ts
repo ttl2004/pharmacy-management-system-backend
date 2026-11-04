@@ -1,11 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import { AuditAction, Prisma, RecordStatus, Supplier } from '@prisma/client';
+import { Prisma, RecordStatus, Supplier } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
+import { maskPhone } from 'src/common/utils/mask.util';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { diffFields, pickAuditFields } from 'src/providers/audit-log/audit-diff';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import type { AuditJson } from 'src/providers/audit-log/audit-log.types';
 import { AUDIT_ENTITY } from '../core/inventory.constants';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { CreateSupplierRequest, UpdateSupplierRequest } from './dtos/supplier.request';
@@ -26,6 +29,23 @@ const AUDITED_FIELDS = [
   'companyName',
   'idNumber',
 ] as const;
+
+/** Không bao giờ ghi SĐT đầy đủ vào nhật ký: che còn 4 số cuối. */
+function maskSnapshot(snapshot: Record<string, AuditJson>): Record<string, AuditJson> {
+  if (!('phone' in snapshot)) return snapshot;
+  return { ...snapshot, phone: maskPhone(snapshot.phone as string | null) };
+}
+
+/** Nhãn, phạm vi (danh mục toàn chuỗi → `[]`) và từ khoá tìm kiếm (mã + tên, D8) của một dòng NCC. */
+function auditBase(supplier: Pick<Supplier, 'id' | 'code' | 'name'>) {
+  return {
+    entityType: AUDIT_ENTITY.SUPPLIER,
+    entityId: supplier.id,
+    entityLabel: supplier.code,
+    branchIds: [],
+    searchTerms: [supplier.code, supplier.name],
+  };
+}
 
 /**
  * Nhà cung cấp là danh mục dùng chung toàn chuỗi (không có `branchId`): mọi vai trò kho đều đọc được, chỉ ADMIN
@@ -58,14 +78,11 @@ export class SupplierService {
           status: dto.status ?? RecordStatus.ACTIVE,
           createdBy: actor.user.userId,
         });
-        await this.audit.record(tx, [
+        await this.audit.record(tx, auditActorOf(actor), [
           {
-            actorId: actor.user.userId,
-            action: AuditAction.CREATE,
-            entityType: AUDIT_ENTITY.SUPPLIER,
-            entityId: created.id,
-            after: pickAuditFields(created, AUDITED_FIELDS),
-            ipAddress: actor.ip,
+            event: 'SUPPLIER.CREATED',
+            ...auditBase(created),
+            after: maskSnapshot(pickAuditFields(created, AUDITED_FIELDS)),
           },
         ]);
         return created;
@@ -98,14 +115,12 @@ export class SupplierService {
 
         const diff = diffFields(existing, changes, AUDITED_FIELDS);
         if (diff) {
-          await this.audit.record(tx, [
+          await this.audit.record(tx, auditActorOf(actor), [
             {
-              actorId: actor.user.userId,
-              action: diff.after.status !== undefined ? AuditAction.STATUS_CHANGE : AuditAction.UPDATE,
-              entityType: AUDIT_ENTITY.SUPPLIER,
-              entityId: id,
-              ...diff,
-              ipAddress: actor.ip,
+              event: diff.after.status !== undefined ? 'SUPPLIER.STATUS_CHANGED' : 'SUPPLIER.UPDATED',
+              ...auditBase(updated),
+              before: maskSnapshot(diff.before),
+              after: maskSnapshot(diff.after),
             },
           ]);
         }
@@ -130,14 +145,11 @@ export class SupplierService {
       }
 
       await this.suppliers.updateWith(tx, id, { isDeleted: true, updatedAt: new Date(), updatedBy: actor.user.userId });
-      await this.audit.record(tx, [
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId: actor.user.userId,
-          action: AuditAction.DELETE,
-          entityType: AUDIT_ENTITY.SUPPLIER,
-          entityId: id,
-          before: pickAuditFields(existing, AUDITED_FIELDS),
-          ipAddress: actor.ip,
+          event: 'SUPPLIER.DELETED',
+          ...auditBase(existing),
+          before: maskSnapshot(pickAuditFields(existing, AUDITED_FIELDS)),
         },
       ]);
     });

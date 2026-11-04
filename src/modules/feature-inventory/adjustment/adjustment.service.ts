@@ -410,7 +410,7 @@ export class AdjustmentService {
       if (head.type === AdjustmentType.RETURN_TO_SUPPLIER) {
         await this.returnMoney.lockSupplierOf(tx, id);
         // Dưới khoá NCC: nợ tại chi nhánh sau phiếu này không âm (hai phiếu cùng NCC không cùng lọt).
-        await this.returnMoney.assertDebtStaysNonNegative(tx, head);
+        await this.returnMoney.assertDebtStaysNonNegative(tx, id);
         // Trả theo phiếu nhập: kiểm lại trần SL / chi phí hoàn (phiếu trả khác có thể đã xác nhận sau lúc lưu nháp).
         if (head.goodsReceiptId) {
           await this.returnMoney.recheckOnConfirm(tx, id, head.goodsReceiptId, items, head.refundExpenses);

@@ -187,7 +187,7 @@ export class PurchaseReturnMoneyService {
         return [
           l.batch.id,
           {
-            returnPrice: l.item.returnPrice ?? l.batch.importPrice,
+            returnPrice: l.item.returnPrice ?? Math.min(l.batch.importPrice, cap),
             goodsReceiptItemId: l.item.goodsReceiptItemId ?? null,
           },
         ] as const;
@@ -238,13 +238,15 @@ export class PurchaseReturnMoneyService {
   /**
    * Công nợ NCC tại chi nhánh không được âm sau khi phiếu trả này có hiệu lực. GỌI SAU KHI phiếu đã được chiếm
    * (CONFIRMED trong tx) và đã giữ khoá NCC: `debtOf` đã tính phiếu này nên chỉ cần kiểm kết quả ≥ 0; khoá NCC làm hai
-   * phiếu cùng NCC xếp hàng, phiếu sau thấy phiếu trước đã commit. Phiếu không làm giảm nợ (NCC hoàn đủ tiền) thì bỏ qua.
+   * phiếu cùng NCC xếp hàng, phiếu sau thấy phiếu trước đã commit. Số tiền + NCC được ĐỌC LẠI trong tx (không dùng
+   * bản đọc trước khi chiếm — sửa nháp song song có thể đã đổi). Phiếu không làm giảm nợ (NCC hoàn đủ tiền) thì bỏ qua.
    */
-  async assertDebtStaysNonNegative(
-    tx: Prisma.TransactionClient,
-    head: { supplierId: string | null; branchId: string; totalAmount: bigint; supplierPaid: bigint },
-  ): Promise<void> {
-    if (!head.supplierId || head.totalAmount - head.supplierPaid <= 0n) return;
+  async assertDebtStaysNonNegative(tx: Prisma.TransactionClient, adjustmentId: string): Promise<void> {
+    const head = await tx.stockAdjustment.findUnique({
+      where: { id: adjustmentId },
+      select: { supplierId: true, branchId: true, totalAmount: true, supplierPaid: true },
+    });
+    if (!head?.supplierId || head.totalAmount - head.supplierPaid <= 0n) return;
     const debt = await this.debts.debtOf(head.supplierId, head.branchId, tx);
     if (debt.scoped < 0n) throw badRequest('Trả vượt công nợ hiện có với NCC');
   }

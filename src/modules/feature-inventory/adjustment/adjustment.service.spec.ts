@@ -378,10 +378,7 @@ describe('AdjustmentService — nhật ký theo loại phiếu', () => {
     expect(returnMoney.lockSupplierOf.mock.invocationCallOrder[0]).toBeLessThan(
       returnMoney.assertDebtStaysNonNegative.mock.invocationCallOrder[0],
     );
-    expect(returnMoney.assertDebtStaysNonNegative).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ supplierId: 's1', branchId: A, totalAmount: 45_000n, supplierPaid: 0n }),
-    );
+    expect(returnMoney.assertDebtStaysNonNegative).toHaveBeenCalledWith(expect.anything(), 'adj1');
   });
 
   it('confirm kiểm kê có chênh lệch → STOCK_ADJUSTMENT.CONFIRMED severity 1; khớp sổ → không nâng', async () => {

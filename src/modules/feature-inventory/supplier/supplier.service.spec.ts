@@ -146,4 +146,51 @@ describe('SupplierService', () => {
       errorCode: ErrorCode.RECORD_NOT_FOUND,
     });
   });
+
+  describe('không ghi CCCD / email thô', () => {
+    const ID = '079123456789';
+    const MAIL = 'an.nguyen@nhacungcap.vn';
+    const entriesOf = (audit: { record: jest.Mock }) => (audit.record.mock.calls[0] as unknown[])[2] as unknown[];
+
+    it('SUPPLIER.CREATED: bỏ idNumber (ghi tên trường), che email', async () => {
+      const { service, audit } = makeService();
+      await service.create({ code: 'NCC002', name: 'NCC', phone: '0901234567', email: MAIL, idNumber: ID }, ADMIN);
+      const json = JSON.stringify(entriesOf(audit));
+      expect(json).not.toContain(ID);
+      expect(json).not.toContain(MAIL);
+      expect(entriesOf(audit)[0]).toMatchObject({
+        after: { email: 'a***@nhacungcap.vn' },
+        metadata: { changedFields: ['idNumber'] },
+      });
+    });
+
+    it('SUPPLIER.UPDATED: đổi idNumber/email chỉ để lại tên trường và email đã che', async () => {
+      const { service, audit } = makeService({
+        findActiveWith: jest.fn().mockResolvedValue({ ...EXISTING, email: 'cu@x.vn', idNumber: '011111111111' }),
+      });
+      await service.update('sup-1', { idNumber: ID, email: MAIL }, ADMIN);
+      const json = JSON.stringify(entriesOf(audit));
+      for (const raw of [ID, '011111111111', MAIL, 'cu@x.vn']) expect(json).not.toContain(raw);
+      expect(entriesOf(audit)[0]).toMatchObject({
+        event: 'SUPPLIER.UPDATED',
+        metadata: { changedFields: ['idNumber'] },
+      });
+    });
+
+    it('SUPPLIER.UPDATED: không đổi idNumber thì không có metadata', async () => {
+      const { service, audit } = makeService();
+      await service.update('sup-1', { name: 'Tên mới' }, ADMIN);
+      expect(entriesOf(audit)[0]).not.toHaveProperty('metadata');
+    });
+
+    it('SUPPLIER.DELETED: ảnh chụp trước không chứa idNumber/email thô', async () => {
+      const { service, audit } = makeService({
+        findActiveWith: jest.fn().mockResolvedValue({ ...EXISTING, email: MAIL, idNumber: ID }),
+      });
+      await service.remove('sup-1', ADMIN);
+      const json = JSON.stringify(entriesOf(audit));
+      expect(json).not.toContain(ID);
+      expect(json).not.toContain(MAIL);
+    });
+  });
 });

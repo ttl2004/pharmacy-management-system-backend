@@ -4,7 +4,7 @@ import type { RequestActor } from 'src/common/decorators/current-actor.decorator
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
-import { maskPhone } from 'src/common/utils/mask.util';
+import { maskEmail, maskPhone } from 'src/common/utils/mask.util';
 import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { diffFields, pickAuditFields } from 'src/providers/audit-log/audit-diff';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
@@ -30,10 +30,29 @@ const AUDITED_FIELDS = [
   'idNumber',
 ] as const;
 
-/** Không bao giờ ghi SĐT đầy đủ vào nhật ký: che còn 4 số cuối. */
-function maskSnapshot(snapshot: Record<string, AuditJson>): Record<string, AuditJson> {
-  if (!('phone' in snapshot)) return snapshot;
-  return { ...snapshot, phone: maskPhone(snapshot.phone as string | null) };
+/**
+ * Dữ liệu định danh không bao giờ vào nhật ký (bản ghi nhật ký là vĩnh viễn): SĐT che còn 4 số cuối, email che theo
+ * `maskEmail`, CCCD (`idNumber`) bỏ hẳn giá trị — chỉ ghi tên trường vào `metadata.changedFields` khi nó có/đổi.
+ */
+function sanitizeSnapshot(snapshot: Record<string, AuditJson>): Record<string, AuditJson> {
+  const rest = { ...snapshot };
+  delete rest.idNumber;
+  if ('phone' in rest) rest.phone = maskPhone(rest.phone as string | null);
+  if ('email' in rest) rest.email = maskEmail(rest.email as string | null);
+  return rest;
+}
+
+/** Che `before`/`after`; `idNumberTouched` → thêm `metadata.changedFields: ['idNumber']`. */
+function sanitizeEntry(
+  before: Record<string, AuditJson> | null,
+  after: Record<string, AuditJson> | null,
+  idNumberTouched: boolean,
+) {
+  return {
+    ...(before ? { before: sanitizeSnapshot(before) } : {}),
+    ...(after ? { after: sanitizeSnapshot(after) } : {}),
+    ...(idNumberTouched ? { metadata: { changedFields: ['idNumber'] } } : {}),
+  };
 }
 
 /** Nhãn, phạm vi (danh mục toàn chuỗi → `[]`) và từ khoá tìm kiếm (mã + tên, D8) của một dòng NCC. */
@@ -82,7 +101,7 @@ export class SupplierService {
           {
             event: 'SUPPLIER.CREATED',
             ...auditBase(created),
-            after: maskSnapshot(pickAuditFields(created, AUDITED_FIELDS)),
+            ...sanitizeEntry(null, pickAuditFields(created, AUDITED_FIELDS), created.idNumber != null),
           },
         ]);
         return created;
@@ -119,8 +138,7 @@ export class SupplierService {
             {
               event: diff.after.status !== undefined ? 'SUPPLIER.STATUS_CHANGED' : 'SUPPLIER.UPDATED',
               ...auditBase(updated),
-              before: maskSnapshot(diff.before),
-              after: maskSnapshot(diff.after),
+              ...sanitizeEntry(diff.before, diff.after, 'idNumber' in diff.after),
             },
           ]);
         }
@@ -149,7 +167,7 @@ export class SupplierService {
         {
           event: 'SUPPLIER.DELETED',
           ...auditBase(existing),
-          before: maskSnapshot(pickAuditFields(existing, AUDITED_FIELDS)),
+          ...sanitizeEntry(pickAuditFields(existing, AUDITED_FIELDS), null, existing.idNumber != null),
         },
       ]);
     });

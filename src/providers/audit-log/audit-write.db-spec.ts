@@ -16,6 +16,8 @@ import { GoodsReceiptDraftBuilder } from 'src/modules/feature-inventory/goods-re
 import { GoodsReceiptLocker } from 'src/modules/feature-inventory/goods-receipt/goods-receipt-locker';
 import { GoodsReceiptService } from 'src/modules/feature-inventory/goods-receipt/goods-receipt.service';
 import { GoodsReceiptRepository } from 'src/modules/feature-inventory/goods-receipt/repositories/goods-receipt.repository';
+import { SupplierRepository } from 'src/modules/feature-inventory/supplier/repositories/supplier.repository';
+import { SupplierService } from 'src/modules/feature-inventory/supplier/supplier.service';
 import { SupplierDebtRepository } from 'src/modules/feature-inventory/supplier-debt/repositories/supplier-debt.repository';
 import { SupplierPaymentRepository } from 'src/modules/feature-inventory/supplier-debt/repositories/supplier-payment.repository';
 import { SupplierPaymentWriter } from 'src/modules/feature-inventory/supplier-debt/supplier-payment.writer';
@@ -31,6 +33,7 @@ describe('audit ghi thật (db)', () => {
   let prisma: PrismaClient;
   let receipts: GoodsReceiptService;
   let audit: AuditLogService;
+  let suppliers: SupplierService;
 
   beforeAll(async () => {
     prisma = await createTestPrisma();
@@ -52,10 +55,13 @@ describe('audit ghi thật (db)', () => {
         GoodsReceiptLocker,
         GoodsReceiptDraftBuilder,
         GoodsReceiptService,
+        SupplierRepository,
+        SupplierService,
       ],
     }).compile();
     receipts = moduleRef.get(GoodsReceiptService);
     audit = moduleRef.get(AuditLogService);
+    suppliers = moduleRef.get(SupplierService);
   });
 
   afterAll(async () => {
@@ -160,5 +166,32 @@ describe('audit ghi thật (db)', () => {
       { timeout: 60_000 },
     );
     expect(await prisma.auditLog.count({ where: { event: 'BATCH.STATUS_CHANGED' } })).toBe(3500);
+  });
+
+  it('NCC có SĐT/CCCD/email: không dòng audit mới nào chứa SĐT đầy đủ, CCCD hay email thô', async () => {
+    const role = await prisma.role.create({ data: { code: 'ADMIN', name: 'Quản trị', level: 90 } });
+    const user = await prisma.user.create({ data: { fullName: 'Admin', roleId: role.id } });
+    const actor = {
+      user: { userId: user.id, role: AuthRole.ADMIN, branchId: null, email: null, sid: 's1' },
+      ip: '10.0.0.1',
+      userAgent: 'jest',
+      requestId: randomUUID(),
+    } as unknown as RequestActor;
+    const phone = '0912345678';
+    const idNumber = '079123456789';
+    const email = 'an.nguyen@nhacungcap.vn';
+
+    const created = await suppliers.create({ code: 'NCC77', name: 'NCC bảo mật', phone, idNumber, email }, actor);
+    await suppliers.update(created.id, { idNumber: '079987654321', email: 'moi@nhacungcap.vn' }, actor);
+    await suppliers.remove(created.id, actor);
+
+    const rows = await prisma.auditLog.findMany({ where: { entityId: created.id } });
+    expect(rows.map((row) => row.event)).toEqual(
+      expect.arrayContaining(['SUPPLIER.CREATED', 'SUPPLIER.UPDATED', 'SUPPLIER.DELETED']),
+    );
+    const dump = JSON.stringify(rows, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
+    for (const raw of [phone, idNumber, '079987654321', email, 'moi@nhacungcap.vn']) {
+      expect(dump).not.toContain(raw);
+    }
   });
 });

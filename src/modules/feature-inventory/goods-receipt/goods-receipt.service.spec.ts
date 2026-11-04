@@ -62,7 +62,7 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     ...overrides,
   };
   const intake = {
-    intake: jest.fn().mockResolvedValue({ batchIdByRefItem: new Map(), movements: [] }),
+    intake: jest.fn().mockResolvedValue({ batchIdByRefItem: new Map(), movements: [], auditEntries: [] }),
     withdraw: jest.fn().mockResolvedValue([]),
   };
   const transactions = { run: jest.fn((work: (ctx: unknown) => unknown) => work({ tx: {}, afterCommit: jest.fn() })) };
@@ -71,7 +71,10 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
   const audit = { record: jest.fn() };
   // Khoá NCC khi huỷ phiếu đã xác nhận; nợ chi nhánh 0 nên kiểm "không âm" luôn qua.
   const debts = { lockSupplier: jest.fn(), debtOf: jest.fn().mockResolvedValue({ scoped: 0n, chain: 0n }) };
-  const supplierPayments = { createForReceipt: jest.fn(), releaseForReceiptCancel: jest.fn() };
+  const supplierPayments = {
+    createForReceipt: jest.fn().mockResolvedValue({ id: 'pay1', code: 'TTPN000001', amount: 0n, auditEntries: [] }),
+    releaseForReceiptCancel: jest.fn().mockResolvedValue([]),
+  };
   // Locker và draftBuilder dùng thật trên repository giả: giữ nguyên kiểm tra nghiệp vụ của luồng lập/xác nhận.
   const locker = new GoodsReceiptLocker(repository as never, debts as never);
   const draftBuilder = new GoodsReceiptDraftBuilder(repository as never);
@@ -87,8 +90,10 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     supplierPayments as never,
     audit as never,
   );
-  return { service, repository, ledger, audit, intake };
+  return { service, repository, ledger, audit, intake, supplierPayments };
 }
+
+type RecordCall = [unknown, Record<string, unknown>, Record<string, unknown>[]];
 
 describe('GoodsReceiptService — lập phiếu', () => {
   it('PM không gửi branchId → phiếu thuộc chi nhánh của PM; server tự tính quy đổi và tiền', async () => {
@@ -105,6 +110,28 @@ describe('GoodsReceiptService — lập phiếu', () => {
     });
     const [, items] = repository.createItems.mock.calls[0] as [unknown, Record<string, unknown>[]];
     expect(items[0]).toMatchObject({ conversionRate: 10, baseQuantity: 20, totalPrice: 20_000n, receiptId: 'r1' });
+  });
+
+  it('ghi GOODS_RECEIPT.CREATED: branchIds [chi nhánh phiếu], nhãn + từ khoá = mã phiếu, amount = totalAmount (bigint)', async () => {
+    const { service, audit } = makeService();
+
+    await service.create({ supplierId: 's1', items: [line()] } as never, PM_A);
+
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, auditActor, entries] = audit.record.mock.calls[0] as RecordCall;
+    expect(auditActor).toMatchObject({ userId: PM_A.user.userId, type: 'USER', ip: '127.0.0.1' });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      event: 'GOODS_RECEIPT.CREATED',
+      entityType: 'goods_receipts',
+      entityId: 'r1',
+      entityLabel: 'PN000001',
+      branchIds: [BRANCH_A],
+      searchTerms: ['PN000001'],
+      amount: 20_000n,
+      after: { code: 'PN000001', totalAmount: '20000' },
+    });
+    expect(entries[0]).not.toHaveProperty('actorId');
   });
 
   it('PM gửi chi nhánh khác → 1506, không ghi gì', async () => {
@@ -160,6 +187,7 @@ describe('GoodsReceiptService — lập phiếu', () => {
 describe('GoodsReceiptService — xác nhận', () => {
   const head = {
     id: 'r1',
+    code: 'PN000001',
     status: ReceiptStatus.DRAFT,
     branchId: BRANCH_A,
     supplierId: 's1',
@@ -213,6 +241,48 @@ describe('GoodsReceiptService — xác nhận', () => {
     expect(request.type).toBe('IMPORT');
     expect(request.lines[0]).toMatchObject({ quantity: 24, unitCost: 833, supplierId: 's1', goodsReceiptItemId: 'i1' });
     expect(result.warnings[0]).toContain('hệ số quy đổi đã đổi');
+  });
+
+  it('ghi GOODS_RECEIPT.CONFIRMED (amount = totalAmount) gom chung entry của phiếu chi tự sinh và lô thừa hưởng thu hồi — 1 lần record', async () => {
+    const paymentEntry = { event: 'SUPPLIER_PAYMENT.CREATED', entityId: 'pay1', branchIds: [BRANCH_A] };
+    const recallEntry = { event: 'BATCH.RECALLED', entityId: 'b-new', branchIds: [BRANCH_A], reason: 'QĐ' };
+    const { service, audit, intake, supplierPayments } = makeService({
+      findStatus: jest.fn().mockResolvedValue({ ...head, totalAmount: 20_000n, paidAmount: 5_000n }),
+      findItemsForConfirm: jest.fn().mockResolvedValue([confirmItem]),
+    });
+    supplierPayments.createForReceipt.mockResolvedValue({
+      id: 'pay1',
+      code: 'TTPN000001',
+      amount: 5_000n,
+      auditEntries: [paymentEntry],
+    });
+    intake.intake.mockResolvedValue({ batchIdByRefItem: new Map(), movements: [], auditEntries: [recallEntry] });
+
+    await service.confirm('r1', PM_A);
+
+    expect(supplierPayments.createForReceipt).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ id: 'r1', code: 'PN000001' }),
+      5_000n,
+      expect.anything(),
+      { actorId: PM_A.user.userId },
+    );
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+    expect(entries).toEqual([
+      paymentEntry,
+      recallEntry,
+      expect.objectContaining({
+        event: 'GOODS_RECEIPT.CONFIRMED',
+        entityId: 'r1',
+        entityLabel: 'PN000001',
+        branchIds: [BRANCH_A],
+        searchTerms: ['PN000001'],
+        amount: 20_000n,
+        before: { status: 'DRAFT' },
+        after: { status: 'CONFIRMED', lines: 1 },
+      }),
+    ]);
   });
 
   it('lô hết hạn tính tới hôm xác nhận → 1702, không đưa hàng vào kho', async () => {
@@ -275,13 +345,94 @@ describe('GoodsReceiptService — huỷ', () => {
     expect(ledger.apply).not.toHaveBeenCalled();
   });
 
-  it('phiếu nháp: chỉ đổi trạng thái, có lý do trong nhật ký', async () => {
+  it('phiếu nháp: chỉ đổi trạng thái, ghi GOODS_RECEIPT.CANCELLED có lý do', async () => {
     const { service, ledger, audit } = makeService({
-      findStatus: jest.fn().mockResolvedValue({ id: 'r1', status: ReceiptStatus.DRAFT, branchId: BRANCH_A }),
+      findStatus: jest.fn().mockResolvedValue({
+        id: 'r1',
+        code: 'PN000001',
+        status: ReceiptStatus.DRAFT,
+        branchId: BRANCH_A,
+        totalAmount: 20_000n,
+      }),
     });
     await service.cancel('r1', { reason: 'Không nhập nữa' }, PM_A);
     expect(ledger.apply).not.toHaveBeenCalled();
-    const [, entries] = audit.record.mock.calls[0] as [unknown, { reason: string }[]];
-    expect(entries[0].reason).toBe('Không nhập nữa');
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'GOODS_RECEIPT.CANCELLED',
+        entityLabel: 'PN000001',
+        branchIds: [BRANCH_A],
+        amount: 20_000n,
+        reason: 'Không nhập nữa',
+        before: { status: 'DRAFT' },
+        after: { status: 'CANCELLED' },
+      }),
+    ]);
+  });
+
+  it('phiếu đã xác nhận: entry huỷ phiếu chi tự sinh đi chung 1 lần record với GOODS_RECEIPT.CANCELLED', async () => {
+    const released = [{ event: 'SUPPLIER_PAYMENT.CANCELLED', entityId: 'pay1', branchIds: [BRANCH_A] }];
+    const { service, audit, supplierPayments } = makeService({
+      findStatus: jest.fn().mockResolvedValue({
+        id: 'r1',
+        code: 'PN000001',
+        status: ReceiptStatus.CONFIRMED,
+        branchId: BRANCH_A,
+        supplierId: 's1',
+        totalAmount: 20_000n,
+      }),
+      findImportMovements: jest.fn().mockResolvedValue([]),
+    });
+    supplierPayments.releaseForReceiptCancel.mockResolvedValue(released);
+
+    await service.cancel('r1', { reason: 'Sai NCC' }, PM_A);
+
+    expect(supplierPayments.releaseForReceiptCancel).toHaveBeenCalledWith({}, expect.objectContaining({ id: 'r1' }), {
+      actorId: PM_A.user.userId,
+    });
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+    expect(entries).toEqual([
+      released[0],
+      expect.objectContaining({ event: 'GOODS_RECEIPT.CANCELLED', reason: 'Sai NCC', before: { status: 'CONFIRMED' } }),
+    ]);
+  });
+});
+
+describe('GoodsReceiptService — sửa nháp', () => {
+  it('ghi GOODS_RECEIPT.UPDATED, amount = totalAmount mới, before/after tiền là chuỗi', async () => {
+    const { service, audit } = makeService({
+      findStatus: jest.fn().mockResolvedValue({
+        id: 'r1',
+        code: 'PN000001',
+        status: ReceiptStatus.DRAFT,
+        branchId: BRANCH_A,
+        supplierId: 's1',
+        receiverId: null,
+        paymentMethod: null,
+        discountAmount: 0n,
+        supplierExpenseAmount: 0n,
+        otherExpenseAmount: 0n,
+        totalAmount: 10_000n,
+        paidAmount: 0n,
+      }),
+      softDeleteItems: jest.fn().mockResolvedValue({ count: 1 }),
+    });
+
+    await service.update('r1', { supplierId: 's1', items: [line()] } as never, PM_A);
+
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+    expect(entries[0]).toMatchObject({
+      event: 'GOODS_RECEIPT.UPDATED',
+      entityLabel: 'PN000001',
+      branchIds: [BRANCH_A],
+      searchTerms: ['PN000001'],
+      amount: 20_000n,
+      before: { totalAmount: '10000', lines: 1 },
+      after: { totalAmount: '20000', lines: 1 },
+    });
   });
 });

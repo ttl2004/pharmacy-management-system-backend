@@ -81,26 +81,57 @@ describe('BatchStatusService.setStatus', () => {
       blockedBy: PM_A.user.userId,
     });
     expect(result).toMatchObject({ id: 'b1', status: 'RECALLED', blockedReason: 'QĐ 123/QLD' });
-    const [, entries] = audit.record.mock.calls[0] as [unknown, Record<string, unknown>[]];
-    expect(entries[0]).toMatchObject({
-      action: 'STATUS_CHANGE',
-      reason: 'QĐ 123/QLD',
-      before: { status: 'AVAILABLE' },
-    });
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, auditActor, entries] = audit.record.mock.calls[0] as [
+      unknown,
+      Record<string, unknown>,
+      Record<string, unknown>[],
+    ];
+    expect(auditActor).toMatchObject({ userId: PM_A.user.userId, ip: '1.1.1.1' });
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'BATCH.RECALLED',
+        entityType: 'stock_batches',
+        entityId: 'b1',
+        entityLabel: 'L1',
+        branchIds: [A],
+        reason: 'QĐ 123/QLD',
+        before: { status: 'AVAILABLE' },
+        after: { status: 'RECALLED' },
+      }),
+    ]);
     expect(emitted).toHaveLength(0);
     await commit();
     expect(emitted[0]).toMatchObject({ branchId: A, productIds: ['p1'], refType: null });
   });
 
-  it('mở khoá: xoá lý do và người khoá (lịch sử nằm ở nhật ký)', async () => {
+  it('mở khoá: xoá lý do và người khoá (lịch sử nằm ở nhật ký); ghi BATCH.STATUS_CHANGED', async () => {
     const updateMany = jest.fn().mockResolvedValue({ count: 1 });
-    const { service } = makeService({
+    const { service, audit } = makeService({
       findFirst: jest.fn().mockResolvedValue(stored(BatchStatus.QUARANTINE)),
       updateMany,
     });
     await service.setStatus('b1', { status: BatchStatus.AVAILABLE }, PM_A);
     const [reopened] = updateMany.mock.calls[0] as [{ data: Record<string, unknown> }];
     expect(reopened.data).toMatchObject({ blockedReason: null, blockedAt: null, blockedBy: null });
+    const [, , entries] = audit.record.mock.calls[0] as [unknown, unknown, Record<string, unknown>[]];
+    expect(entries[0]).toMatchObject({
+      event: 'BATCH.STATUS_CHANGED',
+      entityLabel: 'L1',
+      branchIds: [A],
+      before: { status: 'QUARANTINE' },
+      after: { status: 'AVAILABLE' },
+    });
+  });
+
+  it('cách ly: BATCH.STATUS_CHANGED kèm lý do', async () => {
+    const { service, audit } = makeService({
+      findFirst: jest.fn().mockResolvedValue(stored(BatchStatus.AVAILABLE)),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    });
+    await service.setStatus('b1', { status: BatchStatus.QUARANTINE, reason: 'nghi hỏng' }, PM_A);
+    const [, , entries] = audit.record.mock.calls[0] as [unknown, unknown, Record<string, unknown>[]];
+    expect(entries[0]).toMatchObject({ event: 'BATCH.STATUS_CHANGED', reason: 'nghi hỏng' });
   });
 
   it.each([BatchStatus.AVAILABLE, BatchStatus.QUARANTINE])(
@@ -173,8 +204,54 @@ describe('BatchStatusService.recall', () => {
     expect(batches.lockBatchNumbers.mock.invocationCallOrder[0]).toBeLessThan(
       batches.lockByBatchNumber.mock.invocationCallOrder[0],
     );
-    const [, entries] = audit.record.mock.calls[0] as [unknown, unknown[]];
+    const [, , entries] = audit.record.mock.calls[0] as [unknown, unknown, unknown[]];
     expect(entries).toHaveLength(2);
+  });
+
+  it('recall theo số lô ghi BATCH.RECALLED, severity 2, mỗi lô một entry, gom 1 lần record', async () => {
+    const B = '22222222-2222-4222-8222-222222222222';
+    const { service, audit } = makeService({ updateMany: jest.fn().mockResolvedValue({ count: 2 }) }, [
+      { id: 'b1', branchId: A, status: BatchStatus.AVAILABLE },
+      { id: 'b2', branchId: B, status: BatchStatus.QUARANTINE },
+    ]);
+
+    await service.recall({ ...KEY, status: BatchStatus.RECALLED, reason: 'QĐ 77/QLD' }, ADMIN);
+
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, auditActor, entries] = audit.record.mock.calls[0] as [
+      unknown,
+      Record<string, unknown>,
+      Record<string, unknown>[],
+    ];
+    expect(auditActor).toMatchObject({ userId: ADMIN.user.userId, type: 'USER' });
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'BATCH.RECALLED',
+        entityId: 'b1',
+        entityLabel: 'L1',
+        branchIds: [A],
+        reason: 'QĐ 77/QLD',
+        severity: 2,
+        before: { status: 'AVAILABLE' },
+        after: { status: 'RECALLED' },
+      }),
+      expect.objectContaining({
+        event: 'BATCH.RECALLED',
+        entityId: 'b2',
+        branchIds: [B],
+        severity: 2,
+        before: { status: 'QUARANTINE' },
+      }),
+    ]);
+  });
+
+  it('cách ly theo số lô ghi BATCH.STATUS_CHANGED', async () => {
+    const { service, audit } = makeService({ updateMany: jest.fn().mockResolvedValue({ count: 1 }) }, [
+      { id: 'b1', branchId: A, status: BatchStatus.AVAILABLE },
+    ]);
+    await service.recall({ ...KEY, status: BatchStatus.QUARANTINE, reason: 'nghi hỏng' }, PM_A);
+    const [, , entries] = audit.record.mock.calls[0] as [unknown, unknown, Record<string, unknown>[]];
+    expect(entries[0]).toMatchObject({ event: 'BATCH.STATUS_CHANGED', reason: 'nghi hỏng', branchIds: [A] });
   });
 
   it('cách ly (QUARANTINE) không hạ cấp lô đã bị thu hồi (RECALLED) — giữ quyết định thu hồi', async () => {

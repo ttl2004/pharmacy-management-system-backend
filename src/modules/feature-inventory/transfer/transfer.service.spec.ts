@@ -61,7 +61,9 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
   const transactions = { run: jest.fn((work: (ctx: unknown) => unknown) => work({ tx: {}, afterCommit: jest.fn() })) };
   const ledger = { apply: jest.fn().mockResolvedValue([]), lockBatches: jest.fn().mockResolvedValue([batch()]) };
   const intake = {
-    intake: jest.fn().mockResolvedValue({ batchIdByRefItem: new Map([['i1', 'b-dest']]), movements: [] }),
+    intake: jest
+      .fn()
+      .mockResolvedValue({ batchIdByRefItem: new Map([['i1', 'b-dest']]), movements: [], auditEntries: [] }),
     returnToBatches: jest.fn().mockResolvedValue([]),
   };
   const codes = { next: jest.fn().mockResolvedValue('DC000001') };
@@ -74,10 +76,19 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     codes as never,
     audit as never,
   );
-  return { service, repository, ledger, intake };
+  return { service, repository, ledger, intake, audit };
 }
 
-const pendingHead = { id: 't1', status: TransferStatus.PENDING, fromBranchId: A, toBranchId: B };
+type RecordCall = [unknown, Record<string, unknown>, Record<string, unknown>[]];
+
+const pendingHead = {
+  id: 't1',
+  code: 'DC000001',
+  status: TransferStatus.PENDING,
+  fromBranchId: A,
+  toBranchId: B,
+  note: 'Bổ sung hàng cho chi nhánh B',
+};
 const transitHead = { ...pendingHead, status: TransferStatus.IN_TRANSIT };
 
 describe('transferWhere — phạm vi hai chi nhánh', () => {
@@ -94,7 +105,7 @@ describe('TransferService — lập phiếu', () => {
   it('cùng chi nhánh → 1705', async () => {
     const { service } = makeService();
     await expect(
-      service.create({ toBranchId: A, items: [{ batchId: 'b1', quantity: 1 }] }, PM_A),
+      service.create({ toBranchId: A, note: 'x', items: [{ batchId: 'b1', quantity: 1 }] }, PM_A),
     ).rejects.toMatchObject({
       errorCode: ErrorCode.TRANSFER_SAME_BRANCH,
     });
@@ -103,7 +114,7 @@ describe('TransferService — lập phiếu', () => {
   it('lô không thuộc chi nhánh gửi → 1602', async () => {
     const { service } = makeService({ findBatches: jest.fn().mockResolvedValue([batch({ branchId: B })]) });
     await expect(
-      service.create({ toBranchId: B, items: [{ batchId: 'b1', quantity: 1 }] }, PM_A),
+      service.create({ toBranchId: B, note: 'x', items: [{ batchId: 'b1', quantity: 1 }] }, PM_A),
     ).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_REFERENCE,
     });
@@ -114,13 +125,13 @@ describe('TransferService — lập phiếu', () => {
       findBatches: jest.fn().mockResolvedValue([batch({ status: BatchStatus.RECALLED })]),
     });
     await expect(
-      recalled.service.create({ toBranchId: B, items: [{ batchId: 'b1', quantity: 1 }] }, PM_A),
+      recalled.service.create({ toBranchId: B, note: 'x', items: [{ batchId: 'b1', quantity: 1 }] }, PM_A),
     ).rejects.toMatchObject({
       errorCode: ErrorCode.BATCH_NOT_AVAILABLE,
     });
     const short = makeService({ findBatches: jest.fn().mockResolvedValue([batch({ reservedQuantity: 95 })]) });
     await expect(
-      short.service.create({ toBranchId: B, items: [{ batchId: 'b1', quantity: 10 }] }, PM_A),
+      short.service.create({ toBranchId: B, note: 'x', items: [{ batchId: 'b1', quantity: 10 }] }, PM_A),
     ).rejects.toMatchObject({
       errorCode: ErrorCode.INSUFFICIENT_STOCK,
     });
@@ -134,7 +145,7 @@ describe('TransferService — lập phiếu', () => {
       ]),
     });
     await expect(
-      service.create({ toBranchId: B, items: [{ batchId: 'b1', quantity: 1 }] }, PM_A),
+      service.create({ toBranchId: B, note: 'x', items: [{ batchId: 'b1', quantity: 1 }] }, PM_A),
     ).rejects.toMatchObject({
       errorCode: ErrorCode.BRANCH_INACTIVE,
     });
@@ -230,5 +241,162 @@ describe('TransferService — xuất/nhận/huỷ theo đúng phía', () => {
     await expect(service.cancel('t1', { reason: 'x' }, PM_A)).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_DOCUMENT_STATE,
     });
+  });
+});
+
+describe('TransferService — nhật ký', () => {
+  it('create ghi TRANSFER.CREATED, branchIds [from,to], reason = note', async () => {
+    const { service, audit } = makeService();
+    await service.create(
+      { toBranchId: B, note: 'Bổ sung hàng cho chi nhánh B', items: [{ batchId: 'b1', quantity: 5 }] },
+      PM_A,
+    );
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, auditActor, entries] = audit.record.mock.calls[0] as RecordCall;
+    expect(auditActor).toMatchObject({ userId: PM_A.user.userId, type: 'USER' });
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'TRANSFER.CREATED',
+        entityType: 'stock_transfers',
+        entityId: 't1',
+        entityLabel: 'DC000001',
+        branchIds: [A, B],
+        searchTerms: ['DC000001'],
+        reason: 'Bổ sung hàng cho chi nhánh B',
+        after: { code: 'DC000001', fromBranchId: A, toBranchId: B, lines: 1 },
+      }),
+    ]);
+  });
+
+  it('update đổi chi nhánh nhận: TRANSFER.UPDATED, branchIds gồm cả chi nhánh nhận cũ', async () => {
+    const C = '33333333-3333-4333-8333-333333333333';
+    const { service, audit } = makeService({
+      findHead: jest.fn().mockResolvedValue(pendingHead),
+      replaceItems: jest.fn(),
+    });
+    await service.update('t1', { toBranchId: C, note: 'Đổi nơi nhận', items: [{ batchId: 'b1', quantity: 5 }] }, PM_A);
+    const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'TRANSFER.UPDATED',
+        entityLabel: 'DC000001',
+        branchIds: [A, C, B],
+        reason: 'Đổi nơi nhận',
+        before: { toBranchId: B, note: 'Bổ sung hàng cho chi nhánh B' },
+        after: { toBranchId: C, note: 'Đổi nơi nhận', lines: 1 },
+      }),
+    ]);
+  });
+
+  it('ship ghi TRANSFER.SHIPPED với reason = head.note', async () => {
+    const { service, audit } = makeService({ findHead: jest.fn().mockResolvedValue(pendingHead) });
+    await service.ship('t1', PM_A);
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'TRANSFER.SHIPPED',
+        entityLabel: 'DC000001',
+        branchIds: [A, B],
+        reason: 'Bổ sung hàng cho chi nhánh B',
+        before: { status: 'PENDING' },
+        after: { status: 'IN_TRANSIT' },
+      }),
+    ]);
+  });
+
+  it('ship phiếu cũ chưa có lý do chuyển (note rỗng) → 1002, không trừ kho', async () => {
+    const { service, ledger } = makeService({ findHead: jest.fn().mockResolvedValue({ ...pendingHead, note: null }) });
+    await expect(service.ship('t1', PM_A)).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+    expect(ledger.apply).not.toHaveBeenCalled();
+  });
+
+  it('receive đủ ghi TRANSFER.RECEIVED, gom chung entry thừa hưởng thu hồi trong 1 lần record', async () => {
+    const recalled = { event: 'BATCH.RECALLED', entityId: 'b-dest', branchIds: [B], reason: 'QĐ' };
+    const { service, audit, intake } = makeService({ findHead: jest.fn().mockResolvedValue(transitHead) });
+    intake.intake.mockResolvedValue({
+      batchIdByRefItem: new Map([['i1', 'b-dest']]),
+      movements: [],
+      auditEntries: [recalled],
+    });
+    await service.receive('t1', PM_B);
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+    expect(entries).toEqual([
+      recalled,
+      expect.objectContaining({
+        event: 'TRANSFER.RECEIVED',
+        branchIds: [A, B],
+        before: { status: 'IN_TRANSIT' },
+        after: { status: 'RECEIVED' },
+      }),
+    ]);
+  });
+
+  it('receive thiếu ghi TRANSFER.RECEIVED_SHORT với reason nối varianceReason', async () => {
+    const { service, audit, intake } = makeService({
+      findHead: jest.fn().mockResolvedValue(transitHead),
+      findItems: jest.fn().mockResolvedValue([
+        {
+          id: 'i1',
+          quantity: 30,
+          batchId: 'b1',
+          productId: 'p1',
+          batch: { batchNumber: 'L1', manufacturingDate: null, expiryDate: FAR, supplierId: 's1' },
+        },
+        {
+          id: 'i2',
+          quantity: 10,
+          batchId: 'b2',
+          productId: 'p2',
+          batch: { batchNumber: 'L2', manufacturingDate: null, expiryDate: FAR, supplierId: 's1' },
+        },
+      ]),
+      findShipCosts: jest.fn().mockResolvedValue(
+        new Map([
+          ['i1', 900],
+          ['i2', 500],
+        ]),
+      ),
+    });
+    intake.intake.mockResolvedValue({
+      batchIdByRefItem: new Map([
+        ['i1', 'b-dest'],
+        ['i2', 'b-dest2'],
+      ]),
+      movements: [],
+      auditEntries: [],
+    });
+    await service.receive('t1', PM_B, {
+      lines: [
+        { itemId: 'i1', receivedQuantity: 28, varianceReason: 'Vỡ 2 hộp' },
+        { itemId: 'i2', receivedQuantity: 9, varianceReason: 'Thiếu 1 vỉ' },
+      ],
+    });
+    const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'TRANSFER.RECEIVED_SHORT',
+        entityLabel: 'DC000001',
+        branchIds: [A, B],
+        reason: 'Vỡ 2 hộp; Thiếu 1 vỉ',
+        after: { status: 'RECEIVED' },
+      }),
+    ]);
+  });
+
+  it('cancel ghi TRANSFER.CANCELLED với lý do huỷ', async () => {
+    const { service, audit } = makeService({ findHead: jest.fn().mockResolvedValue(pendingHead) });
+    await service.cancel('t1', { reason: 'Không cần nữa' }, PM_A);
+    const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'TRANSFER.CANCELLED',
+        branchIds: [A, B],
+        reason: 'Không cần nữa',
+        before: { status: 'PENDING' },
+        after: { status: 'CANCELLED' },
+      }),
+    ]);
   });
 });

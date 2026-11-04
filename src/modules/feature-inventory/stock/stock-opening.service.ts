@@ -4,6 +4,8 @@ import type { RequestActor } from 'src/common/decorators/current-actor.decorator
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { assertBranchInScope, resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { StockIntakeService } from '../core/stock-intake.service';
 import { OpeningStockRequest } from './dtos/opening-stock.request';
@@ -22,6 +24,7 @@ export class StockOpeningService {
   constructor(
     private readonly transactions: InventoryTransactions,
     private readonly intake: StockIntakeService,
+    private readonly audit: AuditLogService,
   ) {}
 
   async create(dto: OpeningStockRequest, actor: RequestActor): Promise<{ batchId: string }> {
@@ -65,6 +68,8 @@ export class StockOpeningService {
       });
       const batchId = result.batchIdByRefItem.get(dto.productId);
       if (!batchId) throw new Error('Không ghi được lô tồn đầu');
+      // Lô tồn đầu vừa tạo có thể thừa hưởng thu hồi của cùng số lô ở chi nhánh khác: ghi chung transaction.
+      if (result.auditEntries.length) await this.audit.record(tx, auditActorOf(actor), result.auditEntries);
       return { batchId };
     });
   }

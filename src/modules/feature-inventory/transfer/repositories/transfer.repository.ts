@@ -51,6 +51,9 @@ export type TransferDetail = Prisma.StockTransferGetPayload<{ select: typeof TRA
 
 export interface TransferHead {
   id: string;
+  /** Mã phiếu (nhãn nhật ký) và lý do chuyển (`note`, lý do bắt buộc của `TRANSFER.SHIPPED`). */
+  code: string;
+  note: string | null;
   status: TransferStatus;
   fromBranchId: string;
   toBranchId: string;
@@ -119,7 +122,7 @@ export class TransferRepository {
   ): Promise<TransferHead | null> {
     return tx.stockTransfer.findFirst({
       where: { AND: [{ id, isDeleted: false }, scopeWhere] },
-      select: { id: true, status: true, fromBranchId: true, toBranchId: true },
+      select: { id: true, code: true, note: true, status: true, fromBranchId: true, toBranchId: true },
     });
   }
 

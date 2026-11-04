@@ -49,11 +49,11 @@ export class CreateTransferRequest {
   @ApiProperty({ description: 'Chi nhánh nhận — phải khác chi nhánh gửi' })
   toBranchId: string;
 
-  @IsOptional()
   @IsString()
+  @IsNotEmpty()
   @MaxLength(1000)
-  @ApiPropertyOptional()
-  note?: string;
+  @ApiProperty({ description: 'Lý do chuyển — bắt buộc, ghi vào nhật ký khi lập và khi xuất hàng' })
+  note: string;
 
   @IsArray()
   @ArrayMinSize(1)

@@ -1,10 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { AuditAction, BatchStatus, StockMovementType, StockRefType } from '@prisma/client';
+import { BatchStatus, StockMovementType, StockRefType } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { ErrorCode } from 'src/common/types/error-code';
 import { toDateOnlyString } from 'src/common/utils/date-only.util';
 import { CHAIN_WIDE_ROLES } from 'src/modules/feature-auth/permission/branch-scope';
-import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { inventoryError } from './inventory.error';
 import type { InventoryTxContext } from './inventory-transactions';
 import { AUDIT_ENTITY } from './inventory.constants';
@@ -41,6 +41,11 @@ export interface IntakeResult {
   /** `refItemId` → id lô nhận hàng (để điều chuyển ghi `toBatchId`). */
   batchIdByRefItem: Map<string, string>;
   movements: AppliedMovement[];
+  /**
+   * Nhật ký các lô vừa tạo thừa hưởng thu hồi (`BATCH.RECALLED`). Intake không tự ghi: caller gom vào lần
+   * `audit.record` duy nhất của transaction (cùng dòng nhật ký của chứng từ).
+   */
+  auditEntries: AuditEntry[];
 }
 
 /** Một dòng hàng quay về ĐÚNG lô cũ (đã biết id), số lượng theo đơn vị cơ bản. */
@@ -93,12 +98,11 @@ export class StockIntakeService {
   constructor(
     private readonly batches: StockBatchRepository,
     private readonly ledger: StockLedgerService,
-    private readonly audit: AuditLogService,
   ) {}
 
   async intake(ctx: InventoryTxContext, request: IntakeRequest): Promise<IntakeResult> {
     const { tx } = ctx;
-    if (!request.lines.length) return { batchIdByRefItem: new Map(), movements: [] };
+    if (!request.lines.length) return { batchIdByRefItem: new Map(), movements: [], auditEntries: [] };
 
     const keys = request.lines.map((line) => ({ productId: line.productId, batchNumber: line.batchNumber }));
     await this.batches.lockBatchNumbers(tx, keys);
@@ -118,7 +122,7 @@ export class StockIntakeService {
     const locked = await this.batches.lockByKey(tx, request.branchId, keys, CHAIN_WIDE_ROLES);
     const batchByKey = new Map(locked.map((batch) => [`${batch.productId}|${batch.batchNumber}`, batch]));
     await this.reconcileExpiry(tx, request, batchByKey);
-    await this.inheritRecalls(tx, locked, new Set(newRows.map((row) => row.id)), request.actorId);
+    const auditEntries = await this.inheritRecalls(tx, locked, new Set(newRows.map((row) => row.id)), request.actorId);
 
     const costs: { id: string; importPrice: number }[] = [];
     const batchIdByRefItem = new Map<string, string>();
@@ -147,7 +151,7 @@ export class StockIntakeService {
 
     await this.batches.updateCosts(tx, costs, request.actorId);
     const movements = await this.ledger.apply(ctx, entries, request.actorId, { preLocked: locked });
-    return { batchIdByRefItem, movements };
+    return { batchIdByRefItem, movements, auditEntries };
   }
 
   /**
@@ -235,41 +239,39 @@ export class StockIntakeService {
   /**
    * Thu hồi gắn với SỐ LÔ chứ không với từng dòng lô: lô VỪA TẠO ở chi nhánh này mà cùng số lô đã bị ADMIN thu hồi ở
    * chi nhánh khác (vd. nhận điều chuyển đang trên đường lúc thu hồi) thì cũng bị thu hồi, cùng lý do và người thu hồi.
-   * Lô đã có từ trước giữ trạng thái của nó — thu hồi lô đó là quyết định riêng. Thêm 2 câu lệnh (đổi trạng thái +
-   * nhật ký), chỉ khi có lô phải thu hồi.
+   * Lô đã có từ trước giữ trạng thái của nó — thu hồi lô đó là quyết định riêng. Thêm 1 câu lệnh (đổi trạng thái), chỉ
+   * khi có lô phải thu hồi; trả entry `BATCH.RECALLED` (lý do thừa hưởng) để caller ghi chung với chứng từ.
    */
   private async inheritRecalls(
     tx: InventoryTxContext['tx'],
     locked: readonly IntakeBatch[],
     createdIds: ReadonlySet<string>,
     actorId: string,
-  ): Promise<void> {
+  ): Promise<AuditEntry[]> {
     const recalls = locked.flatMap((batch) =>
       createdIds.has(batch.id) && batch.recallReason && batch.recalledBy
         ? [{ batch, reason: batch.recallReason, recalledBy: batch.recalledBy }]
         : [],
     );
-    if (!recalls.length) return;
+    if (!recalls.length) return [];
 
     await this.batches.markRecalled(
       tx,
       recalls.map(({ batch, reason, recalledBy }) => ({ id: batch.id, reason, recalledBy })),
       actorId,
     );
-    await this.audit.record(
-      tx,
-      recalls.map(({ batch, reason }) => ({
-        actorId,
-        action: AuditAction.STATUS_CHANGE,
-        entityType: AUDIT_ENTITY.STOCK_BATCH,
-        entityId: batch.id,
-        branchId: batch.branchId,
-        before: { status: batch.status },
-        // Người nhận hàng không chủ động thu hồi: ghi rõ đây là thừa hưởng quyết định của ai.
-        after: { status: BatchStatus.RECALLED, inheritedRecallBy: batch.recalledBy },
-        reason,
-      })),
-    );
+    return recalls.map(({ batch, reason }): AuditEntry => ({
+      event: 'BATCH.RECALLED',
+      entityType: AUDIT_ENTITY.STOCK_BATCH,
+      entityId: batch.id,
+      entityLabel: batch.batchNumber,
+      branchIds: [batch.branchId],
+      before: { status: batch.status },
+      // Người nhận hàng không chủ động thu hồi: ghi rõ đây là thừa hưởng quyết định của ai.
+      after: { status: BatchStatus.RECALLED, inheritedRecallBy: batch.recalledBy },
+      metadata: { inherited: true },
+      reason,
+    }));
   }
 
   /**

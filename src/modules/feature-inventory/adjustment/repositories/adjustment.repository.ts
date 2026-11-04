@@ -82,6 +82,10 @@ export type AdjustmentDetail = Prisma.StockAdjustmentGetPayload<{ select: typeof
 
 export interface AdjustmentHead {
   id: string;
+  /** Mã phiếu, lý do của phiếu, tổng tiền trả NCC — cho nhật ký (nhãn, lý do bắt buộc, amount). */
+  code: string;
+  reason: string;
+  totalAmount: bigint;
   status: ReceiptStatus;
   type: AdjustmentType;
   branchId: string;
@@ -151,7 +155,17 @@ export class AdjustmentRepository {
   ): Promise<AdjustmentHead | null> {
     return tx.stockAdjustment.findFirst({
       where: { id, isDeleted: false, ...scopeWhere },
-      select: { id: true, status: true, type: true, branchId: true, goodsReceiptId: true, refundExpenses: true },
+      select: {
+        id: true,
+        code: true,
+        reason: true,
+        totalAmount: true,
+        status: true,
+        type: true,
+        branchId: true,
+        goodsReceiptId: true,
+        refundExpenses: true,
+      },
     });
   }
 

@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { AuditAction, ReceiptStatus } from '@prisma/client';
+import { ReceiptStatus } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { badRequest, documentErrors, invalidReference } from '../core/inventory.error';
 import { branchWhere } from '../core/inventory-scope';
@@ -60,16 +61,16 @@ export class GoodsReceiptMetaService {
       });
       if (!changed) throw errors.wrongState();
 
-      await this.audit.record(tx, [
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId,
-          action: AuditAction.UPDATE,
+          event: 'GOODS_RECEIPT.META_UPDATED',
           entityType: AUDIT_ENTITY.GOODS_RECEIPT,
           entityId: id,
-          branchId: head.branchId,
+          entityLabel: head.code,
+          branchIds: [head.branchId],
+          searchTerms: [head.code],
           before: { receiverId: head.receiverId, receivedAt: head.receivedAt?.toISOString() ?? null, note: head.note },
           after: { receiverId, receivedAt: receivedAt?.toISOString() ?? null, note },
-          ipAddress: actor.ip,
         },
       ]);
       const receipt = await this.receipts.findDetail(id, {}, tx);

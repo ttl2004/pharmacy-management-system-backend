@@ -1,6 +1,5 @@
 import { Injectable } from '@nestjs/common';
 import {
-  AuditAction,
   PaymentMethod,
   PaymentStatus,
   Prisma,
@@ -14,7 +13,9 @@ import type { RequestActor } from 'src/common/decorators/current-actor.decorator
 import { ErrorCode } from 'src/common/types/error-code';
 import { toDateOnlyString, todayInVietnam } from 'src/common/utils/date-only.util';
 import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { DocumentCodeService } from '../core/document-code.service';
 import { badRequest, documentErrors, invalidReference, inventoryError } from '../core/inventory.error';
 import { branchWhere, resolveWriteBranch } from '../core/inventory-scope';
@@ -44,6 +45,17 @@ export type GoodsReceiptView = GoodsReceiptDetail & { warnings: string[] };
 const SORTABLE_FIELDS = new Set(['createdAt', 'code', 'totalAmount']);
 
 const errors = documentErrors('Phiếu nhập');
+
+/** Phần chung của mọi dòng nhật ký phiếu nhập: nhãn + từ khoá = mã phiếu (D8), phạm vi = chi nhánh phiếu. */
+function receiptAudit(receipt: { id: string; code: string; branchId: string }) {
+  return {
+    entityType: AUDIT_ENTITY.GOODS_RECEIPT,
+    entityId: receipt.id,
+    entityLabel: receipt.code,
+    branchIds: [receipt.branchId],
+    searchTerms: [receipt.code],
+  };
+}
 
 @Injectable()
 export class GoodsReceiptService {
@@ -91,13 +103,11 @@ export class GoodsReceiptService {
         tx,
         draft.items.map((item) => ({ ...item, receiptId: id, createdBy: actorId })),
       );
-      await this.audit.record(tx, [
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId,
-          action: AuditAction.CREATE,
-          entityType: AUDIT_ENTITY.GOODS_RECEIPT,
-          entityId: id,
-          branchId,
+          event: 'GOODS_RECEIPT.CREATED',
+          ...receiptAudit({ id, code, branchId }),
+          amount: draft.header.totalAmount,
           after: {
             code,
             supplierId: draft.header.supplierId,
@@ -109,7 +119,6 @@ export class GoodsReceiptService {
             totalAmount: draft.header.totalAmount.toString(),
             lines: draft.items.length,
           },
-          ipAddress: actor.ip,
         },
       ]);
       return { ...(await this.mustFind(tx, id)), warnings: draft.warnings };
@@ -143,13 +152,11 @@ export class GoodsReceiptService {
         tx,
         draft.items.map((item) => ({ ...item, receiptId: id, createdBy: actorId })),
       );
-      await this.audit.record(tx, [
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId,
-          action: AuditAction.UPDATE,
-          entityType: AUDIT_ENTITY.GOODS_RECEIPT,
-          entityId: id,
-          branchId: head.branchId,
+          event: 'GOODS_RECEIPT.UPDATED',
+          ...receiptAudit(head),
+          amount: draft.header.totalAmount,
           // Cùng bộ khoá với `after` để nhật ký chỉ hiện trường thật sự đổi.
           before: {
             receiverId: head.receiverId,
@@ -169,7 +176,6 @@ export class GoodsReceiptService {
             totalAmount: draft.header.totalAmount.toString(),
             lines: draft.items.length,
           },
-          ipAddress: actor.ip,
         },
       ]);
       return { ...(await this.mustFind(tx, id)), warnings: draft.warnings };
@@ -204,8 +210,10 @@ export class GoodsReceiptService {
         updatedBy: actorId,
       });
       if (!claimed) throw errors.wrongState();
+      // Mọi dòng nhật ký của transaction (phiếu chi tự sinh, lô thừa hưởng thu hồi, phiếu nhập) ghi một lần ở cuối.
+      const auditEntries: AuditEntry[] = [];
       if (head.paidAmount > 0n) {
-        await this.supplierPayments.createForReceipt(
+        const payment = await this.supplierPayments.createForReceipt(
           tx,
           head,
           head.paidAmount,
@@ -214,8 +222,9 @@ export class GoodsReceiptService {
             source: SupplierPaymentSource.RECEIPT,
             note: `Trả khi nhập hàng ${head.code}`,
           },
-          { actorId, ip: actor.ip },
+          { actorId },
         );
+        auditEntries.push(...payment.auditEntries);
       }
 
       const items = await this.receipts.findItemsForConfirm(tx, id);
@@ -260,7 +269,7 @@ export class GoodsReceiptService {
         adjustment,
       );
 
-      await this.intake.intake(ctx, {
+      const intakeResult = await this.intake.intake(ctx, {
         branchId: head.branchId,
         type: StockMovementType.IMPORT,
         refType: StockRefType.GOODS_RECEIPT,
@@ -279,18 +288,14 @@ export class GoodsReceiptService {
         })),
       });
 
-      await this.audit.record(tx, [
-        {
-          actorId,
-          action: AuditAction.STATUS_CHANGE,
-          entityType: AUDIT_ENTITY.GOODS_RECEIPT,
-          entityId: id,
-          branchId: head.branchId,
-          before: { status: ReceiptStatus.DRAFT },
-          after: { status: ReceiptStatus.CONFIRMED, lines: lines.length },
-          ipAddress: actor.ip,
-        },
-      ]);
+      auditEntries.push(...intakeResult.auditEntries, {
+        event: 'GOODS_RECEIPT.CONFIRMED',
+        ...receiptAudit(head),
+        amount: head.totalAmount,
+        before: { status: ReceiptStatus.DRAFT },
+        after: { status: ReceiptStatus.CONFIRMED, lines: lines.length },
+      });
+      await this.audit.record(tx, auditActorOf(actor), auditEntries);
       return { ...(await this.mustFind(tx, id)), warnings };
     });
   }
@@ -321,9 +326,10 @@ export class GoodsReceiptService {
       });
       if (!claimed) throw errors.wrongState();
 
+      const auditEntries: AuditEntry[] = [];
       if (head.status === ReceiptStatus.CONFIRMED) {
         // Phiếu chi lập tay còn hiệu lực → 1713; phiếu chi tự sinh (RECEIPT) huỷ theo, paidAmount về 0.
-        await this.supplierPayments.releaseForReceiptCancel(tx, head, { actorId, ip: actor.ip });
+        auditEntries.push(...(await this.supplierPayments.releaseForReceiptCancel(tx, head, { actorId })));
         // Điều chỉnh nợ trước đó có thể đã hạ nợ chi nhánh về sát 0: huỷ phiếu làm nợ âm thì từ chối.
         await assertBranchDebtNotNegative(this.debts, tx, head.supplierId, head.branchId, 'Huỷ phiếu nhập');
         const imports = await this.receipts.findImportMovements(tx, id);
@@ -363,19 +369,15 @@ export class GoodsReceiptService {
         }
       }
 
-      await this.audit.record(tx, [
-        {
-          actorId,
-          action: AuditAction.STATUS_CHANGE,
-          entityType: AUDIT_ENTITY.GOODS_RECEIPT,
-          entityId: id,
-          branchId: head.branchId,
-          before: { status: head.status },
-          after: { status: ReceiptStatus.CANCELLED },
-          reason: dto.reason,
-          ipAddress: actor.ip,
-        },
-      ]);
+      auditEntries.push({
+        event: 'GOODS_RECEIPT.CANCELLED',
+        ...receiptAudit(head),
+        amount: head.totalAmount,
+        before: { status: head.status },
+        after: { status: ReceiptStatus.CANCELLED },
+        reason: dto.reason,
+      });
+      await this.audit.record(tx, auditActorOf(actor), auditEntries);
       return this.mustFind(tx, id);
     });
   }

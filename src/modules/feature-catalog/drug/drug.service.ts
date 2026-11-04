@@ -43,6 +43,7 @@ const SYNC_AUDIT_LABEL = 'Đồng bộ CSDL Dược';
 function syncAuditEntries(
   result: Omit<DrugSyncResult, 'syncedAt'>,
   changed: readonly PrescriptionChange[],
+  force: boolean,
 ): AuditEntry[] {
   const syncId = randomUUID();
   return [
@@ -52,7 +53,7 @@ function syncAuditEntries(
       entityId: syncId,
       entityLabel: SYNC_AUDIT_LABEL,
       branchIds: [],
-      metadata: { syncId, ...result },
+      metadata: { syncId, ...result, force },
     },
     ...changed.map((product): AuditEntry => ({
       event: 'PRODUCT.CONTROL_FLAGS_CHANGED',
@@ -130,7 +131,7 @@ export class DrugService extends AbstractBaseService<Drug> {
       const deactivated = await this.drugRepository.deactivateStale(tx, syncedAt, callerId);
       const changed = await this.drugRepository.syncProductPrescription(tx, syncedAt, callerId);
       const counts = { total: drugs.length, upserted, deactivated, productsUpdated: changed.length };
-      await this.audit.record(tx, auditActorOf(actor), syncAuditEntries(counts, changed));
+      await this.audit.record(tx, auditActorOf(actor), syncAuditEntries(counts, changed, force));
       return { ...counts, syncedAt };
     });
   }

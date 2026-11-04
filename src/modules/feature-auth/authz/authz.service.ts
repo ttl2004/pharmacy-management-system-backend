@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { LoginFailureMonitor } from './login-failure.monitor';
 import { BruteForceDetector } from './brute-force.detector';
 import { TokenService } from './token.service';
-import { SessionStore } from './session.store';
+import { SessionStore, SessionTransactions } from './session.store';
 import type { RequestContext } from 'src/common/decorators/request-context';
 import { SecurityEventService } from 'src/providers/security-event/security-event.service';
 import { isStaffRole } from '../permission/staff-role';
@@ -45,6 +45,7 @@ export class AuthzService extends AbstractBaseService<Auth> {
     private readonly security: SecurityEventService,
     private readonly loginFailures: LoginFailureMonitor,
     private readonly bruteForce: BruteForceDetector,
+    private readonly sessionTransactions: SessionTransactions,
   ) {
     super(authzRepository);
   }
@@ -198,12 +199,28 @@ export class AuthzService extends AbstractBaseService<Auth> {
 
   /** Thu hồi mọi phiên của người dùng; nhân viên thì ghi `AUTH.LOGOUT_ALL`. */
   async logoutAll(user: JwtUser, ctx: RequestContext) {
-    await this.sessions.revokeAllByUser(user.userId);
-    if (isStaffRole(user.role)) {
-      await this.security.record([
-        { type: 'AUTH.LOGOUT_ALL', actorId: user.userId, actorRoleCode: user.role, sessionId: user.sid, context: ctx },
-      ]);
-    }
+    // Thu hồi phiên và sự kiện LOGOUT_ALL cùng một transaction (có khoá phiên): không có sự kiện nào mà phiên còn sống,
+    // cũng không có thu hồi nào mất dấu.
+    await this.sessionTransactions.forUser(user.userId, async (tx) => {
+      await tx.refreshToken.updateMany({
+        where: { userId: user.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      if (isStaffRole(user.role)) {
+        await this.security.record(
+          [
+            {
+              type: 'AUTH.LOGOUT_ALL',
+              actorId: user.userId,
+              actorRoleCode: user.role,
+              sessionId: user.sid,
+              context: ctx,
+            },
+          ],
+          tx,
+        );
+      }
+    });
   }
   async logout(sid: string, token: string | undefined) {
     await this.tokens.logout(sid, token);

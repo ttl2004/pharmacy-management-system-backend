@@ -12,6 +12,8 @@ export interface AuditActor {
 }
 
 export function auditActorOf(actor: RequestActor): AuditActor {
+  // Script seed/tác vụ chạy bằng tác nhân hệ thống: ghi là SYSTEM chứ không phải người dùng.
+  if (actor.user.userId === SYSTEM_ACTOR_ID) return { ...systemActor(), requestId: actor.requestId };
   return {
     userId: actor.user.userId,
     type: 'USER',
@@ -25,4 +27,9 @@ export function auditActorOf(actor: RequestActor): AuditActor {
 /** Tác vụ nền (cron, job): không có request. */
 export function jobActor(): AuditActor {
   return { userId: SYSTEM_ACTOR_ID, type: 'JOB', roleCode: null, branchId: null, ip: null, requestId: null };
+}
+
+/** Script seed/bảo trì chạy bằng tác nhân hệ thống (không phải job định kỳ). */
+export function systemActor(): AuditActor {
+  return { userId: SYSTEM_ACTOR_ID, type: 'SYSTEM', roleCode: null, branchId: null, ip: null, requestId: null };
 }

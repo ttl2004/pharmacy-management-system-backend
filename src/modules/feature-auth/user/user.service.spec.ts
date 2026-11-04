@@ -389,6 +389,31 @@ describe('UserService — AUTH.SESSIONS_REVOKED_BY_ADMIN (D11)', () => {
     expect(client).toMatchObject({ refreshToken: tx.refreshToken });
   });
 
+  it('revokedBy bị bỏ khi người thực hiện là SUPER_ADMIN', async () => {
+    const tx = { refreshToken: { updateMany: jest.fn() } };
+    const service = makeService({ softDelete: jest.fn().mockResolvedValue(true) }, { tx });
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    await service.remove('other-id', actorOf(caller('root-id', AuthRole.SUPER_ADMIN)));
+    const [events] = security.record.mock.calls[0] as [Record<string, unknown>[]];
+    expect(events[0].metadata).toEqual({ trigger: 'DELETE' });
+  });
+
+  it('update status trùng trạng thái hiện tại: vẫn thu hồi token nhưng không ghi sự kiện bảo mật', async () => {
+    const updateMany = jest.fn();
+    const service = makeService(
+      {
+        findByIdWithRole: jest
+          .fn()
+          .mockResolvedValue({ id: 'u1', status: 'LOCKED', role: { code: 'SALES_STAFF', level: 40 } }),
+        update: jest.fn().mockResolvedValue({ id: 'u1' }),
+      },
+      { tx: { refreshToken: { updateMany } } },
+    );
+    await service.update('u1', { status: 'LOCKED' } as never, actorOf(ADMIN));
+    expect(updateMany).toHaveBeenCalled();
+    expect(security.record).not.toHaveBeenCalled();
+  });
+
   it('khoá nhân viên ghi sự kiện; sửa hồ sơ thì không ghi', async () => {
     const mk = () =>
       makeService(
@@ -684,11 +709,33 @@ describe('UserService — nhật ký (D16: danh sách trắng, che PII)', () => 
     expect(JSON.stringify(entry)).not.toMatch(/KHONG-DUOC-GHI|0911111111|b\.tran/);
   });
 
-  it('update không đổi trường nào trong danh sách trắng thì không ghi entry', async () => {
+  it('update chỉ đổi trường ngoài danh sách trắng (địa chỉ) thì ghi USER.UPDATED chỉ có tên trường', async () => {
     const { service } = updateSetup();
 
     await service.update('u1', { fullName: 'Nguyễn Văn A', address: 'Địa chỉ mới' } as never, actorOf(ADMIN));
 
+    const [entry] = entriesOf(audit);
+    expect(entry).toMatchObject({ event: 'USER.UPDATED', metadata: { changedFields: ['address'] } });
+    expect(entry).not.toHaveProperty('before');
+    expect(entry).not.toHaveProperty('after');
+    expect(JSON.stringify(entry)).not.toContain('Địa chỉ mới');
+  });
+
+  it('update đổi giới tính/ngày sinh/email ghi đủ tên trường; không đổi gì thì không ghi', async () => {
+    const { service } = updateSetup();
+
+    await service.update(
+      'u1',
+      { gender: 'FEMALE', dateOfBirth: '1990-01-02', email: 'b.tran@y.vn' } as never,
+      actorOf(ADMIN),
+    );
+
+    expect(entriesOf(audit)[0]).toMatchObject({
+      event: 'USER.UPDATED',
+      metadata: { changedFields: expect.arrayContaining(['email', 'gender', 'dateOfBirth']) as unknown },
+    });
+    audit.record.mockClear();
+    await service.update('u1', { fullName: 'Nguyễn Văn A' } as never, actorOf(ADMIN));
     expect(audit.record).not.toHaveBeenCalled();
   });
 

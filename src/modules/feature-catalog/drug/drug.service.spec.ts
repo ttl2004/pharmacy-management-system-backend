@@ -227,7 +227,7 @@ describe('DrugService — đồng bộ', () => {
       entityType: 'drugs',
       entityLabel: 'Đồng bộ CSDL Dược',
       branchIds: [],
-      metadata: { total: 2, upserted: 2, deactivated: 1, productsUpdated: 2 },
+      metadata: { total: 2, upserted: 2, deactivated: 1, productsUpdated: 2, force: false },
     });
     expect(synced.entityId).toMatch(/^[0-9a-f-]{36}$/);
     expect((synced.metadata as Record<string, unknown>).syncId).toBe(synced.entityId);

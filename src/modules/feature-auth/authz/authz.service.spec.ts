@@ -17,6 +17,7 @@ function makeService(prisma: { user: Record<string, jest.Mock>; role: Record<str
     {} as never,
     {} as never,
     {} as never,
+    {} as never,
   );
 }
 
@@ -71,6 +72,7 @@ describe('AuthzService security events', () => {
   function make(found: unknown, tokenLogin: jest.Mock = jest.fn().mockResolvedValue({ accessToken: 'a' })) {
     const security = { record: jest.fn().mockResolvedValue(undefined) };
     const sessions = { revokeAllByUser: jest.fn().mockResolvedValue(undefined) };
+    const tx = { refreshToken: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) } };
     const repo = { findByUsernameWithUser: jest.fn().mockResolvedValue(found) };
     const monitor = new LoginFailureMonitor();
     const detector = { check: jest.fn().mockResolvedValue(false) };
@@ -84,8 +86,9 @@ describe('AuthzService security events', () => {
       security as never,
       monitor,
       detector as never,
+      { forUser: (_u: string, work: (t: unknown) => unknown) => work(tx) } as never,
     );
-    return { service, security, sessions, detector };
+    return { service, security, sessions, detector, tx };
   }
   const fail = (p: Promise<unknown>) =>
     p.then(
@@ -200,10 +203,14 @@ describe('AuthzService security events', () => {
   it('logout-all ghi LOGOUT_ALL cho nhân viên, không ghi cho khách hàng', async () => {
     const staff = make(null);
     await staff.service.logoutAll({ userId: 'u1', role: 'SALES_STAFF', sid: 's' } as never, CTX);
-    expect(staff.sessions.revokeAllByUser).toHaveBeenCalledWith('u1');
-    expect(staff.security.record).toHaveBeenCalledWith([
-      { type: 'AUTH.LOGOUT_ALL', actorId: 'u1', actorRoleCode: 'SALES_STAFF', sessionId: 's', context: CTX },
-    ]);
+    expect(staff.tx.refreshToken.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: 'u1', revokedAt: null } }),
+    );
+    // Cùng transaction với việc thu hồi: truyền client `tx` làm đối số thứ hai.
+    expect(staff.security.record).toHaveBeenCalledWith(
+      [{ type: 'AUTH.LOGOUT_ALL', actorId: 'u1', actorRoleCode: 'SALES_STAFF', sessionId: 's', context: CTX }],
+      staff.tx,
+    );
     const customer = make(null);
     await customer.service.logoutAll({ userId: 'u2', role: 'CUSTOMER', sid: 's' } as never, CTX);
     expect(customer.security.record).not.toHaveBeenCalled();
@@ -220,6 +227,7 @@ describe('AuthzService security events', () => {
       {} as never,
       {} as never,
       security as never,
+      {} as never,
       {} as never,
       {} as never,
     );

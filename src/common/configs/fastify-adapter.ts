@@ -9,6 +9,8 @@ export function createFastifyAdapter(env: { TRUST_PROXY: number }): FastifyAdapt
   return new FastifyAdapter({
     trustProxy: env.TRUST_PROXY || false,
     logger: false,
+    // Không tin header `request-id` (mặc định Fastify) do client gửi: id luôn do `genReqId` cấp.
+    requestIdHeader: false,
     genReqId: () => randomUUID(),
     // Mặc định 1MB; ảnh sản phẩm gửi base64 (≤2MB nhị phân ≈ 2.8MB) qua POST /product-image.
     bodyLimit: 4 * 1024 * 1024,

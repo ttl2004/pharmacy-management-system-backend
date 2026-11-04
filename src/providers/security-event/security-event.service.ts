@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
@@ -39,7 +40,7 @@ export class SecurityEventService {
         actorId: event.actorId ?? null,
         actorRoleCode: event.actorRoleCode ?? null,
         sessionId: event.sessionId ?? null,
-        ipAddress: ip,
+        ipAddress: ip && isIP(ip) !== 0 ? ip : null,
         userAgent: userAgent?.slice(0, USER_AGENT_MAX) ?? null,
         requestId: requestId && UUID_RE.test(requestId) ? requestId : null,
         metadata: event.metadata == null ? Prisma.DbNull : (toAuditJson(event.metadata) as Prisma.InputJsonValue),

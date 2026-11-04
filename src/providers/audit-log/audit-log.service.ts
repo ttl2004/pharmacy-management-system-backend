@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ErrorException } from 'src/common/exceptions/error.exception';
@@ -52,7 +53,7 @@ export class AuditLogService {
         actorType: actor.type,
         actorRoleCode: actor.roleCode,
         actorBranchId: actor.branchId,
-        ipAddress: actor.ip,
+        ipAddress: actor.ip && isIP(actor.ip) !== 0 ? actor.ip : null,
         requestId,
         entityType: entry.entityType,
         entityId: entry.entityId,

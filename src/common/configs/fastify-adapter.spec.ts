@@ -28,4 +28,15 @@ describe('createFastifyAdapter', () => {
     expect(res.json<{ id: string }>().id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     await app.close();
   });
+
+  it('bỏ qua header request-id / x-request-id do client gửi', async () => {
+    const app = await init(0);
+    for (const name of ['request-id', 'x-request-id']) {
+      const res = await app.inject({ url: '/x', headers: { [name]: 'gia-mao-123' } });
+      const id = res.json<{ id: string }>().id;
+      expect(id).not.toBe('gia-mao-123');
+      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    }
+    await app.close();
+  });
 });

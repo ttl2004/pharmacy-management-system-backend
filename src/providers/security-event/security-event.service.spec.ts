@@ -45,4 +45,14 @@ describe('SecurityEventService.record', () => {
     expect(SECURITY_EVENTS['AUTH.BRUTE_FORCE_SUSPECTED']).toEqual({ severity: 2, outcome: 'DENIED' });
     expect(SECURITY_EVENTS['AUTH.LOGIN_FAILED_BURST']).toEqual({ severity: 2, outcome: 'DENIED' });
   });
+
+  it('ip không hợp lệ → null; ip hợp lệ giữ nguyên', async () => {
+    const { service, createMany } = make();
+    await service.record([
+      { type: 'AUTH.LOGIN_OK', context: { ip: 'abc', userAgent: null, requestId: null } },
+      { type: 'AUTH.LOGIN_OK', context: { ip: '2001:db8::1', userAgent: null, requestId: null } },
+    ]);
+    const [{ data }] = createMany.mock.calls[0] as [{ data: { ipAddress: unknown }[] }];
+    expect(data.map((row) => row.ipAddress)).toEqual([null, '2001:db8::1']);
+  });
 });

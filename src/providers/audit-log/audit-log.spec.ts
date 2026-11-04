@@ -2,7 +2,8 @@ import type { AdjustmentType } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
-import type { AuditActor } from './audit-actor';
+import { SYSTEM_ACTOR_ID } from 'src/common/constants/app.constant';
+import { auditActorOf, systemActor, type AuditActor } from './audit-actor';
 import { adjustmentEvent } from './audit-events';
 import type { AuditEntry } from './audit-log.types';
 import { diffFields, pickAuditFields, toAuditJson } from './audit-diff';
@@ -180,6 +181,38 @@ describe('AuditLogService.record', () => {
     const { createMany, tx } = setup();
     await service.record(tx, ACTOR, []);
     expect(createMany).not.toHaveBeenCalled();
+  });
+
+  it('ip không phải địa chỉ IP hợp lệ → lưu null; IPv4/IPv6 hợp lệ giữ nguyên', async () => {
+    for (const [ip, expected] of [
+      ['1.2.3.4', '1.2.3.4'],
+      ['::1', '::1'],
+      ['not-an-ip', null],
+      ["1.2.3.4'; DROP TABLE x;--", null],
+      ['', null],
+      [null, null],
+    ] as const) {
+      const { tx, rows } = setup();
+      await service.record(tx, { ...ACTOR, ip }, [
+        { event: 'ORDER.PAID', entityType: 'o', entityId: 'x', branchIds: [] },
+      ]);
+      expect(rows()[0].ipAddress).toBe(expected);
+    }
+  });
+
+  it('auditActorOf: tác nhân hệ thống (seed) ghi actorType SYSTEM, người dùng thường ghi USER', () => {
+    const base = { userAgent: null, ip: '1.2.3.4', requestId: 'r' };
+    const seed = auditActorOf({
+      ...base,
+      user: { userId: SYSTEM_ACTOR_ID, sid: 's', email: null, role: 'SUPER_ADMIN', branchId: null, roleLevel: 100 },
+    } as never);
+    expect(seed).toMatchObject({ userId: SYSTEM_ACTOR_ID, type: 'SYSTEM', roleCode: null, ip: null });
+    expect(systemActor().type).toBe('SYSTEM');
+    const user = auditActorOf({
+      ...base,
+      user: { userId: 'u1', sid: 's', email: null, role: 'ADMIN', branchId: null, roleLevel: 80 },
+    } as never);
+    expect(user.type).toBe('USER');
   });
 });
 

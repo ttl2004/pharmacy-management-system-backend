@@ -62,6 +62,18 @@ function userSnapshotChanges(data: Partial<User>): Partial<UserAuditSnapshot> {
   return changes;
 }
 
+/** Tên các trường đổi thật sự nhưng không ghi giá trị vào nhật ký: địa chỉ, ngày sinh, giới tính, email. */
+function hiddenChangedFields(current: User, data: Partial<User>): string[] {
+  const names: string[] = [];
+  if ('email' in data && (data.email ?? null) !== (current.email ?? null)) names.push('email');
+  if ('address' in data && (data.address ?? null) !== (current.address ?? null)) names.push('address');
+  if ('gender' in data && (data.gender ?? null) !== (current.gender ?? null)) names.push('gender');
+  if ('dateOfBirth' in data && (data.dateOfBirth?.getTime() ?? null) !== (current.dateOfBirth?.getTime() ?? null)) {
+    names.push('dateOfBirth');
+  }
+  return names;
+}
+
 @Injectable()
 export class UserService extends AbstractBaseService<User> {
   constructor(
@@ -301,11 +313,14 @@ export class UserService extends AbstractBaseService<User> {
         }
         const changes = userSnapshotChanges(data);
         const diff = diffFields(userSnapshot(fresh), changes, USER_AUDIT_FIELDS);
-        if (diff) {
+        // Trường không nằm trong danh sách trắng (địa chỉ, ngày sinh, giới tính) và email: chỉ ghi TÊN trường đã đổi.
+        const changedFields = hiddenChangedFields(fresh, data);
+        const statusChanged = !!diff && 'status' in diff.after;
+        if (diff || changedFields.length) {
           const username = await usernameOf(tx, id);
           const base = userAuditBase(fresh, username, [fresh.branchId, updated.branchId]);
           const entries: AuditEntry[] = [];
-          if ('status' in diff.after) {
+          if (diff && 'status' in diff.after) {
             entries.push({
               event: 'USER.STATUS_CHANGED',
               ...base,
@@ -316,22 +331,27 @@ export class UserService extends AbstractBaseService<User> {
             delete diff.before.status;
             delete diff.after.status;
           }
-          if (Object.keys(diff.after).length) {
+          if ((diff && Object.keys(diff.after).length) || changedFields.length) {
             entries.push({
               event: 'USER.UPDATED',
               ...base,
-              before: maskUserSnapshot(diff.before),
-              after: maskUserSnapshot(diff.after),
+              ...(diff && Object.keys(diff.after).length
+                ? { before: maskUserSnapshot(diff.before), after: maskUserSnapshot(diff.after) }
+                : {}),
+              ...(changedFields.length ? { metadata: { changedFields } } : {}),
             });
           }
           await this.audit.record(tx, auditActorOf(actor), entries);
         }
         if (revokeSessions) {
           await this.revokeRefreshTokens(tx, id);
-          await this.recordSessionsRevoked(tx, fresh.id, fresh.role.code, actor, {
-            trigger: 'STATUS_CHANGE',
-            status: String(dto.status),
-          });
+          // Token luôn thu hồi (idempotent); sự kiện bảo mật chỉ ghi khi trạng thái thực sự đổi.
+          if (statusChanged) {
+            await this.recordSessionsRevoked(tx, fresh.id, fresh.role.code, actor, {
+              trigger: 'STATUS_CHANGE',
+              status: String(dto.status),
+            });
+          }
         }
         return updated as UserDetail;
       });
@@ -397,7 +417,9 @@ export class UserService extends AbstractBaseService<User> {
           actorId: targetId,
           actorRoleCode: targetRoleCode,
           context: actor,
-          metadata: { revokedBy: actor.user.userId, ...detail },
+          // SUPER_ADMIN không lộ danh tính ra ngoài ADMIN: bỏ `revokedBy` khi người thực hiện là SUPER_ADMIN.
+          metadata:
+            actor.user.role === AuthRole.SUPER_ADMIN ? { ...detail } : { revokedBy: actor.user.userId, ...detail },
         },
       ],
       tx,

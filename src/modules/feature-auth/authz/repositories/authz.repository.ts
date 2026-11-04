@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { Auth, User } from '@prisma/client';
+import { Auth, Role, User } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { PrismaBaseRepository } from 'src/providers/abstract-base/repositories/prisma-base.repository';
 
-export type AuthWithUser = Auth & { user: User };
+export type AuthWithUser = Auth & { user: User & { role: Role } };
 
 @Injectable()
 export class AuthzRepository extends PrismaBaseRepository<Auth> {
@@ -18,7 +18,7 @@ export class AuthzRepository extends PrismaBaseRepository<Auth> {
   findByUsernameWithUser(username: string): Promise<AuthWithUser | null> {
     return this.prisma.auth.findFirst({
       where: { username, isDeleted: false },
-      include: { user: true },
+      include: { user: { include: { role: true } } },
     });
   }
 }

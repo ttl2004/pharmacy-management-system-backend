@@ -1,6 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { TokenService, TokenMetadata } from './token.service';
+import { TokenService } from './token.service';
+import { SessionStore } from './session.store';
+import type { RequestContext } from 'src/common/decorators/request-context';
+import { SecurityEventService } from 'src/providers/security-event/security-event.service';
+import { isStaffRole } from '../permission/staff-role';
 import { authError } from './auth.error';
 import * as bcrypt from 'bcrypt';
 import { SYSTEM_ACTOR_ID } from 'src/common/constants/app.constant';
@@ -17,6 +21,12 @@ import { JwtUser } from './types/authz.types';
 import { AuthzRepository } from './repositories/authz.repository';
 import { PrismaService } from 'src/common/databases/prisma.service';
 
+function isLoginInvalid(error: unknown): boolean {
+  if (!(error instanceof UnauthorizedException)) return false;
+  const body = error.getResponse() as { code?: number };
+  return body?.code === ErrorCode.LOGIN_INVALID;
+}
+
 @Injectable()
 export class AuthzService extends AbstractBaseService<Auth> {
   private readonly authzLogger = new Logger(AuthzService.name);
@@ -29,6 +39,8 @@ export class AuthzService extends AbstractBaseService<Auth> {
     // Đọc thẳng qua Prisma thay vì dùng RoleRepository: PermissionModule import AuthzModule,
     // nên AuthzModule không được phép import ngược lại.
     private readonly prisma: PrismaService,
+    private readonly sessions: SessionStore,
+    private readonly security: SecurityEventService,
   ) {
     super(authzRepository);
   }
@@ -111,19 +123,48 @@ export class AuthzService extends AbstractBaseService<Auth> {
     }
   }
 
-  async login(dto: LoginRequest, metadata: TokenMetadata = {}) {
+  async login(dto: LoginRequest, ctx: RequestContext) {
     const authz = await this.getAuthzByUsername(dto.username);
     // Trả cùng thông báo và đều so sánh bcrypt khi tên đăng nhập không tồn tại hoặc mật khẩu sai.
     const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
     const valid = await bcrypt.compare(dto.password, authz?.password ?? dummyHash);
-    if (!authz || !valid || !authz.user || authz.user.isDeleted || authz.user.status !== UserStatus.ACTIVE) {
+    const user = authz?.user;
+    if (!authz || !user || !valid || user.isDeleted || user.status !== UserStatus.ACTIVE) {
+      await this.recordLoginFailure(user, ctx);
       throw authError(ErrorCode.LOGIN_INVALID);
     }
-    return this.tokens.login(authz, metadata);
+    try {
+      return await this.tokens.login(authz, ctx);
+    } catch (error) {
+      // Mật khẩu/trạng thái đổi trong lúc bcrypt chạy: tính như đăng nhập thất bại.
+      if (isLoginInvalid(error)) await this.recordLoginFailure(user, ctx);
+      throw error;
+    }
   }
 
-  async refreshToken(token: string | undefined) {
-    return this.tokens.refresh(token);
+  /** Chỉ ghi cho nhân viên (D1/D2); khách hàng và username không tồn tại không có dòng nào. */
+  private async recordLoginFailure(
+    user: { id: string; role: { code: string } } | null | undefined,
+    ctx: RequestContext,
+  ) {
+    if (!user || !isStaffRole(user.role.code)) return;
+    await this.security.record([
+      { type: 'AUTH.LOGIN_FAILED', actorId: user.id, actorRoleCode: user.role.code, context: ctx },
+    ]);
+  }
+
+  async refreshToken(token: string | undefined, ctx: RequestContext) {
+    return this.tokens.refresh(token, ctx);
+  }
+
+  /** Thu hồi mọi phiên của người dùng; nhân viên thì ghi `AUTH.LOGOUT_ALL`. */
+  async logoutAll(user: JwtUser, ctx: RequestContext) {
+    await this.sessions.revokeAllByUser(user.userId);
+    if (isStaffRole(user.role)) {
+      await this.security.record([
+        { type: 'AUTH.LOGOUT_ALL', actorId: user.userId, actorRoleCode: user.role, sessionId: user.sid, context: ctx },
+      ]);
+    }
   }
   async logout(sid: string, token: string | undefined) {
     await this.tokens.logout(sid, token);

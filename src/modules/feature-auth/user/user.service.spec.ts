@@ -47,7 +47,11 @@ async function codeOf(promise: Promise<unknown>): Promise<number | undefined> {
  * `findByIdWithRole` có mặc định vì gần như mọi luật bảo vệ đều tra vai trò của bản ghi đích trước.
  */
 const audit = { record: jest.fn() };
-beforeEach(() => audit.record.mockClear());
+const security = { record: jest.fn() };
+beforeEach(() => {
+  audit.record.mockClear();
+  security.record.mockClear();
+});
 
 function makeService(
   repositoryOverrides: Record<string, jest.Mock> = {},
@@ -73,7 +77,7 @@ function makeService(
   } as never;
   // Transaction phiên thật (khoá advisory chạy trên `tx` giả) để kiểm cả `revision`.
   const transactions = new SessionTransactions(prisma);
-  return new UserService(repository, prisma, transactions, audit as never);
+  return new UserService(repository, prisma, transactions, audit as never, security as never);
 }
 
 const EMPTY_PAGE = { hits: [], total: 0, page: 1, totalPages: 0, limit: 10 };
@@ -365,6 +369,59 @@ describe('UserService — xoá người dùng', () => {
     });
     expect((softDelete.mock.calls as unknown[][])[0][1]).toMatchObject({ refreshToken: { updateMany } });
     expect(transactions.revision).toBeGreaterThan(before);
+  });
+});
+
+describe('UserService — AUTH.SESSIONS_REVOKED_BY_ADMIN (D11)', () => {
+  it('xoá nhân viên ghi 1 sự kiện trong cùng tx, actorId là người bị thu hồi, revokedBy là người gọi', async () => {
+    const tx = { refreshToken: { updateMany: jest.fn() } };
+    const service = makeService({ softDelete: jest.fn().mockResolvedValue(true) }, { tx });
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    await service.remove('other-id', actorOf(caller('me-id')));
+    expect(security.record).toHaveBeenCalledTimes(1);
+    const [events, client] = security.record.mock.calls[0] as [Record<string, unknown>[], Record<string, unknown>];
+    expect(events[0]).toMatchObject({
+      type: 'AUTH.SESSIONS_REVOKED_BY_ADMIN',
+      actorId: 'other-id',
+      actorRoleCode: 'SALES_STAFF',
+      metadata: { revokedBy: 'me-id', trigger: 'DELETE' },
+    });
+    expect(client).toMatchObject({ refreshToken: tx.refreshToken });
+  });
+
+  it('khoá nhân viên ghi sự kiện; sửa hồ sơ thì không ghi', async () => {
+    const mk = () =>
+      makeService(
+        {
+          findByIdWithRole: jest
+            .fn()
+            .mockResolvedValue({ id: 'u1', status: 'ACTIVE', role: { code: 'SALES_STAFF', level: 40 } }),
+          update: jest.fn().mockResolvedValue({ id: 'u1' }),
+        },
+        { tx: { refreshToken: { updateMany: jest.fn() } } },
+      );
+    await mk().update('u1', { status: 'LOCKED' } as never, actorOf(ADMIN));
+    expect(security.record).toHaveBeenCalledTimes(1);
+    expect((security.record.mock.calls[0] as unknown[][])[0][0]).toMatchObject({
+      metadata: { trigger: 'STATUS_CHANGE', status: 'LOCKED' },
+    });
+    security.record.mockClear();
+    await mk().update('u1', { fullName: 'X' }, actorOf(ADMIN));
+    expect(security.record).not.toHaveBeenCalled();
+  });
+
+  it('người bị thu hồi là khách hàng thì không ghi', async () => {
+    const service = makeService(
+      {
+        findByIdWithRole: jest
+          .fn()
+          .mockResolvedValue({ id: 'c1', status: 'ACTIVE', role: { code: 'CUSTOMER', level: 20 } }),
+        update: jest.fn().mockResolvedValue({ id: 'c1' }),
+      },
+      { tx: { refreshToken: { updateMany: jest.fn() } } },
+    );
+    await service.update('c1', { status: 'LOCKED' } as never, actorOf(ADMIN));
+    expect(security.record).not.toHaveBeenCalled();
   });
 });
 

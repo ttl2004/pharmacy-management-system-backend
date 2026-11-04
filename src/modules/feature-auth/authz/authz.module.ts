@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
+import { SecurityEventModule } from 'src/providers/security-event/security-event.module';
 import { UserModule } from '../user/user.module';
 import { AuthzController } from './authz.controller';
 import { AuthzService } from './authz.service';
@@ -21,6 +22,7 @@ class AuthConfigModule {}
 @Module({
   imports: [
     AuthConfigModule,
+    SecurityEventModule,
     PassportModule.register({ defaultStrategy: AUTH_JWT }),
     // forwardRef vì UserModule cần AuthzGuard của module này — xem user.module.ts.
     forwardRef(() => UserModule),

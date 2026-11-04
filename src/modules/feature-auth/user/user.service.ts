@@ -11,6 +11,8 @@ import { PrismaService } from 'src/common/databases/prisma.service';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { diffFields, pickAuditFields } from 'src/providers/audit-log/audit-diff';
+import { SecurityEventService } from 'src/providers/security-event/security-event.service';
+import { isStaffRole } from '../permission/staff-role';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import type { AuditEntry, AuditJson } from 'src/providers/audit-log/audit-log.types';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
@@ -67,6 +69,7 @@ export class UserService extends AbstractBaseService<User> {
     private readonly prisma: PrismaService,
     private readonly transactions: SessionTransactions,
     private readonly audit: AuditLogService,
+    private readonly security: SecurityEventService,
   ) {
     super(userRepository);
   }
@@ -325,7 +328,10 @@ export class UserService extends AbstractBaseService<User> {
         }
         if (revokeSessions) {
           await this.revokeRefreshTokens(tx, id);
-          // TODO(audit-v21 Task 13): ghi AUTH.SESSIONS_REVOKED_BY_ADMIN (securityEvents.record, cùng tx) tại đây.
+          await this.recordSessionsRevoked(tx, fresh.id, fresh.role.code, actor, {
+            trigger: 'STATUS_CHANGE',
+            status: String(dto.status),
+          });
         }
         return updated as UserDetail;
       });
@@ -357,7 +363,7 @@ export class UserService extends AbstractBaseService<User> {
         throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
       }
       await this.revokeRefreshTokens(tx, id);
-      // TODO(audit-v21 Task 13): ghi AUTH.SESSIONS_REVOKED_BY_ADMIN (securityEvents.record, cùng tx) tại đây.
+      await this.recordSessionsRevoked(tx, id, target.role.code, actor, { trigger: 'DELETE' });
       await this.audit.record(tx, auditActorOf(actor), [
         {
           event: 'USER.DELETED',
@@ -372,6 +378,32 @@ export class UserService extends AbstractBaseService<User> {
   }
 
   /** Thu hồi mọi refresh token còn hiệu lực của user — phiên (`sid`) của họ chết ở lần kiểm kế tiếp. */
+  /**
+   * D11: ghi `AUTH.SESSIONS_REVOKED_BY_ADMIN` cùng transaction với việc thu hồi. `actorId` là người bị thu hồi phiên
+   * (để tra "lịch sử bảo mật của X"); người thực hiện nằm trong `metadata.revokedBy`. Chỉ ghi cho nhân viên.
+   */
+  private async recordSessionsRevoked(
+    tx: Prisma.TransactionClient,
+    targetId: string,
+    targetRoleCode: string,
+    actor: RequestActor,
+    detail: Record<string, string>,
+  ): Promise<void> {
+    if (!isStaffRole(targetRoleCode)) return;
+    await this.security.record(
+      [
+        {
+          type: 'AUTH.SESSIONS_REVOKED_BY_ADMIN',
+          actorId: targetId,
+          actorRoleCode: targetRoleCode,
+          context: actor,
+          metadata: { revokedBy: actor.user.userId, ...detail },
+        },
+      ],
+      tx,
+    );
+  }
+
   private async revokeRefreshTokens(tx: Prisma.TransactionClient, userId: string): Promise<void> {
     await tx.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
   }

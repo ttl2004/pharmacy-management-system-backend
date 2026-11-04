@@ -38,3 +38,12 @@ export function assertCanEditBook(scope: BranchScope, branchIds: readonly string
   if (canEditBook(scope, branchIds)) return;
   throw permissionError(ErrorCode.BRANCH_ACCESS_DENIED, 'Bạn không có quyền sửa bảng giá này');
 }
+
+/**
+ * Giá gốc của công thức chỉ được lấy từ bảng người gọi XEM được (bảng toàn chuỗi hoặc có chi nhánh của mình);
+ * không thì quản lý chi nhánh A đọc được giá bảng riêng của chi nhánh B qua công thức.
+ */
+export function assertCanReadBook(scope: BranchScope, branchIds: readonly string[]): void {
+  if (canReadBook(scope, branchIds)) return;
+  throw permissionError(ErrorCode.BRANCH_ACCESS_DENIED, 'Bạn không có quyền dùng bảng giá này làm giá gốc');
+}

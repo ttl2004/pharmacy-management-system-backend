@@ -28,7 +28,7 @@ import {
   priceBookUpdatedEntry,
 } from './price-book-audit';
 import { PriceBookItemsService } from './price-book-items.service';
-import { assertCanEditBook, assertWritableBranchIds, canEditBook } from './price-book-scope';
+import { assertCanEditBook, assertCanReadBook, assertWritableBranchIds, canEditBook } from './price-book-scope';
 import { PriceBookRepository, PriceBookRow, PriceBookScalars } from './repositories/price-book.repository';
 
 /** Bảng áp dụng được cho một đơn — Task 4 (đơn bán) dùng để tính lại giá dòng. */
@@ -96,7 +96,7 @@ export class PriceBookService {
         const entry = priceBookUpdatedEntry(existing, row);
         if (entry) await this.audit.record(tx, auditActorOf(actor), [entry]);
         if (!dto.reapplyFormula) return row;
-        await this.items.reapplyExisting(tx, row, costBranchId);
+        await this.items.reapplyExisting(tx, row, costBranchId, scope);
         // Đọc lại để `itemCount` đúng sau khi tính lại.
         return (await this.repository.findById(id, tx)) ?? row;
       });
@@ -239,11 +239,18 @@ export class PriceBookService {
       if (selfId && formula.base === selfId) {
         throw new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message: 'Không lấy chính bảng này làm giá gốc' });
       }
-      if (!FIXED_BASES.has(formula.base) && !(await this.repository.findById(formula.base))) {
-        throw new ErrorException({
-          code: ErrorCode.INVALID_REFERENCE,
-          message: 'Bảng giá gốc của công thức không tồn tại',
-        });
+      if (!FIXED_BASES.has(formula.base)) {
+        const base = await this.repository.findById(formula.base);
+        if (!base) {
+          throw new ErrorException({
+            code: ErrorCode.INVALID_REFERENCE,
+            message: 'Bảng giá gốc của công thức không tồn tại',
+          });
+        }
+        assertCanReadBook(
+          scope,
+          base.branches.map((b) => b.branchId),
+        );
       }
     }
     if (await this.repository.findNameConflict(dto.name, selfId)) throw this.duplicateName();

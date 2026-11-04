@@ -1,5 +1,7 @@
 import { PriceBookPolicy, RecordStatus } from '@prisma/client';
-import { ADMIN_ACTOR, entriesOf } from 'src/test-support/audit-harness';
+import { AuthRole } from 'src/common/types/common.enum';
+import { ErrorCode } from 'src/common/types/error-code';
+import { ADMIN_ACTOR, actorOf, entriesOf } from 'src/test-support/audit-harness';
 import { PriceBookItemsService } from './price-book-items.service';
 import type { PriceBookRow } from './repositories/price-book.repository';
 
@@ -33,6 +35,7 @@ function makeService(bookRow: PriceBookRow = book(), rawRows: unknown[] = []) {
     findAll: jest.fn().mockResolvedValue(rawRows),
     upsertItems: jest.fn().mockResolvedValue(undefined),
     findBookPrices: jest.fn().mockResolvedValue([]),
+    findItemUnitIds: jest.fn().mockResolvedValue(['pu-1']),
   };
   const bookRepository = {
     findById: jest.fn().mockResolvedValue(bookRow),
@@ -103,5 +106,48 @@ describe('PriceBookItemsService — nhật ký', () => {
     await expect(service.applyFormulaToFilter('book-1', {} as never, ADMIN_ACTOR)).resolves.toEqual({ count: 0 });
 
     expect(audit.record).not.toHaveBeenCalled();
+  });
+});
+
+describe('PriceBookItemsService — kiểm lại giá gốc lúc áp công thức (S2)', () => {
+  const PM_A = actorOf({
+    userId: 'pm-a',
+    sid: 's',
+    email: null,
+    role: AuthRole.PHARMACY_MANAGER,
+    branchId: 'bA',
+    roleLevel: 60,
+  });
+  const rawRows = [{ productUnitId: 'pu-1' }];
+
+  function setup(baseBranches: string[]) {
+    const own = book({ id: 'book-1', formulaBase: 'base-b', branches: [{ branchId: 'bA' }] as never });
+    const base = book({ id: 'base-b', branches: baseBranches.map((branchId) => ({ branchId })) as never });
+    const made = makeService(own, rawRows);
+    made.bookRepository.findById.mockImplementation((id: string) => Promise.resolve(id === 'book-1' ? own : base));
+    return made;
+  }
+
+  it('apply-formula: base đã bị đổi phạm vi sang chỉ B → 403 1506, không ghi giá', async () => {
+    const { service, rowsRepository } = setup(['bB']);
+    await expect(service.applyFormulaToFilter('book-1', {} as never, PM_A)).rejects.toMatchObject({
+      response: { code: ErrorCode.BRANCH_ACCESS_DENIED },
+    });
+    expect(rowsRepository.upsertItems).not.toHaveBeenCalled();
+  });
+
+  it('apply-formula: base toàn chuỗi → áp được', async () => {
+    const { service, rowsRepository } = setup([]);
+    rowsRepository.findBookPrices.mockResolvedValue([{ productUnitId: 'pu-1', price: 1000 }]);
+    await expect(service.applyFormulaToFilter('book-1', {} as never, PM_A)).resolves.toEqual({ count: 1 });
+  });
+
+  it('reapplyExisting: base ngoài phạm vi đọc → 403, không ghi giá', async () => {
+    const { service, rowsRepository } = setup(['bB']);
+    const own = book({ id: 'book-1', formulaBase: 'base-b', branches: [{ branchId: 'bA' }] as never });
+    await expect(
+      service.reapplyExisting({} as never, own, undefined, { kind: 'BRANCH', branchId: 'bA' }),
+    ).rejects.toMatchObject({ response: { code: ErrorCode.BRANCH_ACCESS_DENIED } });
+    expect(rowsRepository.upsertItems).not.toHaveBeenCalled();
   });
 });

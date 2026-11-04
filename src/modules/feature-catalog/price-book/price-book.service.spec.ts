@@ -1,6 +1,7 @@
 import { PriceBookPolicy, RecordStatus } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthRole } from 'src/common/types/common.enum';
+import { ErrorCode } from 'src/common/types/error-code';
 import { PriceBookService } from './price-book.service';
 import type { PriceBookRow } from './repositories/price-book.repository';
 
@@ -207,6 +208,59 @@ describe('PriceBookService — nhật ký', () => {
       branchIds: ['b2'],
       before: { formulaBase: 'book-1', formulaOp: 'ADD', formulaAmount: 1000, formulaUnit: 'VND' },
       after: { formulaBase: null, formulaOp: null, formulaAmount: null, formulaUnit: null },
+    });
+  });
+});
+
+describe('PriceBookService — giá gốc công thức chỉ từ bảng xem được (S2)', () => {
+  const PM_A: RequestActor = {
+    user: { userId: 'pm-a', sid: 's', email: null, role: AuthRole.PHARMACY_MANAGER, branchId: 'bA', roleLevel: 60 },
+    ip: null,
+    userAgent: null,
+    requestId: null,
+  };
+  const formulaOn = (base: string) => ({ branchIds: ['bA'], formula: { base, op: '+', amount: 1000, unit: 'vnd' } });
+  const withBase = (base: PriceBookRow | null) =>
+    makeService({ findById: jest.fn().mockResolvedValue(base), findUsers: jest.fn().mockResolvedValue([]) });
+
+  it('PM chi nhánh A lấy bảng chỉ của chi nhánh B làm giá gốc → 403 1506, không ghi gì', async () => {
+    const { service, repository } = withBase(bookRow({ id: 'base-b', branchIds: ['bB'] }));
+    await expect(service.create(request(formulaOn('base-b')), PM_A)).rejects.toMatchObject({
+      response: { code: ErrorCode.BRANCH_ACCESS_DENIED },
+    });
+    expect(repository.create).not.toHaveBeenCalled();
+  });
+
+  it('PM A dùng base = bảng toàn chuỗi → OK; base = bảng có chi nhánh A → OK', async () => {
+    for (const branchIds of [[], ['bA'], ['bA', 'bB']]) {
+      const { service } = withBase(bookRow({ id: 'base-x', branchIds }));
+      await expect(service.create(request(formulaOn('base-x')), PM_A)).resolves.toBeDefined();
+    }
+  });
+
+  it('ADMIN dùng base là bảng bất kỳ → OK', async () => {
+    const { service } = withBase(bookRow({ id: 'base-b', branchIds: ['bB'] }));
+    await expect(
+      service.create(request({ branchIds: ['b1'], formula: formulaOn('base-b').formula }), ADMIN),
+    ).resolves.toBeDefined();
+  });
+
+  it('sửa bảng: PM A đổi base sang bảng chỉ của B → 403 1506', async () => {
+    const own = bookRow({ id: 'book-1', branchIds: ['bA'] });
+    const other = bookRow({ id: 'base-b', branchIds: ['bB'] });
+    const { service, repository } = makeService({
+      findById: jest.fn((id: string) => Promise.resolve(id === 'book-1' ? own : other)),
+    });
+    await expect(service.update('book-1', request(formulaOn('base-b')), PM_A)).rejects.toMatchObject({
+      response: { code: ErrorCode.BRANCH_ACCESS_DENIED },
+    });
+    expect(repository.update).not.toHaveBeenCalled();
+  });
+
+  it('base không tồn tại vẫn → 1602', async () => {
+    const { service } = withBase(null);
+    await expect(service.create(request(formulaOn('nope')), PM_A)).rejects.toMatchObject({
+      errorCode: ErrorCode.INVALID_REFERENCE,
     });
   });
 });

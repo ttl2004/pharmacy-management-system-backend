@@ -6,12 +6,12 @@ import { ErrorCode } from 'src/common/types/error-code';
 import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
-import { resolveBranchScope, scopedBranchFilter } from '../../feature-auth/permission/branch-scope';
+import { BranchScope, resolveBranchScope, scopedBranchFilter } from '../../feature-auth/permission/branch-scope';
 import { PriceRowsFilterRequest, SetBookItemRequest } from './dtos/price-book-rows.request';
 import { PRICE_BOOK_AUDIT_ENTITY } from './price-book-audit';
 import { computeFormulaPrice, FormulaTerms } from './price-book-formula';
 import { toRowsFilter } from './price-book-rows-filter';
-import { assertCanEditBook } from './price-book-scope';
+import { assertCanEditBook, assertCanReadBook } from './price-book-scope';
 import { PriceBookRepository, PriceBookRow } from './repositories/price-book.repository';
 import { PriceBookRowsRepository, RawPriceRow } from './repositories/price-book-rows.repository';
 
@@ -73,7 +73,7 @@ export class PriceBookItemsService {
     }
     const branchId = scopedBranchFilter(resolveBranchScope(user), dto.branchId);
     const rows = await this.rowsRepository.findAll(toRowsFilter(dto, branchId));
-    const bases = await this.toBasePrices(book.formulaBase, rows);
+    const bases = await this.toBasePrices(book.formulaBase, rows, resolveBranchScope(user));
     // MỘT entry cho cả lần áp (có thể hàng trăm dòng), cùng transaction với việc ghi giá.
     const count = await this.bookRepository.transaction(async (tx) => {
       const written = await this.applyFormula(book.id, bases, tx);
@@ -107,6 +107,7 @@ export class PriceBookItemsService {
     tx: Prisma.TransactionClient,
     book: PriceBookRow,
     branchId: string | undefined,
+    scope: BranchScope,
   ): Promise<number> {
     if (!book.formulaBase) return 0;
     const unitIds = await this.rowsRepository.findItemUnitIds(tx, book.id);
@@ -118,7 +119,7 @@ export class PriceBookItemsService {
       branchId,
       productUnitIds: unitIds,
     });
-    return this.applyFormula(book.id, await this.toBasePrices(book.formulaBase, rows), tx);
+    return this.applyFormula(book.id, await this.toBasePrices(book.formulaBase, rows, scope), tx);
   }
 
   /**
@@ -139,11 +140,23 @@ export class PriceBookItemsService {
   }
 
   /** Giá gốc của từng dòng theo `formula.base`: giá vốn / giá nhập cuối / giá chung / giá trong một bảng khác. */
-  private async toBasePrices(base: string, rows: RawPriceRow[]): Promise<BasePriceRow[]> {
+  private async toBasePrices(base: string, rows: RawPriceRow[], scope: BranchScope): Promise<BasePriceRow[]> {
     if (base === 'avgCost' || base === 'lastPurchaseCost') {
       return rows.map((r) => ({ productUnitId: r.productUnitId, basePrice: r[base] }));
     }
     if (base === 'general') return rows.map((r) => ({ productUnitId: r.productUnitId, basePrice: r.generalPrice }));
+    // Kiểm lại lúc áp: phạm vi của bảng gốc có thể đã đổi sau khi công thức được lưu.
+    const baseBook = await this.bookRepository.findById(base);
+    if (!baseBook) {
+      throw new ErrorException({
+        code: ErrorCode.INVALID_REFERENCE,
+        message: 'Bảng giá gốc của công thức không tồn tại',
+      });
+    }
+    assertCanReadBook(
+      scope,
+      baseBook.branches.map((b) => b.branchId),
+    );
     const prices = await this.rowsRepository.findBookPrices(
       [base],
       rows.map((r) => r.productUnitId),

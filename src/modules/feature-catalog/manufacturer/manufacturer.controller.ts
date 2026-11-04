@@ -1,9 +1,8 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
-import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthzGuard } from '../../feature-auth/authz/guards/auth.guard';
-import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
 import { CreateManufacturerRequest, UpdateManufacturerRequest } from './dtos/manufacturer.request';
@@ -38,8 +37,8 @@ export class ManufacturerController {
   @RequirePermissions('manufacturer:create')
   @Post()
   @ApiOperation({ description: 'Tạo hãng sản xuất.' })
-  create(@Body() dto: CreateManufacturerRequest, @CurrentUser() user: JwtUser) {
-    return this.manufacturerService.create(dto, user.userId);
+  create(@Body() dto: CreateManufacturerRequest, @CurrentActor() actor: RequestActor) {
+    return this.manufacturerService.create(dto, actor);
   }
 
   @RequirePermissions('manufacturer:update')
@@ -48,15 +47,15 @@ export class ManufacturerController {
   update(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: UpdateManufacturerRequest,
-    @CurrentUser() user: JwtUser,
+    @CurrentActor() actor: RequestActor,
   ) {
-    return this.manufacturerService.update(id, dto, user.userId);
+    return this.manufacturerService.update(id, dto, actor);
   }
 
   @RequirePermissions('manufacturer:delete')
   @Delete(':id')
   @ApiOperation({ description: 'Xoá mềm hãng sản xuất. Từ chối nếu còn sản phẩm tham chiếu.' })
-  remove(@Param('id', new ParseUUIDPipe()) id: string) {
-    return this.manufacturerService.remove(id);
+  remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
+    return this.manufacturerService.remove(id, actor);
   }
 }

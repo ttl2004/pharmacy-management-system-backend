@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AuditLogModule } from 'src/providers/audit-log/audit-log.module';
 import { AuthzModule } from '../../feature-auth/authz/authz.module';
 import { PermissionModule } from '../../feature-auth/permission/permission.module';
 import { InventoryCoreModule } from '../core/inventory-core.module';
@@ -11,10 +12,14 @@ import { AdjustmentRepository } from './repositories/adjustment.repository';
 import { PurchaseReturnRepository } from './repositories/purchase-return.repository';
 
 @Module({
-  imports: [InventoryCoreModule, PermissionModule, AuthzModule],
+  imports: [InventoryCoreModule, PermissionModule, AuthzModule, AuditLogModule],
   controllers: [AdjustmentController, InternalUseTypeController],
   providers: [
-    AdjustmentService, AdjustmentRepository, InternalUseTypeService, PurchaseReturnMoneyService, PurchaseReturnRepository,
+    AdjustmentService,
+    AdjustmentRepository,
+    InternalUseTypeService,
+    PurchaseReturnMoneyService,
+    PurchaseReturnRepository,
   ],
 })
 export class AdjustmentModule {}

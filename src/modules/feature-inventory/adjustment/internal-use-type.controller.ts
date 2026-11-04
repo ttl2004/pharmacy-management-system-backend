@@ -26,7 +26,7 @@ export class InternalUseTypeController {
   @Post()
   @ApiOperation({ description: 'Tạo loại xuất. Trùng tên → 1601.' })
   create(@Body() dto: InternalUseTypeRequest, @CurrentActor() actor: RequestActor) {
-    return this.service.create(dto, actor.user.userId);
+    return this.service.create(dto, actor);
   }
 
   @RequirePermissions('stock-adjustment:create')
@@ -37,13 +37,13 @@ export class InternalUseTypeController {
     @Body() dto: InternalUseTypeRequest,
     @CurrentActor() actor: RequestActor,
   ) {
-    return this.service.update(id, dto, actor.user.userId);
+    return this.service.update(id, dto, actor);
   }
 
   @RequirePermissions('stock-adjustment:create')
   @Delete(':id')
   @ApiOperation({ description: 'Xoá loại xuất chưa có phiếu dùng (đã dùng → 1602).' })
   remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
-    return this.service.remove(id, actor.user.userId);
+    return this.service.remove(id, actor);
   }
 }

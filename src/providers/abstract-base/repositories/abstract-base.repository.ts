@@ -1,3 +1,5 @@
+import type { Prisma } from '@prisma/client';
+
 export type SortDirection = 'ASC' | 'DESC' | 'asc' | 'desc' | 1 | -1;
 
 export interface QueryRange {
@@ -52,11 +54,16 @@ export interface BaseRecord {
 export type BaseWhere<T> = Partial<Record<keyof T & string, unknown>>;
 
 export interface IBaseRepository<T extends BaseRecord> {
-  create(data: Partial<T>): Promise<T>;
+  create(data: Partial<T>, client?: Prisma.TransactionClient): Promise<T>;
   findOne(filter?: BaseWhere<T>, options?: BaseFindOptions): Promise<T | null>;
   findMany(filter?: BaseWhere<T>, options?: BaseFindOptions): Promise<T[]>;
   findManyWithPagination(filter?: BaseWhere<T>, options?: BaseFindOptions): Promise<PaginationResult<T>>;
-  update(filter: BaseWhere<T>, data: Partial<T>, options?: BaseFindOptions): Promise<T | null>;
-  softDelete(filter: BaseWhere<T>, options?: BaseFindOptions): Promise<boolean>;
+  update(
+    filter: BaseWhere<T>,
+    data: Partial<T>,
+    options?: BaseFindOptions,
+    client?: Prisma.TransactionClient,
+  ): Promise<T | null>;
+  softDelete(filter: BaseWhere<T>, client?: Prisma.TransactionClient): Promise<boolean>;
   softDeleteMany(filter: BaseWhere<T>, options?: BaseFindOptions): Promise<boolean>;
 }

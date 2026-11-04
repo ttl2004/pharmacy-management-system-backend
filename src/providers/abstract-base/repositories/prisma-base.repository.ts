@@ -37,8 +37,13 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
 
   /** Delegate của model, ví dụ `prisma.user` cho `'User'`. */
   protected get delegate(): Delegate {
+    return this.delegateOf();
+  }
+
+  /** Delegate của `client` (transaction đang chạy) nếu có, không thì của `this.prisma`. */
+  protected delegateOf(client?: Prisma.TransactionClient): Delegate {
     const key = this.modelName.charAt(0).toLowerCase() + this.modelName.slice(1);
-    return (this.prisma as unknown as Record<string, Delegate>)[key];
+    return ((client ?? this.prisma) as unknown as Record<string, Delegate>)[key];
   }
 
   private columns?: Set<string>;
@@ -230,10 +235,10 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
     return { ...(row as T) };
   }
 
-  async create(data: Partial<T>): Promise<T> {
+  async create(data: Partial<T>, client?: Prisma.TransactionClient): Promise<T> {
     const base = data as Partial<BaseRecord>;
 
-    const created = await this.delegate.create({
+    const created = await this.delegateOf(client).create({
       data: {
         ...this.pickColumns(data),
         createdAt: base.createdAt ?? new Date(),
@@ -299,20 +304,26 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
     };
   }
 
-  async update(filter: BaseWhere<T>, data: Partial<T>, options?: BaseFindOptions): Promise<T | null> {
+  async update(
+    filter: BaseWhere<T>,
+    data: Partial<T>,
+    options?: BaseFindOptions,
+    client?: Prisma.TransactionClient,
+  ): Promise<T | null> {
     const { relations } = this.parseOptions(options);
+    const delegate = this.delegateOf(client);
 
-    const existing = await this.delegate.findFirst({ where: this.buildWhere(filter) });
+    const existing = await delegate.findFirst({ where: this.buildWhere(filter) });
     if (!existing) return null;
 
     const id = (existing as { id: string }).id;
 
-    await this.delegate.updateMany({
+    await delegate.updateMany({
       where: { id },
       data: { ...this.pickColumns(data), updatedAt: new Date() },
     });
 
-    const updated = await this.delegate.findFirst({ where: { id }, include: this.toInclude(relations) });
+    const updated = await delegate.findFirst({ where: { id }, include: this.toInclude(relations) });
 
     return updated ? this.toPlain(updated) : null;
   }
@@ -320,16 +331,16 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
   /**
    * Soft delete. Trả về `true` khi có ít nhất một dòng thực sự bị sửa.
    */
-  async softDelete(filter: BaseWhere<T>): Promise<boolean> {
-    return this.applySoftDelete(filter);
+  async softDelete(filter: BaseWhere<T>, client?: Prisma.TransactionClient): Promise<boolean> {
+    return this.applySoftDelete(filter, client);
   }
 
   async softDeleteMany(filter: BaseWhere<T>): Promise<boolean> {
     return this.applySoftDelete(filter);
   }
 
-  private async applySoftDelete(filter: BaseWhere<T>): Promise<boolean> {
-    const result = await this.delegate.updateMany({
+  private async applySoftDelete(filter: BaseWhere<T>, client?: Prisma.TransactionClient): Promise<boolean> {
+    const result = await this.delegateOf(client).updateMany({
       where: { ...this.sanitize(filter), isDeleted: false },
       data: { isDeleted: true, updatedAt: new Date() },
     });

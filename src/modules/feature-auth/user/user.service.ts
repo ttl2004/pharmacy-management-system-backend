@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Branch, Role, User, UserStatus } from '@prisma/client';
+import { Branch, Prisma, Role, User, UserStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { APP_CONSTANTS } from 'src/common/constants/app.constant';
 import { ErrorException } from 'src/common/exceptions/error.exception';
@@ -10,7 +10,7 @@ import { normalizePhoneSearch } from 'src/common/utils/phone.util';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
-import { SessionStore } from '../authz/session.store';
+import { SessionTransactions } from '../authz/session.store';
 import type { JwtUser } from '../authz/types/authz.types';
 import {
   assertBranchInScope,
@@ -38,7 +38,7 @@ export class UserService extends AbstractBaseService<User> {
   constructor(
     private readonly userRepository: UserRepository,
     private readonly prisma: PrismaService,
-    private readonly sessions: SessionStore,
+    private readonly transactions: SessionTransactions,
   ) {
     super(userRepository);
   }
@@ -239,12 +239,23 @@ export class UserService extends AbstractBaseService<User> {
     if (dto.status !== undefined) data.status = dto.status;
     if (dto.branchId !== undefined) data.branchId = dto.branchId ?? null;
 
+    // Khoá/ngừng tài khoản thì phiên đang sống phải chết ngay, không đợi access token hết hạn (báo cáo bảo mật #7).
+    const revokeSessions =
+      dto.status !== undefined && dto.status !== current.status && dto.status !== UserStatus.ACTIVE;
+
     try {
-      const updated = await this.userRepository.update({ id }, data, { relations: USER_RELATIONS });
-      if (!updated) {
-        throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
-      }
-      return updated as UserDetail;
+      // `forUser` giữ khoá phiên của người này, chạy nối tiếp với đăng nhập, và bỏ cache phiên (`changed()`) sau commit.
+      return await this.transactions.forUser(id, async (tx) => {
+        const updated = await this.userRepository.update({ id }, data, { relations: USER_RELATIONS }, tx);
+        if (!updated) {
+          throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+        }
+        if (revokeSessions) {
+          await this.revokeRefreshTokens(tx, id);
+          // TODO(audit-v21 Task 13): ghi AUTH.SESSIONS_REVOKED_BY_ADMIN (securityEvents.record, cùng tx) tại đây.
+        }
+        return updated as UserDetail;
+      });
     } catch (error) {
       rethrowDuplicate(error);
     }
@@ -264,16 +275,22 @@ export class UserService extends AbstractBaseService<User> {
     // Rào cấp bậc: không xoá được người cùng cấp hoặc cao hơn (1508).
     assertOutranks(caller.roleLevel, target.role.level);
 
-    const deleted = await this.userRepository.softDelete({ id });
-    if (!deleted) {
-      throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
-    }
-
-    // Thu hồi sau khi xoá: nếu bước này lỗi thì bản ghi đã xoá mềm rồi, phiên sẽ chết ở lần
-    // refresh kế tiếp vì token trỏ tới user đã isDeleted.
-    await this.sessions.revokeAllByUser(id);
+    // Xoá mềm và thu hồi phiên cùng một transaction: không có khe hở user đã xoá mà phiên còn sống.
+    await this.transactions.forUser(id, async (tx) => {
+      const deleted = await this.userRepository.softDelete({ id }, tx);
+      if (!deleted) {
+        throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+      }
+      await this.revokeRefreshTokens(tx, id);
+      // TODO(audit-v21 Task 13): ghi AUTH.SESSIONS_REVOKED_BY_ADMIN (securityEvents.record, cùng tx) tại đây.
+    });
 
     return { success: true };
+  }
+
+  /** Thu hồi mọi refresh token còn hiệu lực của user — phiên (`sid`) của họ chết ở lần kiểm kế tiếp. */
+  private async revokeRefreshTokens(tx: Prisma.TransactionClient, userId: string): Promise<void> {
+    await tx.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
   }
 
   /** Luật 14: không ai sửa/xoá được tài khoản SUPER_ADMIN. */

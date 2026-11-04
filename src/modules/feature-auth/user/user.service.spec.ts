@@ -3,6 +3,7 @@ import { ErrorException } from 'src/common/exceptions/error.exception';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import type { JwtUser } from '../authz/types/authz.types';
+import { SessionTransactions } from '../authz/session.store';
 import { UserService } from './user.service';
 
 const CN1 = '11111111-1111-4111-8111-111111111111';
@@ -46,7 +47,6 @@ async function codeOf(promise: Promise<unknown>): Promise<number | undefined> {
  */
 function makeService(
   repositoryOverrides: Record<string, jest.Mock> = {},
-  sessionOverrides: Record<string, jest.Mock> = {},
   infra: { prisma?: Record<string, unknown>; tx?: Record<string, unknown> } = {},
 ) {
   const repository = {
@@ -57,14 +57,12 @@ function makeService(
   const prisma = {
     role: { findFirst: jest.fn() },
     branch: { findFirst: jest.fn() },
-    $transaction: jest.fn((work: (tx: unknown) => unknown) => work(infra.tx ?? {})),
+    $transaction: jest.fn((work: (tx: unknown) => unknown) => work({ $executeRaw: jest.fn(), ...infra.tx })),
     ...infra.prisma,
   } as never;
-  const sessions = {
-    revokeAllByUser: jest.fn().mockResolvedValue(undefined),
-    ...sessionOverrides,
-  } as never;
-  return new UserService(repository, prisma, sessions);
+  // Transaction phiên thật (khoá advisory chạy trên `tx` giả) để kiểm cả `revision`.
+  const transactions = new SessionTransactions(prisma);
+  return new UserService(repository, prisma, transactions);
 }
 
 const EMPTY_PAGE = { hits: [], total: 0, page: 1, totalPages: 0, limit: 10 };
@@ -218,7 +216,7 @@ describe('UserService — phạm vi chi nhánh', () => {
       // Chống leo thang (1509): vai trò đích không đòi quyền nào nên luôn ⊆ quyền người gọi.
       rolePermission: { findMany: jest.fn().mockResolvedValue([]) },
     };
-    const service = makeService({}, {}, { prisma, tx });
+    const service = makeService({}, { prisma, tx });
 
     await service.create(
       { fullName: 'Nhân viên mới', phoneNumber: '0987000001', roleCode: AuthRole.SALES_STAFF },
@@ -230,7 +228,7 @@ describe('UserService — phạm vi chi nhánh', () => {
 
   it('tạo người dùng ở chi nhánh khác bị chặn 1506 trước khi tra vai trò', async () => {
     const roleLookup = jest.fn();
-    const service = makeService({}, {}, { prisma: { role: { findFirst: roleLookup } } });
+    const service = makeService({}, { prisma: { role: { findFirst: roleLookup } } });
 
     expect(
       await codeOf(
@@ -333,13 +331,78 @@ describe('UserService — xoá người dùng', () => {
     });
   });
 
-  it('xoá thành công thì thu hồi mọi refresh token của người đó', async () => {
-    const revokeAllByUser = jest.fn().mockResolvedValue(undefined);
+  it('xoá thành công thì thu hồi mọi refresh token của người đó trong cùng tx và tăng revision', async () => {
+    const updateMany = jest.fn().mockResolvedValue({ count: 2 });
+    const tx = { refreshToken: { updateMany } };
     const softDelete = jest.fn().mockResolvedValue(true);
-    const service = makeService({ softDelete }, { revokeAllByUser });
+    const service = makeService({ softDelete }, { tx });
     jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    const transactions = (service as unknown as { transactions: SessionTransactions }).transactions;
+    const before = transactions.revision;
+
     await expect(service.remove('other-id', caller('me-id'))).resolves.toEqual({ success: true });
-    expect(revokeAllByUser).toHaveBeenCalledWith('other-id');
+
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { userId: 'other-id', revokedAt: null },
+      data: { revokedAt: expect.any(Date) as Date },
+    });
+    expect((softDelete.mock.calls as unknown[][])[0][1]).toMatchObject({ refreshToken: { updateMany } });
+    expect(transactions.revision).toBeGreaterThan(before);
+  });
+});
+
+describe('UserService — khoá/ngừng tài khoản thu hồi phiên (báo cáo bảo mật #7)', () => {
+  function setup(currentStatus: string) {
+    const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const tx = { refreshToken: { updateMany } };
+    const update = jest.fn().mockResolvedValue({ id: 'u1' });
+    const service = makeService(
+      {
+        findByIdWithRole: jest.fn().mockResolvedValue({
+          id: 'u1',
+          status: currentStatus,
+          role: { code: 'SALES_STAFF', level: 40 },
+        }),
+        update,
+      },
+      { tx },
+    );
+    const transactions = (service as unknown as { transactions: SessionTransactions }).transactions;
+    return { service, updateMany, update, tx, transactions };
+  }
+
+  it.each(['LOCKED', 'INACTIVE'])(
+    'đổi status ACTIVE→%s thu hồi refresh token trong cùng tx và tăng revision',
+    async (to) => {
+      const { service, updateMany, update, transactions } = setup('ACTIVE');
+      const before = transactions.revision;
+
+      await service.update('u1', { status: to } as never, ADMIN);
+
+      expect(updateMany).toHaveBeenCalledWith({
+        where: { userId: 'u1', revokedAt: null },
+        data: { revokedAt: expect.any(Date) as Date },
+      });
+      // Cập nhật user và thu hồi token chạy trên CÙNG một tx.
+      expect((update.mock.calls as unknown[][])[0][3]).toMatchObject({ refreshToken: { updateMany } });
+      expect(transactions.revision).toBeGreaterThan(before);
+    },
+  );
+
+  it('chỉ sửa hồ sơ (không đổi status) thì không thu hồi phiên', async () => {
+    const { service, updateMany } = setup('ACTIVE');
+
+    await service.update('u1', { fullName: 'Tên mới' }, ADMIN);
+
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it('mở khoá LOCKED→ACTIVE không thu hồi phiên', async () => {
+    const { service, updateMany } = setup('LOCKED');
+
+    await service.update('u1', { status: 'ACTIVE' } as never, ADMIN);
+
+    expect(updateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -383,7 +446,7 @@ describe('UserService — rào cấp bậc', () => {
       role: { findFirst: jest.fn().mockResolvedValue({ id: 'role-pm', code: 'PHARMACY_MANAGER', level: 60 }) },
       branch: { findFirst: branchLookup },
     };
-    const service = makeService({}, {}, { prisma });
+    const service = makeService({}, { prisma });
 
     expect(
       await codeOf(

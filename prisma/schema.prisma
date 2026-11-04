@@ -1155,25 +1155,66 @@ model PriceBookItem {
 
 /// Nhật ký thao tác — BẤT BIẾN, chỉ thêm. Ghi trong CÙNG transaction với thao tác nghiệp vụ.
 model AuditLog {
-  id         String      @id @default(uuid()) @db.Uuid
-  createdAt  DateTime    @default(now()) @db.Timestamptz(3)
-  actorId    String      @db.Uuid
-  action     AuditAction
-  entityType String      @db.VarChar(50)
-  entityId   String      @db.Uuid
-  branchId   String?     @db.Uuid
-  before     Json?       @db.JsonB
-  after      Json?       @db.JsonB
-  reason     String?     @db.Text
-  ipAddress  String?     @db.VarChar(45)
+  id              String      @id @default(uuid(7)) @db.Uuid
+  createdAt       DateTime    @default(now()) @db.Timestamptz(3)
+  actorId         String      @db.Uuid
+  /// Giữ để FE cũ chạy; nghiệp vụ mới đọc `event`.
+  action          AuditAction
+  event           String      @db.VarChar(64)
+  actorType       String      @default("USER") @db.VarChar(10)
+  actorRoleCode   String?     @db.VarChar(50)
+  /// Snapshot chi nhánh của actor lúc ghi, không index.
+  actorBranchId   String?     @db.Uuid
+  entityType      String      @db.VarChar(50)
+  entityId        String      @db.Uuid
+  entityLabel     String?     @db.VarChar(120)
+  /// Giữ để FE cũ chạy: = branchIds[0] khi đúng 1 phần tử.
+  branchId        String?     @db.Uuid
+  branchIds       String[]    @default([]) @db.Uuid
+  severity        Int         @default(0) @db.SmallInt
+  amount          BigInt?
+  before          Json?       @db.JsonB
+  after           Json?       @db.JsonB
+  metadata        Json?       @db.JsonB
+  metadataVersion Int         @default(1) @db.SmallInt
+  reason          String?     @db.Text
+  ipAddress       String?     @db.VarChar(45)
+  requestId       String?     @db.Uuid
+  /// Không bao giờ trả qua API.
+  searchText      String      @default("") @db.Text
 
   actor  User    @relation("AuditLogActor", fields: [actorId], references: [id], onDelete: Restrict)
   branch Branch? @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@index([entityType, entityId, createdAt])
   @@index([actorId, createdAt])
-  @@index([branchId, createdAt])
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  @@index([event, createdAt])
+  @@index([branchIds], type: Gin)
+  @@index([searchText(ops: raw("gin_trgm_ops"))], type: Gin, map: "audit_logs_search_trgm_idx")
   @@map("audit_logs")
+}
+
+/// Sự kiện bảo mật (đăng nhập, phân quyền...). Append-only như audit_logs.
+model SecurityEvent {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  type          String   @db.VarChar(40)
+  outcome       String   @db.VarChar(10)
+  severity      Int      @default(0) @db.SmallInt
+  /// Không FK; null với LOGIN_FAILED_BURST.
+  actorId       String?  @db.Uuid
+  actorRoleCode String?  @db.VarChar(50)
+  sessionId     String?  @db.VarChar(50)
+  ipAddress     String?  @db.VarChar(45)
+  userAgent     String?  @db.VarChar(255)
+  requestId     String?  @db.Uuid
+  metadata      Json?    @db.JsonB
+
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  @@index([actorId, type, createdAt])
+  @@index([type, createdAt])
+  @@map("security_events")
 }
 
 // ============================================================

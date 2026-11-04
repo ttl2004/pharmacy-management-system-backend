@@ -10,6 +10,7 @@ import { StorefrontModule } from './modules/feature-storefront/storefront.module
 import { InventoryModule } from './modules/feature-inventory/inventory.module';
 import { SalesModule } from './modules/feature-sales/sales.module';
 import { AuditLogQueryModule } from './modules/feature-audit/audit-log-query.module';
+import { AssistantModule } from './modules/feature-assistant/assistant.module';
 import { DatabaseModule } from './common/databases/database.module';
 import { ScheduleModule } from '@nestjs/schedule';
 
@@ -54,6 +55,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     InventoryModule,
     SalesModule,
     AuditLogQueryModule,
+    AssistantModule,
 
     // MailerModule,
   ],

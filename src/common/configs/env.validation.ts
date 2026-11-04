@@ -101,6 +101,14 @@ export const envSchema = z
         'DRUG_SOURCE_URL phải là URL http(s)',
       )
       .default('http://localhost:8001'),
+
+    //- Trợ lý hỏi đáp thuốc (RAG service: projects/base-rag/api.py hoặc bản RAG hoàn chỉnh cùng hợp đồng)
+    RAG_SERVICE_URL: z
+      .string()
+      .refine((url) => URL.canParse(url) && /^https?:$/.test(new URL(url).protocol), 'RAG_SERVICE_URL phải là URL http(s)')
+      .default('http://127.0.0.1:8790'),
+    // Gửi qua header X-Internal-Key; phải trùng RAG_INTERNAL_KEY bên RAG service. Bỏ trống = không gửi.
+    RAG_INTERNAL_KEY: z.string().optional(),
   })
   .refine((env) => env.COOKIE_SAMESITE !== 'none' || env.COOKIE_SECURE === 'true', {
     message: 'COOKIE_SAMESITE=none yêu cầu COOKIE_SECURE=true',

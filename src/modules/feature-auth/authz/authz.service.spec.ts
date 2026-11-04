@@ -4,6 +4,7 @@ import { ErrorCode } from 'src/common/types/error-code';
 import * as bcrypt from 'bcrypt';
 import { AuthzService } from './authz.service';
 import { authError } from './auth.error';
+import { LoginFailureMonitor } from './login-failure.monitor';
 
 function makeService(prisma: { user: Record<string, jest.Mock>; role: Record<string, jest.Mock> }) {
   return new AuthzService(
@@ -12,6 +13,8 @@ function makeService(prisma: { user: Record<string, jest.Mock>; role: Record<str
     {} as never,
     {} as never,
     prisma as never,
+    {} as never,
+    {} as never,
     {} as never,
     {} as never,
   );
@@ -69,6 +72,8 @@ describe('AuthzService security events', () => {
     const security = { record: jest.fn().mockResolvedValue(undefined) };
     const sessions = { revokeAllByUser: jest.fn().mockResolvedValue(undefined) };
     const repo = { findByUsernameWithUser: jest.fn().mockResolvedValue(found) };
+    const monitor = new LoginFailureMonitor();
+    const detector = { check: jest.fn().mockResolvedValue(false) };
     const service = new AuthzService(
       repo as never,
       {} as never,
@@ -77,8 +82,10 @@ describe('AuthzService security events', () => {
       {} as never,
       sessions as never,
       security as never,
+      monitor,
+      detector as never,
     );
-    return { service, security, sessions };
+    return { service, security, sessions, detector };
   }
   const fail = (p: Promise<unknown>) =>
     p.then(
@@ -114,10 +121,48 @@ describe('AuthzService security events', () => {
     ]);
   });
 
-  it('username không tồn tại: không ghi gì (D3 đếm theo IP ở Task 14)', async () => {
-    const { service, security } = make(null);
-    await fail(service.login({ username: 'ghost', password: 'x' }, CTX));
+  it('username không tồn tại: không ghi LOGIN_FAILED; lần thứ 20 cùng IP ghi LOGIN_FAILED_BURST actorId null', async () => {
+    const { service, security, detector } = make(null);
+    for (let i = 1; i <= 19; i++) {
+      const err = await fail(service.login({ username: `ghost${i}`, password: 'x' }, CTX));
+      expect(err?.getResponse?.().code).toBe(ErrorCode.LOGIN_INVALID);
+    }
     expect(security.record).not.toHaveBeenCalled();
+    await fail(service.login({ username: 'ghost20', password: 'x' }, CTX));
+    expect(security.record).toHaveBeenCalledTimes(1);
+    const [events] = security.record.mock.calls[0] as [Record<string, unknown>[]];
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'AUTH.LOGIN_FAILED_BURST',
+        actorId: null,
+        metadata: { count: 20, windowStart: expect.any(String) as string },
+      }),
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(/ghost/);
+    expect(detector.check).not.toHaveBeenCalled();
+    await fail(service.login({ username: 'ghost21', password: 'x' }, CTX));
+    expect(security.record).toHaveBeenCalledTimes(1);
+  });
+
+  it('nhân viên sai mật khẩu: detector.check chạy sau khi ghi LOGIN_FAILED, trước khi throw', async () => {
+    const { service, security, detector } = make(authzOf('SALES_STAFF'));
+    await fail(service.login({ username: 'u', password: 'sai' }, CTX));
+    expect(detector.check).toHaveBeenCalledWith('u1', 'SALES_STAFF', CTX);
+    expect(security.record.mock.invocationCallOrder[0]).toBeLessThan(detector.check.mock.invocationCallOrder[0]);
+  });
+
+  it('khách hàng sai mật khẩu: không đụng detector', async () => {
+    const { service, detector } = make(authzOf('CUSTOMER'));
+    await fail(service.login({ username: 'u', password: 'sai' }, CTX));
+    expect(detector.check).not.toHaveBeenCalled();
+  });
+
+  it('không có khoá: sau 11 lần sai, mật khẩu đúng vẫn đăng nhập được', async () => {
+    const { service } = make(authzOf('SALES_STAFF'));
+    for (let i = 0; i < 11; i++) await fail(service.login({ username: 'u', password: 'sai' }, CTX));
+    await expect(service.login({ username: 'u', password: 'dung-mat-khau' }, CTX)).resolves.toEqual({
+      accessToken: 'a',
+    });
   });
 
   it('logout-all ghi LOGOUT_ALL cho nhân viên, không ghi cho khách hàng', async () => {
@@ -143,6 +188,8 @@ describe('AuthzService security events', () => {
       {} as never,
       {} as never,
       security as never,
+      {} as never,
+      {} as never,
     );
     await service.logout('s', undefined);
     expect(security.record).not.toHaveBeenCalled();

@@ -1,5 +1,7 @@
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { LoginFailureMonitor } from './login-failure.monitor';
+import { BruteForceDetector } from './brute-force.detector';
 import { TokenService } from './token.service';
 import { SessionStore } from './session.store';
 import type { RequestContext } from 'src/common/decorators/request-context';
@@ -41,6 +43,8 @@ export class AuthzService extends AbstractBaseService<Auth> {
     private readonly prisma: PrismaService,
     private readonly sessions: SessionStore,
     private readonly security: SecurityEventService,
+    private readonly loginFailures: LoginFailureMonitor,
+    private readonly bruteForce: BruteForceDetector,
   ) {
     super(authzRepository);
   }
@@ -142,15 +146,34 @@ export class AuthzService extends AbstractBaseService<Auth> {
     }
   }
 
-  /** Chỉ ghi cho nhân viên (D1/D2); khách hàng và username không tồn tại không có dòng nào. */
+  /**
+   * Nhân viên: ghi `LOGIN_FAILED` rồi kiểm tra dò mật khẩu (D4, không khoá). Khách hàng: không ghi gì (D2).
+   * Username không tồn tại: không ghi từng lần, chỉ đếm theo IP và báo một dòng `LOGIN_FAILED_BURST` (D3).
+   * Mọi trường hợp client đều nhận cùng `LOGIN_INVALID`.
+   */
   private async recordLoginFailure(
     user: { id: string; role: { code: string } } | null | undefined,
     ctx: RequestContext,
   ) {
-    if (!user || !isStaffRole(user.role.code)) return;
+    if (!user) {
+      const result = this.loginFailures.recordUnknownUsername(ctx.ip);
+      if (result.burst) {
+        await this.security.record([
+          {
+            type: 'AUTH.LOGIN_FAILED_BURST',
+            actorId: null,
+            context: ctx,
+            metadata: { count: result.count, windowStart: result.windowStart.toISOString() },
+          },
+        ]);
+      }
+      return;
+    }
+    if (!isStaffRole(user.role.code)) return;
     await this.security.record([
       { type: 'AUTH.LOGIN_FAILED', actorId: user.id, actorRoleCode: user.role.code, context: ctx },
     ]);
+    await this.bruteForce.check(user.id, user.role.code, ctx);
   }
 
   async refreshToken(token: string | undefined, ctx: RequestContext) {

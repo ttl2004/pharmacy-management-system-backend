@@ -14,6 +14,8 @@ import { AuthzStrategy } from './strategies/auth.strategy';
 import { AuthConfig } from './auth.config';
 import { SessionStore, DbSessionStore, SessionTransactions } from './session.store';
 import { TokenService } from './token.service';
+import { LoginFailureMonitor } from './login-failure.monitor';
+import { BruteForceDetector } from './brute-force.detector';
 import { PasswordService } from './password.service';
 
 @Module({ imports: [ConfigModule], providers: [AuthConfig], exports: [AuthConfig] })
@@ -45,6 +47,8 @@ class AuthConfigModule {}
     SessionTransactions,
     TokenService,
     PasswordService,
+    LoginFailureMonitor,
+    BruteForceDetector,
     { provide: SessionStore, useClass: DbSessionStore },
   ],
   exports: [AuthzService, AuthzGuard, SessionStore, SessionTransactions, PasswordService],

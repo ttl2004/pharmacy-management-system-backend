@@ -121,13 +121,35 @@ describe('PriceBookService — nhật ký', () => {
     expect([...(entry.branchIds as string[])].sort()).toEqual(['b1', 'b2', 'b3']);
   });
 
-  it('sửa từ toàn chuỗi sang một chi nhánh → branchIds [] (bảng từng áp toàn chuỗi)', async () => {
+  it('sửa từ toàn chuỗi sang một chi nhánh → branchIds là hợp thuần [b1]', async () => {
     const { service, audit } = makeService({
       findById: jest.fn().mockResolvedValue(bookRow({ branchIds: [] })),
       update: jest.fn().mockResolvedValue(bookRow({ branchIds: ['b1'] })),
     });
 
     await service.update('book-1', request(), ADMIN);
+
+    expect(entriesOf(audit)[0]).toMatchObject({ event: 'PRICE_BOOK.UPDATED', branchIds: ['b1'] });
+  });
+
+  it('sửa từ một chi nhánh sang toàn chuỗi → branchIds là hợp thuần [b1]', async () => {
+    const { service, audit } = makeService({
+      findById: jest.fn().mockResolvedValue(bookRow({ branchIds: ['b1'] })),
+      update: jest.fn().mockResolvedValue(bookRow({ branchIds: [] })),
+    });
+
+    await service.update('book-1', request({ branchIds: [] }), ADMIN);
+
+    expect(entriesOf(audit)[0]).toMatchObject({ event: 'PRICE_BOOK.UPDATED', branchIds: ['b1'] });
+  });
+
+  it('toàn chuỗi → toàn chuỗi → branchIds []', async () => {
+    const { service, audit } = makeService({
+      findById: jest.fn().mockResolvedValue(bookRow({ branchIds: [] })),
+      update: jest.fn().mockResolvedValue(bookRow({ branchIds: [], name: 'Giá sỉ mới' })),
+    });
+
+    await service.update('book-1', request({ branchIds: [], name: 'Giá sỉ mới' }), ADMIN);
 
     expect(entriesOf(audit)[0]).toMatchObject({ event: 'PRICE_BOOK.UPDATED', branchIds: [] });
   });

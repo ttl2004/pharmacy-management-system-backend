@@ -55,16 +55,14 @@ export function priceBookCreatedEntry(row: PriceBookRow): AuditEntry {
 }
 
 /**
- * `null` khi không trường nào đổi — caller không ghi. Phạm vi = hợp chi nhánh trước và sau (người của chi nhánh bị
- * gỡ khỏi bảng vẫn thấy dòng này); một trong hai phía áp toàn chuỗi thì cả dòng là toàn chuỗi (`[]`).
+ * `null` khi không trường nào đổi — caller không ghi. Phạm vi = hợp thuần chi nhánh trước và sau (A.4, R17): người của
+ * chi nhánh bị gỡ khỏi bảng vẫn thấy dòng này; chỉ khi cả hai phía đều toàn chuỗi mới là `[]` (chỉ ADMIN thấy).
  */
 export function priceBookUpdatedEntry(before: PriceBookRow, after: PriceBookRow): AuditEntry | null {
   const diff = diffFields(snapshot(before), snapshot(after), FIELDS);
   if (!diff) return null;
   const statusOnly = Object.keys(diff.after).length === 1 && 'status' in diff.after;
-  const oldBranches = branchesOf(before);
-  const newBranches = branchesOf(after);
-  const branchIds = oldBranches.length && newBranches.length ? [...new Set([...oldBranches, ...newBranches])] : [];
+  const branchIds = [...new Set([...branchesOf(before), ...branchesOf(after)])];
   return {
     event: statusOnly ? 'PRICE_BOOK.STATUS_CHANGED' : 'PRICE_BOOK.UPDATED',
     ...base(after, branchIds),

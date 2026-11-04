@@ -166,6 +166,13 @@ Thứ tự này không tuỳ tiện: `seed:users` cần vai trò (do `seed:permi
 và job ghi id này vào `createdBy`/`updatedBy`; nó phải là người dùng thật để các cột người thao tác gắn được khoá
 ngoại sang `users` (bắt đầu từ nhóm bảng kho).
 
+### Nhật ký thao tác là bất biến
+
+- `audit_logs` và `security_events` chỉ cho thêm: trigger `audit_block_mutation` chặn UPDATE/DELETE/TRUNCATE (lỗi `append-only`).
+- Dọn DB dev: `npx prisma migrate reset` (**xoá sạch toàn bộ dữ liệu DB dev — sẽ mất dữ liệu**), hoặc trong code test dùng `withAuditMaintenance` (`src/test-support/db-test.ts`) — bật cờ `app.audit_maintenance` trong một transaction. `npm run test:db` chạy trên schema riêng `audit_db_test`.
+- Giới hạn đã biết (D7): app đang kết nối bằng superuser `postgres` nên về kỹ thuật trigger vẫn tắt được. Trước khi deploy thật phải tạo role DB riêng (NOSUPERUSER, không có UPDATE/DELETE/TRUNCATE trên hai bảng log, đặt `ALTER DEFAULT PRIVILEGES`), tách `DATABASE_URL` cho app và `DIRECT_URL` cho migrate/seed.
+- IP ghi vào nhật ký phụ thuộc cấu hình proxy — xem [TRUST_PROXY](#trust_proxy).
+
 Xem cấu hình tại: `src/common/configs/configuration.ts` và `src/common/databases/prisma.service.ts`.
 
 ---

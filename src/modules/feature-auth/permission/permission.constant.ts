@@ -71,6 +71,13 @@ export const PERMISSION_CATALOG = [
     sortOrder: 3,
   },
   { code: 'stock-adjustment:cancel', name: 'Huỷ phiếu điều chỉnh nháp', module: 'stock-adjustment', sortOrder: 4 },
+  // Loại xuất dùng nội bộ là danh mục TOÀN CHUỖI: chỉ ADMIN thêm/sửa/xoá; PM, nhân viên chỉ chọn khi lập phiếu.
+  {
+    code: 'internal-use-type:manage',
+    name: 'Quản lý loại xuất dùng nội bộ',
+    module: 'internal-use-type',
+    sortOrder: 1,
+  },
   { code: 'stock-batch:block', name: 'Khoá, mở khoá, thu hồi lô', module: 'stock-batch', sortOrder: 1 },
   { code: 'order:read', name: 'Xem đơn hàng', module: 'order', sortOrder: 1 },
   { code: 'order:create', name: 'Lập và sửa đơn tại quầy', module: 'order', sortOrder: 2 },

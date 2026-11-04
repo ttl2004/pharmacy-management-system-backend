@@ -239,3 +239,13 @@ describe('Danh mục quyền và mã lỗi', () => {
     }
   });
 });
+
+describe('Quyền quản lý loại xuất dùng nội bộ', () => {
+  it('chỉ ADMIN được cấp internal-use-type:manage; PM và SS không', () => {
+    expect(PERMISSION_CODES).toContain('internal-use-type:manage');
+    expect(DEFAULT_ROLE_GRANTS[AuthRole.ADMIN] ?? []).toContain('internal-use-type:manage');
+    for (const role of [AuthRole.PHARMACY_MANAGER, AuthRole.SALES_STAFF]) {
+      expect(DEFAULT_ROLE_GRANTS[role] ?? []).not.toContain('internal-use-type:manage');
+    }
+  });
+});

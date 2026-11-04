@@ -7,7 +7,7 @@ import { RequirePermissions } from '../../feature-auth/permission/decorators/req
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
 import { InternalUseTypeRequest, InternalUseTypeService } from './internal-use-type.service';
 
-/** Đọc cần quyền xem phiếu điều chỉnh; ghi cần quyền lập phiếu (như mock). */
+/** Đọc cần quyền xem phiếu điều chỉnh; thêm/sửa/xoá chỉ ADMIN (`internal-use-type:manage`, danh mục toàn chuỗi). */
 @Controller('internal-use-type')
 @ApiTags('StockAdjustment')
 @ApiBearerAuth(AUTH_JWT)
@@ -22,14 +22,14 @@ export class InternalUseTypeController {
     return this.service.list();
   }
 
-  @RequirePermissions('stock-adjustment:create')
+  @RequirePermissions('internal-use-type:manage')
   @Post()
   @ApiOperation({ description: 'Tạo loại xuất. Trùng tên → 1601.' })
   create(@Body() dto: InternalUseTypeRequest, @CurrentActor() actor: RequestActor) {
     return this.service.create(dto, actor);
   }
 
-  @RequirePermissions('stock-adjustment:create')
+  @RequirePermissions('internal-use-type:manage')
   @Put(':id')
   @ApiOperation({ description: 'Đổi tên loại xuất.' })
   update(
@@ -40,7 +40,7 @@ export class InternalUseTypeController {
     return this.service.update(id, dto, actor);
   }
 
-  @RequirePermissions('stock-adjustment:create')
+  @RequirePermissions('internal-use-type:manage')
   @Delete(':id')
   @ApiOperation({ description: 'Xoá loại xuất chưa có phiếu dùng (đã dùng → 1602).' })
   remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {

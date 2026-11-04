@@ -1248,6 +1248,11 @@ enum PaymentMethod {
   CARD
 }
 
+enum PaymentKind {
+  PAYMENT
+  REFUND
+}
+
 enum TransactionStatus {
   PENDING
   SUCCESS
@@ -1364,6 +1369,8 @@ model Payment {
   createdBy       String?           @db.Uuid
   updatedAt       DateTime?         @db.Timestamptz(3)
   orderId         String            @db.Uuid
+  /// PAYMENT = lượt thu; REFUND = lượt hoàn tiền khi huỷ hoá đơn đã thu (amount luôn dương).
+  kind            PaymentKind       @default(PAYMENT)
   method          PaymentMethod
   amount          BigInt
   status          TransactionStatus @default(PENDING)

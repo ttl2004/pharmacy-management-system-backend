@@ -68,6 +68,7 @@ const ORDER_DETAIL_SELECT = {
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     select: {
       id: true,
+      kind: true,
       method: true,
       amount: true,
       status: true,

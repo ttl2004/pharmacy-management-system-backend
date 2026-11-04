@@ -1,5 +1,13 @@
 import { Injectable } from '@nestjs/common';
-import { OrderChannel, OrderStatus, PaymentStatus } from '@prisma/client';
+import {
+  OrderChannel,
+  OrderStatus,
+  PaymentKind,
+  PaymentMethod,
+  PaymentStatus,
+  TransactionStatus,
+} from '@prisma/client';
+import { badRequest } from 'src/modules/feature-inventory/core/inventory.error';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { toDateOnlyString } from 'src/common/utils/date-only.util';
 import { resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
@@ -14,7 +22,7 @@ import { bookPriceOf, buildOrderLines, toBookPricing } from '../core/order-lines
 import { OrderStockService } from '../core/order-stock.service';
 import { SALES_AUDIT_ENTITY } from '../core/sales.constants';
 import { orderErrors } from '../core/sales.error';
-import { CancelOrderRequest, PreviewAllocationRequest } from './dtos/order.request';
+import { PreviewAllocationRequest, VoidPaidOrderRequest } from './dtos/order.request';
 import { OrderDetail, OrderRepository } from './repositories/order.repository';
 
 /**
@@ -34,7 +42,7 @@ export class OrderVoidAndPreviewService {
   ) {}
 
   /** Chiếm đơn bằng cập nhật có điều kiện COMPLETED trước khi đụng kho — bấm đúp → 1701. */
-  async voidPaid(id: string, dto: CancelOrderRequest, actor: RequestActor): Promise<OrderDetail> {
+  async voidPaid(id: string, dto: VoidPaidOrderRequest, actor: RequestActor): Promise<OrderDetail> {
     const scope = resolveBranchScope(actor.user);
     const actorId = actor.user.userId;
     const now = new Date();
@@ -46,6 +54,8 @@ export class OrderVoidAndPreviewService {
       if (head.channel !== OrderChannel.POS || head.status !== OrderStatus.COMPLETED) {
         throw orderErrors.wrongState(head.status);
       }
+      // Kiểm tiền hoàn TRƯỚC khi chiếm đơn và trả hàng về kho: lỗi thì không đụng gì.
+      const refund = this.refundOf(head.totalAmount, dto);
       const claimed = await this.orders.claim(
         tx,
         id,
@@ -61,6 +71,19 @@ export class OrderVoidAndPreviewService {
       );
       if (!claimed) throw orderErrors.wrongState();
       await this.stock.restock(ctx, id, actorId, `Huỷ hoá đơn: ${dto.reason}`);
+      if (refund) {
+        await this.orders.createPayment(tx, {
+          orderId: id,
+          kind: PaymentKind.REFUND,
+          method: refund.method,
+          amount: refund.amount,
+          status: TransactionStatus.SUCCESS,
+          paidAt: now,
+          updatedAt: now,
+          note: dto.reason,
+          createdBy: actorId,
+        });
+      }
 
       // Cả hai dòng mang lý do huỷ của người thao tác (bắt buộc) và cùng nhãn/từ khoá = mã đơn (D8).
       const common = {
@@ -81,11 +104,20 @@ export class OrderVoidAndPreviewService {
         },
       ];
       // Đơn 0đ không có lượt thu nào (xem `payPos`) nên không có tiền để hoàn.
-      if (head.totalAmount > 0n) {
+      if (refund) {
+        // Hoàn ít hơn tổng mà hàng vẫn về kho đủ → nổi bật (severity 2) để quản lý soát.
+        const partial = refund.amount < head.totalAmount;
         entries.push({
           event: 'PAYMENT.REFUNDED',
           ...common,
-          after: { paymentStatus: PaymentStatus.REFUNDED, refundedAmount: head.totalAmount.toString() },
+          amount: refund.amount,
+          severity: partial ? 2 : 1,
+          after: { paymentStatus: PaymentStatus.REFUNDED, refundedAmount: refund.amount.toString() },
+          metadata: {
+            totalAmount: head.totalAmount.toString(),
+            refundAmount: refund.amount.toString(),
+            ...(partial ? { partialRefund: true } : {}),
+          },
         });
       }
       await this.audit.record(tx, auditActorOf(actor), entries);
@@ -93,6 +125,19 @@ export class OrderVoidAndPreviewService {
       if (!order) throw orderErrors.notFound();
       return order;
     });
+  }
+
+  /** Đơn > 0đ: `0 < refundAmount ≤ tổng` + hình thức hoàn; đơn 0đ: không được gửi tiền hoàn. */
+  private refundOf(total: bigint, dto: VoidPaidOrderRequest): { amount: bigint; method: PaymentMethod } | null {
+    if (total === 0n) {
+      if (dto.refundAmount) throw badRequest('Đơn 0đ không có tiền để hoàn');
+      return null;
+    }
+    if (!dto.refundAmount || dto.refundAmount <= 0) throw badRequest('Cần nhập số tiền đã hoàn cho khách (lớn hơn 0)');
+    const amount = BigInt(dto.refundAmount);
+    if (amount > total) throw badRequest('Số tiền hoàn không được vượt tổng hoá đơn');
+    if (!dto.refundMethod) throw badRequest('Cần chọn hình thức hoàn tiền');
+    return { amount, method: dto.refundMethod };
   }
 
   /**

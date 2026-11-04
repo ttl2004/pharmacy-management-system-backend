@@ -1,4 +1,4 @@
-import { OrderChannel, OrderStatus } from '@prisma/client';
+import { OrderChannel, OrderStatus, PaymentMethod, TransactionStatus } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
@@ -39,6 +39,7 @@ describe('OrderVoidAndPreviewService', () => {
     findHead: jest.fn(),
     findDetail: jest.fn().mockResolvedValue({ id: 'o1' }),
     claim: jest.fn().mockResolvedValue(1),
+    createPayment: jest.fn().mockResolvedValue({ id: 'p1' }),
   };
   const transactions = { run: jest.fn((work: (c: typeof ctx) => unknown) => work(ctx)) };
   const stock = { restock: jest.fn() };
@@ -61,9 +62,11 @@ describe('OrderVoidAndPreviewService', () => {
     orders.claim.mockResolvedValue(1);
   });
 
-  it('voidPaid ghi ORDER.VOID_PAID và PAYMENT.REFUNDED, amount = totalAmount, reason = dto.reason', async () => {
+  const full = { reason: 'Khách trả hàng', refundAmount: 12000, refundMethod: PaymentMethod.CASH };
+
+  it('voidPaid ghi ORDER.VOID_PAID và PAYMENT.REFUNDED, amount = refundAmount, reason = dto.reason', async () => {
     orders.findHead.mockResolvedValue(head());
-    await service.voidPaid('o1', { reason: 'Khách trả hàng' }, ss);
+    await service.voidPaid('o1', full, ss);
 
     expect(audit.record).toHaveBeenCalledTimes(1);
     const { actor, entries } = recorded();
@@ -81,15 +84,83 @@ describe('OrderVoidAndPreviewService', () => {
     }
   });
 
-  it('voidPaid đơn 0đ: chỉ ORDER.VOID_PAID (không có tiền để hoàn)', async () => {
+  it('đơn 100k: refundAmount 100000 CASH → payment REFUND 100000; audit PAYMENT.REFUNDED 100000n, severity 1', async () => {
+    orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));
+    await service.voidPaid('o1', { reason: 'Khách trả', refundAmount: 100000, refundMethod: PaymentMethod.CASH }, ss);
+
+    expect(orders.createPayment).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({
+        orderId: 'o1',
+        kind: 'REFUND',
+        method: PaymentMethod.CASH,
+        amount: 100000n,
+        status: TransactionStatus.SUCCESS,
+        createdBy: 'u1',
+      }),
+    );
+    const refund = recorded().entries.find((entry) => entry.event === 'PAYMENT.REFUNDED');
+    expect(refund).toMatchObject({ amount: 100000n, metadata: { totalAmount: '100000', refundAmount: '100000' } });
+    expect(refund?.severity).toBe(1);
+    expect(refund?.metadata).not.toHaveProperty('partialRefund');
+  });
+
+  it('đơn 100k hoàn 60000 → payment REFUND 60000; severity 2, metadata.partialRefund true, totalAmount "100000"', async () => {
+    orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));
+    await service.voidPaid(
+      'o1',
+      { reason: 'Khách trả', refundAmount: 60000, refundMethod: PaymentMethod.BANK_TRANSFER },
+      ss,
+    );
+
+    expect(orders.createPayment).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({ kind: 'REFUND', amount: 60000n, method: PaymentMethod.BANK_TRANSFER }),
+    );
+    const refund = recorded().entries.find((entry) => entry.event === 'PAYMENT.REFUNDED');
+    expect(refund).toMatchObject({
+      amount: 60000n,
+      severity: 2,
+      metadata: { totalAmount: '100000', refundAmount: '60000', partialRefund: true },
+    });
+  });
+
+  it.each([
+    ['thiếu refundAmount', { reason: 'x', refundMethod: PaymentMethod.CASH }],
+    ['refundAmount 0', { reason: 'x', refundAmount: 0, refundMethod: PaymentMethod.CASH }],
+    ['refundAmount 100001', { reason: 'x', refundAmount: 100001, refundMethod: PaymentMethod.CASH }],
+    ['thiếu refundMethod', { reason: 'x', refundAmount: 100000 }],
+  ])('đơn 100k %s → 1002', async (_name, dto) => {
+    orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));
+    await expect(service.voidPaid('o1', dto, ss)).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+  });
+
+  it('đơn 0đ: không gửi refundAmount → không tạo payment, chỉ ORDER.VOID_PAID', async () => {
     orders.findHead.mockResolvedValue(head({ totalAmount: 0n }));
     await service.voidPaid('o1', { reason: 'Nhập nhầm' }, ss);
+    expect(orders.createPayment).not.toHaveBeenCalled();
     expect(recorded().entries.map((entry) => entry.event)).toEqual(['ORDER.VOID_PAID']);
+  });
+
+  it('đơn 0đ: gửi refundAmount 5000 → 1002', async () => {
+    orders.findHead.mockResolvedValue(head({ totalAmount: 0n }));
+    await expect(
+      service.voidPaid('o1', { reason: 'x', refundAmount: 5000, refundMethod: PaymentMethod.CASH }, ss),
+    ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+  });
+
+  it('kiểm tiền xảy ra TRƯỚC khi chiếm đơn và trả hàng về kho', async () => {
+    orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));
+    await expect(service.voidPaid('o1', { reason: 'x' }, ss)).rejects.toBeDefined();
+    expect(orders.claim).not.toHaveBeenCalled();
+    expect(stock.restock).not.toHaveBeenCalled();
+    expect(orders.createPayment).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
   });
 
   it('voidPaid đơn chưa thu → 1701, không ghi nhật ký', async () => {
     orders.findHead.mockResolvedValue(head({ status: OrderStatus.PENDING }));
-    await expect(service.voidPaid('o1', { reason: 'x' }, ss)).rejects.toMatchObject({
+    await expect(service.voidPaid('o1', full, ss)).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_DOCUMENT_STATE,
     });
     expect(audit.record).not.toHaveBeenCalled();

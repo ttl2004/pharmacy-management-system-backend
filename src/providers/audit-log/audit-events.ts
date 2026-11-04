@@ -21,7 +21,7 @@ export const AUDIT_EVENTS = {
   'ORDER.CANCELLED': { action: 'STATUS_CHANGE', severity: 0, reasonRequired: false },
   'ORDER.AUTO_EXPIRED': { action: 'STATUS_CHANGE', severity: 0, reasonRequired: false },
   'ORDER.VOID_PAID': { action: 'STATUS_CHANGE', severity: 2, reasonRequired: true },
-  'PAYMENT.REFUNDED': { action: 'STATUS_CHANGE', severity: 2, reasonRequired: true },
+  'PAYMENT.REFUNDED': { action: 'STATUS_CHANGE', severity: 1, reasonRequired: true },
   'CUSTOMER.CREATED': { action: 'CREATE', severity: 0, reasonRequired: false },
   'GOODS_RECEIPT.CREATED': { action: 'CREATE', severity: 0, reasonRequired: false },
   'GOODS_RECEIPT.UPDATED': { action: 'UPDATE', severity: 0, reasonRequired: false },

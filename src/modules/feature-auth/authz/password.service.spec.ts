@@ -39,6 +39,16 @@ describe('PasswordService.change security events', () => {
     expect(security.record.mock.calls[0]).toHaveLength(1);
   });
 
+  it('ghi PASSWORD_CHANGE_FAILED hỏng không đổi lỗi trả về (vẫn LOGIN_INVALID)', async () => {
+    const { service, security, user } = make('SALES_STAFF');
+    security.record.mockRejectedValue(new Error('db down'));
+    const logSpy = jest.spyOn(service['logger'], 'error').mockImplementation();
+    await expect(
+      service.change(user as never, { currentPassword: 'sai', newPassword: 'mat-khau-moi-1' }, CTX),
+    ).rejects.toMatchObject({ response: { code: ErrorCode.LOGIN_INVALID } });
+    expect(logSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('đổi đúng ghi PASSWORD_CHANGED trong tx; metadata không chứa mật khẩu', async () => {
     const { service, security, user, tx } = make('SALES_STAFF');
     await service.change(user as never, { currentPassword: 'mat-khau-cu-1', newPassword: 'mat-khau-moi-1' }, CTX);

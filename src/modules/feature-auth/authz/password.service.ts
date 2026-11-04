@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import type { RequestContext } from 'src/common/decorators/request-context';
@@ -12,6 +12,8 @@ import { ChangePasswordRequest } from './dtos/password.request';
 
 @Injectable()
 export class PasswordService {
+  private readonly logger = new Logger(PasswordService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly transactions: SessionTransactions,
@@ -25,7 +27,17 @@ export class PasswordService {
     ];
     const credentials = await this.prisma.auth.findFirst({ where: { userId: user.userId, isDeleted: false } });
     if (!credentials || !(await bcrypt.compare(dto.currentPassword, credentials.password))) {
-      if (staff) await this.security.record(event('AUTH.PASSWORD_CHANGE_FAILED'));
+      if (staff) {
+        // Lỗi ghi audit không được đổi kết quả trả về cho client.
+        await this.security
+          .record(event('AUTH.PASSWORD_CHANGE_FAILED'))
+          .catch((error: unknown) =>
+            this.logger.error(
+              'Không ghi được AUTH.PASSWORD_CHANGE_FAILED',
+              error instanceof Error ? error.stack : String(error),
+            ),
+          );
+      }
       throw authError(ErrorCode.LOGIN_INVALID);
     }
     const hash = await this.hash(dto.newPassword);

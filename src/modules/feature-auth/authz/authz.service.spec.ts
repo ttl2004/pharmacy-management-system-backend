@@ -147,8 +147,40 @@ describe('AuthzService security events', () => {
   it('nhân viên sai mật khẩu: detector.check chạy sau khi ghi LOGIN_FAILED, trước khi throw', async () => {
     const { service, security, detector } = make(authzOf('SALES_STAFF'));
     await fail(service.login({ username: 'u', password: 'sai' }, CTX));
+    await new Promise((resolve) => setImmediate(resolve));
     expect(detector.check).toHaveBeenCalledWith('u1', 'SALES_STAFF', CTX);
     expect(security.record.mock.invocationCallOrder[0]).toBeLessThan(detector.check.mock.invocationCallOrder[0]);
+  });
+
+  it('ghi LOGIN_FAILED hỏng (security.record hoặc detector reject) vẫn trả LOGIN_INVALID, không 500, và có log lỗi', async () => {
+    for (const broken of ['record', 'detector'] as const) {
+      const { service, security, detector } = make(authzOf('SALES_STAFF'));
+      if (broken === 'record') security.record.mockRejectedValue(new Error('db down'));
+      else detector.check.mockRejectedValue(new Error('db down'));
+      const logSpy = jest.spyOn(service['authzLogger'], 'error').mockImplementation();
+      const err = await fail(service.login({ username: 'u', password: 'sai' }, CTX));
+      expect(err?.getResponse?.().code).toBe(ErrorCode.LOGIN_INVALID);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(logSpy).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('nhánh nhân viên không await việc ghi: login đã reject khi promise ghi còn pending', async () => {
+    const { service, security } = make(authzOf('SALES_STAFF'));
+    let release!: () => void;
+    security.record.mockReturnValue(new Promise<void>((resolve) => (release = resolve)));
+    const err = await fail(service.login({ username: 'u', password: 'sai' }, CTX));
+    expect(err?.getResponse?.().code).toBe(ErrorCode.LOGIN_INVALID);
+    expect(security.record).toHaveBeenCalledTimes(1); // đã bắt đầu ghi nhưng chưa xong
+    release();
+  });
+
+  it('LOGIN_FAILED_BURST hỏng cũng không đổi LOGIN_INVALID', async () => {
+    const { service, security } = make(null);
+    security.record.mockRejectedValue(new Error('db down'));
+    let last: { getResponse?: () => { code?: number } } | undefined;
+    for (let i = 0; i < 20; i++) last = await fail(service.login({ username: `g${i}`, password: 'x' }, CTX));
+    expect(last?.getResponse?.().code).toBe(ErrorCode.LOGIN_INVALID);
   });
 
   it('khách hàng sai mật khẩu: không đụng detector', async () => {

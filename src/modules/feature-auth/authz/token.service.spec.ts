@@ -135,6 +135,19 @@ describe('TokenService.refresh', () => {
     expect(ok.security.record).not.toHaveBeenCalled();
   });
 
+  it('ghi REFRESH_DENIED_INACTIVE hỏng không đổi lỗi trả về (vẫn SESSION_REVOKED)', async () => {
+    const { service, security } = makeService({
+      prisma: {
+        refreshToken: { findFirst: jest.fn().mockResolvedValue(live), updateMany: jest.fn() },
+        user: { findFirst: jest.fn().mockResolvedValue({ ...USER, status: 'LOCKED' }) },
+      },
+    });
+    security.record.mockRejectedValue(new Error('db down'));
+    const logSpy = jest.spyOn(service['logger'], 'error').mockImplementation();
+    expect(await errorCodeOf(service.refresh('raw', CTX))).toBe(ErrorCode.SESSION_REVOKED);
+    expect(logSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('khách hàng bị từ chối refresh: KHÔNG ghi', async () => {
     const { service, security } = makeService({
       prisma: {

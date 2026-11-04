@@ -134,14 +134,14 @@ export class AuthzService extends AbstractBaseService<Auth> {
     const valid = await bcrypt.compare(dto.password, authz?.password ?? dummyHash);
     const user = authz?.user;
     if (!authz || !user || !valid || user.isDeleted || user.status !== UserStatus.ACTIVE) {
-      await this.recordLoginFailure(user, ctx);
+      this.recordLoginFailureDetached(user, ctx);
       throw authError(ErrorCode.LOGIN_INVALID);
     }
     try {
       return await this.tokens.login(authz, ctx);
     } catch (error) {
       // Mật khẩu/trạng thái đổi trong lúc bcrypt chạy: tính như đăng nhập thất bại.
-      if (isLoginInvalid(error)) await this.recordLoginFailure(user, ctx);
+      if (isLoginInvalid(error)) this.recordLoginFailureDetached(user, ctx);
       throw error;
     }
   }
@@ -151,6 +151,22 @@ export class AuthzService extends AbstractBaseService<Auth> {
    * Username không tồn tại: không ghi từng lần, chỉ đếm theo IP và báo một dòng `LOGIN_FAILED_BURST` (D3).
    * Mọi trường hợp client đều nhận cùng `LOGIN_INVALID`.
    */
+  /**
+   * Không await: nhánh nhân viên không được tốn thêm thời gian so với username lạ/khách hàng (lộ username qua thời
+   * gian phản hồi), và lỗi ghi audit không được đổi `LOGIN_INVALID` thành 500.
+   */
+  private recordLoginFailureDetached(
+    user: { id: string; role: { code: string } } | null | undefined,
+    ctx: RequestContext,
+  ): void {
+    void this.recordLoginFailure(user, ctx).catch((error: unknown) =>
+      this.authzLogger.error(
+        'Không ghi được sự kiện đăng nhập thất bại',
+        error instanceof Error ? error.stack : String(error),
+      ),
+    );
+  }
+
   private async recordLoginFailure(
     user: { id: string; role: { code: string } } | null | undefined,
     ctx: RequestContext,

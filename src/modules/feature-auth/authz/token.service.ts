@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Cron } from '@nestjs/schedule';
 import { Auth, Prisma, Role, User, UserStatus } from '@prisma/client';
@@ -25,6 +25,8 @@ type UserWithRole = User & { role: Role };
 
 @Injectable()
 export class TokenService {
+  private readonly logger = new Logger(TokenService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly transactions: SessionTransactions,
@@ -106,15 +108,23 @@ export class TokenService {
     if (!user) {
       await this.sessions.revoke(token.sid);
       if (found && isStaffRole(found.role.code)) {
-        await this.security.record([
-          {
-            type: 'AUTH.REFRESH_DENIED_INACTIVE',
-            actorId: found.id,
-            actorRoleCode: found.role.code,
-            sessionId: token.sid,
-            context: ctx,
-          },
-        ]);
+        // Lỗi ghi audit không được đổi SESSION_REVOKED thành 500.
+        await this.security
+          .record([
+            {
+              type: 'AUTH.REFRESH_DENIED_INACTIVE',
+              actorId: found.id,
+              actorRoleCode: found.role.code,
+              sessionId: token.sid,
+              context: ctx,
+            },
+          ])
+          .catch((error: unknown) =>
+            this.logger.error(
+              'Không ghi được AUTH.REFRESH_DENIED_INACTIVE',
+              error instanceof Error ? error.stack : String(error),
+            ),
+          );
       }
       throw authError(ErrorCode.SESSION_REVOKED);
     }

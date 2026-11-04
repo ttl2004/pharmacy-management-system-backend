@@ -51,6 +51,7 @@ export const PERMISSION_CATALOG = [
   { code: 'branch-product:read', name: 'Xem ngưỡng tồn theo chi nhánh', module: 'branch-product', sortOrder: 1 },
   { code: 'branch-product:update', name: 'Đặt ngưỡng tồn theo chi nhánh', module: 'branch-product', sortOrder: 2 },
   { code: 'audit-log:read', name: 'Xem nhật ký thao tác', module: 'audit-log', sortOrder: 1 },
+  { code: 'security-event:read', name: 'Xem sự kiện bảo mật', module: 'security-event', sortOrder: 1 },
   { code: 'transfer:read', name: 'Xem phiếu điều chuyển', module: 'transfer', sortOrder: 1 },
   { code: 'transfer:create', name: 'Lập phiếu điều chuyển (chi nhánh gửi)', module: 'transfer', sortOrder: 2 },
   { code: 'transfer:ship', name: 'Xuất hàng điều chuyển (chi nhánh gửi)', module: 'transfer', sortOrder: 3 },

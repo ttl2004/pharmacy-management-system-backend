@@ -230,4 +230,12 @@ describe('Danh mục quyền và mã lỗi', () => {
     expect(ErrorCode.SUPER_ADMIN_PROTECTED).toBe(1604);
     expect(ErrorCode.SELF_OPERATION_FORBIDDEN).toBe(1605);
   });
+
+  it('security-event:read có trong danh mục, chỉ ADMIN được cấp (PM, SS, CUSTOMER → 403)', () => {
+    expect(PERMISSION_CODES).toContain('security-event:read');
+    expect(DEFAULT_ROLE_GRANTS[AuthRole.ADMIN] ?? []).toContain('security-event:read');
+    for (const role of [AuthRole.PHARMACY_MANAGER, AuthRole.SALES_STAFF, AuthRole.CUSTOMER]) {
+      expect(DEFAULT_ROLE_GRANTS[role] ?? []).not.toContain('security-event:read');
+    }
+  });
 });

@@ -1,6 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
-  AuditAction,
   OrderChannel,
   OrderStatus,
   PaymentStatus,
@@ -10,12 +9,12 @@ import {
   UserStatus,
 } from '@prisma/client';
 import { randomUUID } from 'crypto';
-import { SYSTEM_ACTOR_ID } from 'src/common/constants/app.constant';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { addDaysToDateOnly, vietnamDayStartUtc } from 'src/common/utils/date-only.util';
 import { escapeLike } from 'src/common/utils/like-pattern.util';
+import { maskPhone } from 'src/common/utils/mask.util';
 import { normalizePhoneSearch } from 'src/common/utils/phone.util';
 import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
 import { DocumentCodeService } from 'src/modules/feature-inventory/core/document-code.service';
@@ -23,7 +22,9 @@ import { branchWhere, resolveWriteBranch } from 'src/modules/feature-inventory/c
 import { InventoryTransactions, InventoryTxContext } from 'src/modules/feature-inventory/core/inventory-transactions';
 import { badRequest, inventoryError, invalidReference } from 'src/modules/feature-inventory/core/inventory.error';
 import { ApplicableBook, PriceBookService } from 'src/modules/feature-catalog/price-book/price-book.service';
+import { AuditActor, auditActorOf, jobActor } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { buildOrderLines, deletedPriceBookError, OrderLine, orderTotals, toBookPricing } from '../core/order-lines';
 import { OrderStockService } from '../core/order-stock.service';
 import { EXPIRY_BATCH_SIZE, POS_ABANDON_MINUTES, SALES_AUDIT_ENTITY } from '../core/sales.constants';
@@ -62,6 +63,36 @@ function overrideData(override: InteractionOverrideRequest | undefined, actorId:
   if (!override) return {};
   const value = { ...override, byUserId: actorId, at: new Date().toISOString() };
   return { interactionOverride: value as unknown as Prisma.InputJsonValue };
+}
+
+/**
+ * Phần chung của mọi dòng nhật ký đơn: nhãn + từ khoá = mã đơn (D8), phạm vi = chi nhánh đơn. Không bao giờ đưa tên
+ * hay SĐT khách vào nhãn/từ khoá.
+ */
+function orderAudit(order: { id: string; code: string; branchId: string }) {
+  return {
+    entityType: SALES_AUDIT_ENTITY.ORDER,
+    entityId: order.id,
+    entityLabel: order.code,
+    branchIds: [order.branchId],
+    searchTerms: [order.code],
+  };
+}
+
+/** Dòng ghi đè cảnh báo tương tác (khi có): lý do ghi đè của người bán là `reason` của dòng nhật ký. */
+function overrideEntries(
+  order: { id: string; code: string; branchId: string },
+  override: InteractionOverrideRequest | undefined,
+): AuditEntry[] {
+  if (!override) return [];
+  return [
+    {
+      event: 'ORDER.INTERACTION_OVERRIDE',
+      ...orderAudit(order),
+      reason: override.reason,
+      after: { warningIds: override.warningIds, warningSummaries: override.warningSummaries },
+    },
+  ];
 }
 
 function isDuplicateTransactionCode(error: unknown): boolean {
@@ -156,31 +187,46 @@ export class OrderService {
       });
       await this.saveLines(ctx, { orderId: id, branchId, actorId }, lines);
 
-      await this.audit.record(tx, [
+      const order = { id, code, branchId };
+      const entries: AuditEntry[] = [
         {
-          actorId,
-          action: AuditAction.CREATE,
-          entityType: SALES_AUDIT_ENTITY.ORDER,
-          entityId: id,
-          branchId,
-          after: { code, channel: OrderChannel.POS, lines: lines.length, totalAmount: Number(totals.totalAmount) },
-          ipAddress: actor.ip,
+          event: 'ORDER.CREATED',
+          ...orderAudit(order),
+          amount: totals.totalAmount,
+          after: {
+            code,
+            channel: OrderChannel.POS,
+            customerId: customer?.id ?? null,
+            priceBookId: book?.id ?? null,
+            lines: lines.length,
+            subtotalAmount: totals.subtotalAmount.toString(),
+            discountAmount: totals.discountAmount.toString(),
+            totalAmount: totals.totalAmount.toString(),
+          },
         },
-        // Hồ sơ khách do hệ thống tạo cũng phải có dấu vết: ai tạo, ở quầy nào.
-        ...(customer?.created
-          ? [
-              {
-                actorId,
-                action: AuditAction.CREATE,
-                entityType: SALES_AUDIT_ENTITY.USER,
-                entityId: customer.id,
-                branchId,
-                after: { phoneNumber: dto.customerPhone ?? null, source: 'POS' },
-                ipAddress: actor.ip,
-              },
-            ]
-          : []),
-      ]);
+      ];
+      if (totals.discountAmount > 0n) {
+        entries.push({
+          event: 'ORDER.DISCOUNT_APPLIED',
+          ...orderAudit(order),
+          amount: totals.discountAmount,
+          after: { discountAmount: totals.discountAmount.toString(), subtotalAmount: totals.subtotalAmount.toString() },
+        });
+      }
+      entries.push(...overrideEntries(order, dto.interactionOverride));
+      // Hồ sơ khách do hệ thống tạo cũng phải có dấu vết: ai tạo, ở quầy nào. SĐT che, không ghi tên (PII).
+      if (customer?.created) {
+        entries.push({
+          event: 'CUSTOMER.CREATED',
+          entityType: SALES_AUDIT_ENTITY.USER,
+          entityId: customer.id,
+          branchIds: [branchId],
+          searchTerms: [code],
+          after: { phoneNumber: maskPhone(dto.customerPhone), source: 'POS' },
+          metadata: { orderId: id, orderCode: code },
+        });
+      }
+      await this.audit.record(tx, auditActorOf(actor), entries);
       return this.mustFind(tx, id);
     });
   }
@@ -229,18 +275,35 @@ export class OrderService {
       await this.orders.deleteItems(tx, id);
       await this.saveLines(ctx, { orderId: id, branchId: head.branchId, actorId }, lines);
 
-      await this.audit.record(tx, [
+      const entries: AuditEntry[] = [
         {
-          actorId,
-          action: AuditAction.UPDATE,
-          entityType: SALES_AUDIT_ENTITY.ORDER,
-          entityId: id,
-          branchId: head.branchId,
-          before: { lines: head.lineCount, totalAmount: Number(head.totalAmount) },
-          after: { lines: lines.length, totalAmount: Number(totals.totalAmount) },
-          ipAddress: actor.ip,
+          event: 'ORDER.ITEMS_REPLACED',
+          ...orderAudit(head),
+          amount: totals.totalAmount,
+          before: {
+            lines: head.lineCount,
+            discountAmount: head.discountAmount.toString(),
+            totalAmount: head.totalAmount.toString(),
+          },
+          after: {
+            lines: lines.length,
+            discountAmount: totals.discountAmount.toString(),
+            totalAmount: totals.totalAmount.toString(),
+          },
         },
-      ]);
+      ];
+      // Chỉ ghi khi giảm giá thật sự đổi sang một mức > 0; bỏ giảm giá đã thấy ở before/after của dòng trên.
+      if (totals.discountAmount > 0n && totals.discountAmount !== head.discountAmount) {
+        entries.push({
+          event: 'ORDER.DISCOUNT_APPLIED',
+          ...orderAudit(head),
+          amount: totals.discountAmount,
+          before: { discountAmount: head.discountAmount.toString() },
+          after: { discountAmount: totals.discountAmount.toString(), subtotalAmount: totals.subtotalAmount.toString() },
+        });
+      }
+      entries.push(...overrideEntries(head, dto.interactionOverride));
+      await this.audit.record(tx, auditActorOf(actor), entries);
       return this.mustFind(tx, id);
     });
   }
@@ -254,7 +317,8 @@ export class OrderService {
     try {
       return await this.transactions.run(async (ctx) => {
         const { tx } = ctx;
-        const before = await this.loadEditablePos(tx, id, branchWhere(scope));
+        // Kiểm phạm vi/kênh/trạng thái để báo lỗi rõ ràng; số liệu ghi sổ đọc lại sau khi chiếm.
+        await this.loadEditablePos(tx, id, branchWhere(scope));
         const claimed = await this.orders.claim(
           tx,
           id,
@@ -290,16 +354,13 @@ export class OrderService {
         }
         await this.stock.consume(ctx, id, actorId);
 
-        await this.audit.record(tx, [
+        await this.audit.record(tx, auditActorOf(actor), [
           {
-            actorId,
-            action: AuditAction.STATUS_CHANGE,
-            entityType: SALES_AUDIT_ENTITY.ORDER,
-            entityId: id,
-            branchId: before.branchId,
+            event: 'ORDER.PAID',
+            ...orderAudit(head),
+            amount: head.totalAmount,
             before: { status: OrderStatus.PENDING },
-            after: { status: OrderStatus.COMPLETED, method: dto.method, amount: Number(head.totalAmount) },
-            ipAddress: actor.ip,
+            after: { status: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.PAID, method: dto.method },
           },
         ]);
         return this.mustFind(tx, id);
@@ -321,7 +382,7 @@ export class OrderService {
       const head = await this.orders.findHead(ctx.tx, id, branchWhere(scope));
       if (!head) throw orderErrors.notFound();
       if (!CANCELLABLE[head.channel].includes(head.status)) throw orderErrors.wrongState(head.status);
-      await this.cancelInTx(ctx, head, { status: head.status }, dto.reason, actor.user.userId, actor.ip);
+      await this.cancelInTx(ctx, head, { status: head.status }, dto.reason, auditActorOf(actor), 'ORDER.CANCELLED');
       return this.mustFind(ctx.tx, id);
     });
   }
@@ -342,8 +403,8 @@ export class OrderService {
             order,
             { status: OrderStatus.PENDING, updatedAt: order.updatedAt },
             ABANDONED_REASON,
-            SYSTEM_ACTOR_ID,
-            null,
+            jobActor(),
+            'ORDER.AUTO_EXPIRED',
           ),
         );
         cancelled++;
@@ -358,12 +419,13 @@ export class OrderService {
 
   private async cancelInTx(
     ctx: InventoryTxContext,
-    order: Pick<OrderHead, 'id' | 'branchId' | 'status'>,
+    order: Pick<OrderHead, 'id' | 'code' | 'branchId' | 'status'>,
     condition: Prisma.OrderWhereInput,
     reason: string,
-    actorId: string,
-    ip: string | null,
+    actor: AuditActor,
+    event: 'ORDER.CANCELLED' | 'ORDER.AUTO_EXPIRED',
   ): Promise<void> {
+    const actorId = actor.userId;
     const now = new Date();
     const claimed = await this.orders.claim(ctx.tx, order.id, condition, {
       status: OrderStatus.CANCELLED,
@@ -374,17 +436,13 @@ export class OrderService {
     });
     if (!claimed) throw orderErrors.wrongState();
     await this.stock.release(ctx, order.id, actorId);
-    await this.audit.record(ctx.tx, [
+    await this.audit.record(ctx.tx, actor, [
       {
-        actorId,
-        action: AuditAction.STATUS_CHANGE,
-        entityType: SALES_AUDIT_ENTITY.ORDER,
-        entityId: order.id,
-        branchId: order.branchId,
+        event,
+        ...orderAudit(order),
         before: { status: order.status },
         after: { status: OrderStatus.CANCELLED },
         reason,
-        ipAddress: ip,
       },
     ]);
   }

@@ -2,11 +2,17 @@ import { OrderChannel, OrderStatus, PaymentMethod, RecordStatus } from '@prisma/
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
+import type { AuditActor } from 'src/providers/audit-log/audit-actor';
+import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { OrderHead, OrderRepository } from './repositories/order.repository';
 import { OrderService } from './order.service';
 
 const actorOf = (role: AuthRole, branchId: string | null): RequestActor =>
-  ({ user: { userId: 'u1', role, branchId, roleLevel: 40 }, ip: '127.0.0.1' }) as unknown as RequestActor;
+  ({
+    user: { userId: 'u1', role, branchId, roleLevel: 40 },
+    ip: '127.0.0.1',
+    requestId: 'req-1',
+  }) as unknown as RequestActor;
 const ss = actorOf(AuthRole.SALES_STAFF, 'b1');
 /** Tham số thứ `index` của lần gọi đầu tiên — mock.calls là `any`, ép kiểu một chỗ. */
 const argOf = <T = unknown>(fn: jest.Mock, index: number): T => (fn.mock.calls[0] as unknown[])[index] as T;
@@ -22,6 +28,10 @@ const head = (overrides: Partial<OrderHead> = {}): OrderHead => ({
   prescriptionCode: null,
   prescriberName: null,
   updatedAt: null,
+  priceBookId: null,
+  priceBookName: null,
+  createdBy: 'u1',
+  discountAmount: 0n,
   lineCount: 1,
   prescriptionLineCount: 0,
   ...overrides,
@@ -56,13 +66,17 @@ describe('OrderService', () => {
   const stock = { reserve: jest.fn(), release: jest.fn(), discard: jest.fn(), consume: jest.fn() };
   const codes = { next: jest.fn().mockResolvedValue('HD000001') };
   const audit = { record: jest.fn() };
+  const priceBooks = { getUsableBook: jest.fn() };
   const service = new OrderService(
     orders as unknown as OrderRepository,
     transactions as never,
     stock as never,
     codes as never,
     audit as never,
+    priceBooks as never,
   );
+  /** Lần gọi `record` đầu tiên: actor + các entry. */
+  const recorded = () => ({ actor: argOf<AuditActor>(audit.record, 1), entries: argOf<AuditEntry[]>(audit.record, 2) });
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -119,8 +133,74 @@ describe('OrderService', () => {
       actorId: 'u1',
     });
     expect(orders.createHeader).toHaveBeenCalledWith(tx, expect.objectContaining({ customerId: 'c1' }));
-    const entries = argOf<{ entityType: string }[]>(audit.record, 1);
-    expect(entries.map((entry) => entry.entityType)).toEqual(['orders', 'users']);
+    const { entries } = recorded();
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    expect(entries.map((entry) => entry.event)).toEqual(['ORDER.CREATED', 'CUSTOMER.CREATED']);
+    expect(entries[0]).toMatchObject({
+      entityType: 'orders',
+      entityId: 'o1',
+      entityLabel: 'HD000001',
+      branchIds: ['b1'],
+      searchTerms: ['HD000001'],
+      amount: 1000n,
+    });
+  });
+
+  it('createPos ghi ORDER.CREATED với actor USER, amount = totalAmount (bigint), không Number', async () => {
+    await service.createPos({ items: [{ productUnitId: 'pu1', quantity: 12 }] }, ss);
+    const { actor, entries } = recorded();
+    expect(actor).toMatchObject({ userId: 'u1', type: 'USER', branchId: 'b1', ip: '127.0.0.1', requestId: 'req-1' });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ event: 'ORDER.CREATED', amount: 12000n, branchIds: ['b1'] });
+  });
+
+  it('createPos có giảm giá ghi thêm ORDER.DISCOUNT_APPLIED với amount = discountAmount', async () => {
+    await service.createPos({ items: [{ productUnitId: 'pu1', quantity: 12 }], discountAmount: 2000 }, ss);
+    const { entries } = recorded();
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    expect(entries.map((entry) => entry.event)).toEqual(['ORDER.CREATED', 'ORDER.DISCOUNT_APPLIED']);
+    expect(entries[0].amount).toBe(10000n);
+    expect(entries[1]).toMatchObject({ entityLabel: 'HD000001', branchIds: ['b1'], amount: 2000n });
+  });
+
+  it('createPos có ghi đè cảnh báo tương tác ghi thêm ORDER.INTERACTION_OVERRIDE, lý do = lý do ghi đè', async () => {
+    await service.createPos(
+      {
+        items: [{ productUnitId: 'pu1', quantity: 1 }],
+        interactionOverride: { reason: 'Bác sĩ đã xác nhận', warningIds: ['w1'], warningSummaries: ['A + B'] },
+      },
+      ss,
+    );
+    const { entries } = recorded();
+    expect(entries.map((entry) => entry.event)).toEqual(['ORDER.CREATED', 'ORDER.INTERACTION_OVERRIDE']);
+    expect(entries[1]).toMatchObject({ reason: 'Bác sĩ đã xác nhận', branchIds: ['b1'], entityLabel: 'HD000001' });
+  });
+
+  it('dòng CUSTOMER.CREATED che SĐT còn 4 số cuối', async () => {
+    orders.upsertWalkInCustomer.mockResolvedValue({
+      id: 'c1',
+      isCustomer: true,
+      isDeleted: false,
+      status: 'ACTIVE',
+      created: true,
+    });
+    await service.createPos(
+      { customerPhone: '0912345678', customerName: 'Nguyễn Văn A', items: [{ productUnitId: 'pu1', quantity: 1 }] },
+      ss,
+    );
+    const customer = recorded().entries.find((entry) => entry.event === 'CUSTOMER.CREATED');
+    expect(customer).toMatchObject({ entityType: 'users', entityId: 'c1', branchIds: ['b1'] });
+    expect(customer?.after).toMatchObject({ phoneNumber: '******5678' });
+    // Không bao giờ có tên/SĐT khách ở nhãn, từ khoá hay bất kỳ chỗ nào của dòng nhật ký.
+    const serialized = JSON.stringify(recorded().entries, (_k, v: unknown) =>
+      typeof v === 'bigint' ? v.toString() : v,
+    );
+    expect(serialized).not.toContain('0912345678');
+    expect(serialized).not.toContain('Nguyễn Văn A');
+    for (const entry of recorded().entries) {
+      expect(entry.entityLabel ?? '').not.toMatch(/5678|Nguyễn/);
+      expect((entry.searchTerms ?? []).join(' ')).not.toMatch(/5678|Nguyễn/);
+    }
   });
 
   it('replacePosItems: đơn online → 1701, không đụng kho', async () => {
@@ -143,6 +223,23 @@ describe('OrderService', () => {
     expect(calls).toEqual(['claim', 'discard', 'delete', 'reserve']);
   });
 
+  it('replacePosItems ghi ORDER.ITEMS_REPLACED amount = tổng mới; đổi giảm giá ghi thêm ORDER.DISCOUNT_APPLIED', async () => {
+    orders.findHead.mockResolvedValue(head({ totalAmount: 12000n, discountAmount: 0n }));
+    await service.replacePosItems('o1', { items: [{ productUnitId: 'pu1', quantity: 3 }], discountAmount: 500 }, ss);
+    const { entries } = recorded();
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    expect(entries.map((entry) => entry.event)).toEqual(['ORDER.ITEMS_REPLACED', 'ORDER.DISCOUNT_APPLIED']);
+    expect(entries[0]).toMatchObject({ entityLabel: 'HD000001', branchIds: ['b1'], amount: 2500n });
+    expect(entries[0].before).toMatchObject({ totalAmount: '12000' });
+    expect(entries[1].amount).toBe(500n);
+  });
+
+  it('replacePosItems giữ nguyên giảm giá → không ghi ORDER.DISCOUNT_APPLIED', async () => {
+    orders.findHead.mockResolvedValue(head({ discountAmount: 500n }));
+    await service.replacePosItems('o1', { items: [{ productUnitId: 'pu1', quantity: 3 }], discountAmount: 500 }, ss);
+    expect(recorded().entries.map((entry) => entry.event)).toEqual(['ORDER.ITEMS_REPLACED']);
+  });
+
   it('payPos: đọc lại đơn SAU khi chiếm và thu đúng tổng mới', async () => {
     orders.findHead
       .mockResolvedValueOnce(head({ totalAmount: 12000n }))
@@ -154,6 +251,16 @@ describe('OrderService', () => {
       expect.objectContaining({ amount: 8000n, status: 'SUCCESS' }),
     );
     expect(stock.consume).toHaveBeenCalledWith(ctx, 'o1', 'u1');
+    const { entries } = recorded();
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'ORDER.PAID',
+        entityLabel: 'HD000001',
+        branchIds: ['b1'],
+        searchTerms: ['HD000001'],
+        amount: 8000n,
+      }),
+    ]);
   });
 
   it('payPos: có thuốc kê đơn mà thiếu đơn thuốc → 1800, không ghi thanh toán', async () => {
@@ -172,11 +279,44 @@ describe('OrderService', () => {
     expect(stock.release).not.toHaveBeenCalled();
   });
 
+  it('cancel ghi ORDER.CANCELLED với lý do của người huỷ', async () => {
+    orders.findHead.mockResolvedValue(head());
+    await service.cancel('o1', { reason: 'Khách đổi ý' }, ss);
+    const { actor, entries } = recorded();
+    expect(actor.type).toBe('USER');
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'ORDER.CANCELLED',
+        entityLabel: 'HD000001',
+        branchIds: ['b1'],
+        reason: 'Khách đổi ý',
+      }),
+    ]);
+  });
+
+  it('expireAbandonedPos ghi ORDER.AUTO_EXPIRED với actor.type JOB', async () => {
+    orders.findAbandonedPos.mockResolvedValue([
+      { id: 'o1', code: 'HD000001', branchId: 'b1', status: OrderStatus.PENDING, updatedAt: null },
+    ]);
+    await service.expireAbandonedPos(new Date('2026-10-16T02:00:00Z'));
+    const { actor, entries } = recorded();
+    expect(actor).toMatchObject({ type: 'JOB', ip: null, requestId: null });
+    expect(entries).toEqual([
+      expect.objectContaining({
+        event: 'ORDER.AUTO_EXPIRED',
+        entityId: 'o1',
+        entityLabel: 'HD000001',
+        branchIds: ['b1'],
+        reason: expect.stringContaining('Tự huỷ') as unknown,
+      }),
+    ]);
+  });
+
   it('expireAbandonedPos: chỉ huỷ đơn chưa bị sửa kể từ lúc đọc; đơn vừa sửa bị bỏ qua', async () => {
     const stale = new Date('2026-10-16T01:00:00Z');
     orders.findAbandonedPos.mockResolvedValue([
-      { id: 'o1', branchId: 'b1', status: OrderStatus.PENDING, updatedAt: stale },
-      { id: 'o2', branchId: 'b1', status: OrderStatus.PENDING, updatedAt: null },
+      { id: 'o1', code: 'HD000001', branchId: 'b1', status: OrderStatus.PENDING, updatedAt: stale },
+      { id: 'o2', code: 'HD000002', branchId: 'b1', status: OrderStatus.PENDING, updatedAt: null },
     ]);
     orders.claim.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
     const cancelled = await service.expireAbandonedPos(new Date('2026-10-16T02:00:00Z'));

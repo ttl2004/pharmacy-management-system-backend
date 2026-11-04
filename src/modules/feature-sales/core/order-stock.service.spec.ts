@@ -42,6 +42,7 @@ describe('OrderStockService', () => {
     allocator as never,
     ledger as never,
     repository as unknown as OrderStockRepository,
+    {} as never,
   );
 
   beforeEach(() => jest.clearAllMocks());

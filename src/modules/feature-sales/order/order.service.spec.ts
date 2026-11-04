@@ -154,13 +154,13 @@ describe('OrderService', () => {
     expect(entries[0]).toMatchObject({ event: 'ORDER.CREATED', amount: 12000n, branchIds: ['b1'] });
   });
 
-  it('createPos có giảm giá ghi thêm ORDER.DISCOUNT_APPLIED với amount = discountAmount', async () => {
-    await service.createPos({ items: [{ productUnitId: 'pu1', quantity: 12 }], discountAmount: 2000 }, ss);
-    const { entries } = recorded();
-    expect(audit.record).toHaveBeenCalledTimes(1);
-    expect(entries.map((entry) => entry.event)).toEqual(['ORDER.CREATED', 'ORDER.DISCOUNT_APPLIED']);
-    expect(entries[0].amount).toBe(10000n);
-    expect(entries[1]).toMatchObject({ entityLabel: 'HD000001', branchIds: ['b1'], amount: 2000n });
+  it('createPos: totalAmount = subtotal (giảm giá luôn 0), không phát ORDER.DISCOUNT_APPLIED', async () => {
+    await service.createPos({ items: [{ productUnitId: 'pu1', quantity: 12 }] }, ss);
+    expect(orders.createHeader).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({ subtotalAmount: 12000n, discountAmount: 0n, totalAmount: 12000n }),
+    );
+    expect(recorded().entries.map((entry) => entry.event)).toEqual(['ORDER.CREATED']);
   });
 
   it('createPos có ghi đè cảnh báo tương tác ghi thêm ORDER.INTERACTION_OVERRIDE, lý do = lý do ghi đè', async () => {
@@ -223,20 +223,25 @@ describe('OrderService', () => {
     expect(calls).toEqual(['claim', 'discard', 'delete', 'reserve']);
   });
 
-  it('replacePosItems ghi ORDER.ITEMS_REPLACED amount = tổng mới; đổi giảm giá ghi thêm ORDER.DISCOUNT_APPLIED', async () => {
+  it('replacePosItems ghi ORDER.ITEMS_REPLACED amount = tổng mới', async () => {
     orders.findHead.mockResolvedValue(head({ totalAmount: 12000n, discountAmount: 0n }));
-    await service.replacePosItems('o1', { items: [{ productUnitId: 'pu1', quantity: 3 }], discountAmount: 500 }, ss);
+    await service.replacePosItems('o1', { items: [{ productUnitId: 'pu1', quantity: 3 }] }, ss);
     const { entries } = recorded();
     expect(audit.record).toHaveBeenCalledTimes(1);
-    expect(entries.map((entry) => entry.event)).toEqual(['ORDER.ITEMS_REPLACED', 'ORDER.DISCOUNT_APPLIED']);
-    expect(entries[0]).toMatchObject({ entityLabel: 'HD000001', branchIds: ['b1'], amount: 2500n });
+    expect(entries.map((entry) => entry.event)).toEqual(['ORDER.ITEMS_REPLACED']);
+    expect(entries[0]).toMatchObject({ entityLabel: 'HD000001', branchIds: ['b1'], amount: 3000n });
     expect(entries[0].before).toMatchObject({ totalAmount: '12000' });
-    expect(entries[1].amount).toBe(500n);
   });
 
-  it('replacePosItems giữ nguyên giảm giá → không ghi ORDER.DISCOUNT_APPLIED', async () => {
+  it('replacePosItems giữ discountAmount = 0 (kể cả đơn cũ còn giảm giá)', async () => {
     orders.findHead.mockResolvedValue(head({ discountAmount: 500n }));
-    await service.replacePosItems('o1', { items: [{ productUnitId: 'pu1', quantity: 3 }], discountAmount: 500 }, ss);
+    await service.replacePosItems('o1', { items: [{ productUnitId: 'pu1', quantity: 3 }] }, ss);
+    expect(orders.claim).toHaveBeenCalledWith(
+      tx,
+      'o1',
+      expect.anything(),
+      expect.objectContaining({ discountAmount: 0n, totalAmount: 3000n }),
+    );
     expect(recorded().entries.map((entry) => entry.event)).toEqual(['ORDER.ITEMS_REPLACED']);
   });
 

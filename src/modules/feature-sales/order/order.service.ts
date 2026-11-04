@@ -162,7 +162,7 @@ export class OrderService {
         await this.orders.findSellableUnits(tx, this.unitIdsOf(dto)),
         book ? toBookPricing(book) : undefined,
       );
-      const totals = orderTotals(lines, 0, dto.discountAmount ?? 0);
+      const totals = orderTotals(lines);
       // Thuốc kiểm soát đặc biệt: phải biết người mua (như mock — chặn khách lẻ).
       if (!customer && lines.some((line) => line.isControlled)) {
         throw badRequest('Đơn có thuốc kiểm soát đặc biệt phải nhập SĐT khách mua');
@@ -205,14 +205,6 @@ export class OrderService {
           },
         },
       ];
-      if (totals.discountAmount > 0n) {
-        entries.push({
-          event: 'ORDER.DISCOUNT_APPLIED',
-          ...orderAudit(order),
-          amount: totals.discountAmount,
-          after: { discountAmount: totals.discountAmount.toString(), subtotalAmount: totals.subtotalAmount.toString() },
-        });
-      }
       entries.push(...overrideEntries(order, dto.interactionOverride));
       // Hồ sơ khách do hệ thống tạo cũng phải có dấu vết: ai tạo, ở quầy nào. SĐT che, không ghi tên (PII).
       if (customer?.created) {
@@ -252,7 +244,7 @@ export class OrderService {
         await this.orders.findSellableUnits(tx, this.unitIdsOf(dto)),
         book ? toBookPricing(book) : undefined,
       );
-      const totals = orderTotals(lines, 0, dto.discountAmount ?? 0);
+      const totals = orderTotals(lines);
 
       // Chiếm trước khi đụng kho: request thu tiền/huỷ cùng lúc phải chờ, rồi thấy đơn đã đổi.
       const claimed = await this.orders.claim(
@@ -292,16 +284,6 @@ export class OrderService {
           },
         },
       ];
-      // Chỉ ghi khi giảm giá thật sự đổi sang một mức > 0; bỏ giảm giá đã thấy ở before/after của dòng trên.
-      if (totals.discountAmount > 0n && totals.discountAmount !== head.discountAmount) {
-        entries.push({
-          event: 'ORDER.DISCOUNT_APPLIED',
-          ...orderAudit(head),
-          amount: totals.discountAmount,
-          before: { discountAmount: head.discountAmount.toString() },
-          after: { discountAmount: totals.discountAmount.toString(), subtotalAmount: totals.subtotalAmount.toString() },
-        });
-      }
       entries.push(...overrideEntries(head, dto.interactionOverride));
       await this.audit.record(tx, auditActorOf(actor), entries);
       return this.mustFind(tx, id);

@@ -100,13 +100,6 @@ class OrderLinesRequest {
   prescription?: PrescriptionRequest;
 
   @IsOptional()
-  @IsInt()
-  @Min(0)
-  @Max(2_000_000_000)
-  @ApiPropertyOptional({ description: 'Giảm giá cả đơn (VND, ≤ tạm tính). Sửa đơn: không gửi = 0' })
-  discountAmount?: number;
-
-  @IsOptional()
   @ValidateNested()
   @Type(() => InteractionOverrideRequest)
   @ApiPropertyOptional({ type: InteractionOverrideRequest })

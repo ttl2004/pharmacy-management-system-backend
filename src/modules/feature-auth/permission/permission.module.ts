@@ -1,4 +1,5 @@
 import { Module, forwardRef } from '@nestjs/common';
+import { AuditLogModule } from 'src/providers/audit-log/audit-log.module';
 import { AuthzModule } from '../authz/authz.module';
 import { UserModule } from '../user/user.module';
 import { PermissionService } from './permission.service';
@@ -11,9 +12,16 @@ import { RolePermissionRepository } from './repositories/role-permission.reposit
 
 @Module({
   // AuthzModule để lấy AuthzGuard (đặt trước PermissionGuard trên route).
-  imports: [forwardRef(() => AuthzModule), forwardRef(() => UserModule)],
+  imports: [forwardRef(() => AuthzModule), forwardRef(() => UserModule), AuditLogModule],
   controllers: [PermissionController],
-  providers: [PermissionService, RoleAdminService, PermissionGuard, RoleRepository, PermissionRepository, RolePermissionRepository],
+  providers: [
+    PermissionService,
+    RoleAdminService,
+    PermissionGuard,
+    RoleRepository,
+    PermissionRepository,
+    RolePermissionRepository,
+  ],
   exports: [PermissionService, PermissionGuard, RoleRepository],
 })
 export class PermissionModule {}

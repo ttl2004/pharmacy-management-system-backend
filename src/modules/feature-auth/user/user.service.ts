@@ -8,6 +8,11 @@ import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import { normalizePhoneSearch } from 'src/common/utils/phone.util';
 import { PrismaService } from 'src/common/databases/prisma.service';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { diffFields, pickAuditFields } from 'src/providers/audit-log/audit-diff';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import type { AuditEntry, AuditJson } from 'src/providers/audit-log/audit-log.types';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { SessionTransactions } from '../authz/session.store';
@@ -25,6 +30,14 @@ import { assertRoleWithinCallerGrants } from '../permission/role-grant-guard';
 import { CreateUserRequest, UpdateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserRepository } from './repositories/user.repository';
+import {
+  maskUserSnapshot,
+  USER_AUDIT_FIELDS,
+  userAuditBase,
+  userSnapshot,
+  usernameOf,
+  type UserAuditSnapshot,
+} from './user-audit';
 
 export type UserDetail = User & { role: Role; branch: Branch | null; auth: { username: string } | null };
 
@@ -33,12 +46,27 @@ const USER_RELATIONS = { role: true, branch: true, auth: { select: { username: t
 
 const SUPER_ADMIN_ROLE = 'SUPER_ADMIN';
 
+/** Snapshot → dạng JSON ghi được (Date/bigint đã chuẩn hoá); dùng cho CREATE/DELETE. */
+function plainSnapshot(snapshot: UserAuditSnapshot): Record<string, AuditJson> {
+  return pickAuditFields(snapshot, USER_AUDIT_FIELDS);
+}
+
+/** Phần trường trong danh sách trắng mà lần sửa này thực sự gửi lên. */
+function userSnapshotChanges(data: Partial<User>): Partial<UserAuditSnapshot> {
+  const changes: Partial<UserAuditSnapshot> = {};
+  for (const field of ['fullName', 'status', 'branchId', 'email', 'phoneNumber'] as const) {
+    if (field in data) changes[field] = data[field];
+  }
+  return changes;
+}
+
 @Injectable()
 export class UserService extends AbstractBaseService<User> {
   constructor(
     private readonly userRepository: UserRepository,
     private readonly prisma: PrismaService,
     private readonly transactions: SessionTransactions,
+    private readonly audit: AuditLogService,
   ) {
     super(userRepository);
   }
@@ -92,7 +120,8 @@ export class UserService extends AbstractBaseService<User> {
     return user;
   }
 
-  async create(dto: CreateUserRequest, caller: JwtUser): Promise<UserDetail> {
+  async create(dto: CreateUserRequest, actor: RequestActor): Promise<UserDetail> {
+    const caller = actor.user;
     const scope = resolveBranchScope(caller);
     const hasUsername = Boolean(dto.username);
     const hasPassword = Boolean(dto.password);
@@ -143,6 +172,16 @@ export class UserService extends AbstractBaseService<User> {
             },
           });
         }
+
+        const username = hasUsername ? (dto.username ?? null) : null;
+        await this.audit.record(tx, auditActorOf(actor), [
+          {
+            event: 'USER.CREATED',
+            ...userAuditBase(user, username, [user.branchId]),
+            after: maskUserSnapshot(plainSnapshot(userSnapshot(user))),
+            ...(username ? { metadata: { hasCredentials: true } } : {}),
+          },
+        ]);
 
         return { ...user, auth: dto.username ? { username: dto.username } : null };
       });
@@ -204,7 +243,8 @@ export class UserService extends AbstractBaseService<User> {
    * Luật 14 + 15 + ràng buộc `branchId` theo vai trò + phạm vi chi nhánh + rào cấp bậc. KHÔNG đổi vai trò — việc đó đi qua
    * `PATCH /permission/users/:userId/role` với quyền `user:role:update`.
    */
-  async update(id: string, dto: UpdateUserRequest, caller: JwtUser): Promise<UserDetail> {
+  async update(id: string, dto: UpdateUserRequest, actor: RequestActor): Promise<UserDetail> {
+    const caller = actor.user;
     const scope = resolveBranchScope(caller);
     // Phạm vi đứng TRƯỚC luật 14 (BS-05): nhân viên chi nhánh nhắm vào tài khoản ngoài chi nhánh — kể cả
     // SUPER_ADMIN — phải nhận 1200 như không tồn tại, không được nhận 1604 làm lộ tài khoản đó.
@@ -250,6 +290,33 @@ export class UserService extends AbstractBaseService<User> {
         if (!updated) {
           throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
         }
+        const changes = userSnapshotChanges(data);
+        const diff = diffFields(userSnapshot(current), changes, USER_AUDIT_FIELDS);
+        if (diff) {
+          const username = await usernameOf(tx, id);
+          const base = userAuditBase(current, username, [current.branchId, updated.branchId]);
+          const entries: AuditEntry[] = [];
+          if ('status' in diff.after) {
+            entries.push({
+              event: 'USER.STATUS_CHANGED',
+              ...base,
+              before: { status: diff.before.status },
+              after: { status: diff.after.status },
+              reason: dto.reason?.trim() || null,
+            });
+            delete diff.before.status;
+            delete diff.after.status;
+          }
+          if (Object.keys(diff.after).length) {
+            entries.push({
+              event: 'USER.UPDATED',
+              ...base,
+              before: maskUserSnapshot(diff.before),
+              after: maskUserSnapshot(diff.after),
+            });
+          }
+          await this.audit.record(tx, auditActorOf(actor), entries);
+        }
         if (revokeSessions) {
           await this.revokeRefreshTokens(tx, id);
           // TODO(audit-v21 Task 13): ghi AUTH.SESSIONS_REVOKED_BY_ADMIN (securityEvents.record, cùng tx) tại đây.
@@ -262,7 +329,9 @@ export class UserService extends AbstractBaseService<User> {
   }
 
   /** Luật 13: xoá mềm + thu hồi mọi refresh token còn hiệu lực. */
-  async remove(id: string, caller: JwtUser): Promise<{ success: true }> {
+  /** `reason` tuỳ chọn (DELETE không có body nên đi qua `?reason=`). */
+  async remove(id: string, actor: RequestActor, reason?: string): Promise<{ success: true }> {
+    const caller = actor.user;
     const scope = resolveBranchScope(caller);
     await this.assertTargetInScope(id, scope);
     await this.assertNotSuperAdminTarget(id);
@@ -283,6 +352,14 @@ export class UserService extends AbstractBaseService<User> {
       }
       await this.revokeRefreshTokens(tx, id);
       // TODO(audit-v21 Task 13): ghi AUTH.SESSIONS_REVOKED_BY_ADMIN (securityEvents.record, cùng tx) tại đây.
+      await this.audit.record(tx, auditActorOf(actor), [
+        {
+          event: 'USER.DELETED',
+          ...userAuditBase(target, await usernameOf(tx, id), [target.branchId]),
+          before: maskUserSnapshot(plainSnapshot(userSnapshot(target))),
+          reason: reason?.trim() || null,
+        },
+      ]);
     });
 
     return { success: true };

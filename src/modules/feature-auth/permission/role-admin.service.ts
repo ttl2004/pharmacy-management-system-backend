@@ -4,7 +4,9 @@ import { ErrorCode } from 'src/common/types/error-code';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { PrismaService } from 'src/common/databases/prisma.service';
-import type { JwtUser } from '../authz/types/authz.types';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { permissionError } from './permission.error';
 import { PermissionService } from './permission.service';
 import { assertOutranks } from './role-hierarchy';
@@ -19,6 +21,17 @@ const CUSTOMER_LEVEL = 20;
 /** Độ dài tối đa cột `roles.code` (VarChar(50)). */
 const ROLE_CODE_MAX_LENGTH = 50;
 
+/** Vai trò là danh mục toàn chuỗi → `branchIds: []`; nhãn là mã vai trò. */
+function roleAuditBase(role: Pick<Role, 'id' | 'code' | 'name'>) {
+  return {
+    entityType: 'roles',
+    entityId: role.id,
+    entityLabel: role.code,
+    branchIds: [],
+    searchTerms: [role.code, role.name],
+  };
+}
+
 /** Quản trị vai trò: danh sách, tạo và xoá vai trò tự tạo. Ma trận quyền nằm ở `PermissionService`. */
 @Injectable()
 export class RoleAdminService {
@@ -27,6 +40,7 @@ export class RoleAdminService {
     private readonly rolePermissions: RolePermissionRepository,
     private readonly prisma: PrismaService,
     private readonly permissionService: PermissionService,
+    private readonly audit: AuditLogService,
   ) {}
 
   async getRoles() {
@@ -41,7 +55,8 @@ export class RoleAdminService {
    * Tạo vai trò tự tạo (`isSystem=false`). Mã sinh từ tên; cấp bậc phải nằm giữa CUSTOMER và người gọi.
    * Vai trò tự tạo luôn có phạm vi BRANCH (xem `branchScopeKindOf`).
    */
-  async createRole(dto: CreateRoleRequest, caller: JwtUser) {
+  async createRole(dto: CreateRoleRequest, actor: RequestActor) {
+    const caller = actor.user;
     // Cả hai vế dùng 1508 nhưng kèm message riêng cho đúng ngữ cảnh "tạo vai trò".
     if (!(dto.level > CUSTOMER_LEVEL) || !(dto.level < caller.roleLevel)) {
       throw permissionError(
@@ -79,6 +94,14 @@ export class RoleAdminService {
             data: permissionIds.map((permissionId) => ({ roleId: role.id, permissionId, createdBy: caller.userId })),
           });
         }
+        await this.audit.record(tx, auditActorOf(actor), [
+          {
+            event: 'ROLE.CREATED',
+            ...roleAuditBase(role),
+            after: { code: role.code, name: role.name, description: role.description, level: role.level },
+            metadata: { permissionCodes: [...wanted].sort() },
+          },
+        ]);
         return role;
       });
       return this.toRoleItem(created, permissionIds.length, 0);
@@ -93,7 +116,9 @@ export class RoleAdminService {
    * Xoá mềm vai trò tự tạo. Chỉ user CHƯA xoá còn trỏ tới mới chặn (1510); user đã xoá mềm bị bỏ qua.
    * Đổi `code` thành `<code>_DEL_<hậu tố>` để nhả mã unique cho vai trò tạo lại sau này.
    */
-  async deleteRole(roleCode: string, caller: JwtUser): Promise<{ success: true }> {
+  /** `reason` tuỳ chọn (DELETE không có body nên đi qua `?reason=`). */
+  async deleteRole(roleCode: string, actor: RequestActor, reason?: string): Promise<{ success: true }> {
+    const caller = actor.user;
     const role = await this.permissionService.requireRole(roleCode);
     if (role.isSystem) throw permissionError(ErrorCode.ROLE_NOT_EDITABLE);
     assertOutranks(caller.roleLevel, role.level);
@@ -111,6 +136,15 @@ export class RoleAdminService {
           where: { id: role.id },
           data: { isDeleted: true, code: deletedCode, updatedBy: caller.userId, updatedAt: new Date() },
         });
+        // Nhật ký giữ mã gốc, không phải mã `_DEL_` đã đổi để nhả unique.
+        await this.audit.record(tx, auditActorOf(actor), [
+          {
+            event: 'ROLE.DELETED',
+            ...roleAuditBase(role),
+            before: { code: role.code, name: role.name, level: role.level },
+            reason: reason?.trim() || null,
+          },
+        ]);
       });
     } finally {
       this.permissionService.clearGrantCache();

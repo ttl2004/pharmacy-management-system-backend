@@ -21,3 +21,8 @@ export function entriesOf(audit: AuditMock): Record<string, unknown>[] {
   expect(audit.record).toHaveBeenCalledTimes(1);
   return (audit.record.mock.calls[0] as [unknown, unknown, Record<string, unknown>[]])[2];
 }
+
+/** Bọc một `JwtUser` thành `RequestActor` (không có IP/mã request). */
+export function actorOf(user: RequestActor['user']): RequestActor {
+  return { user, ip: null, userAgent: null, requestId: null };
+}

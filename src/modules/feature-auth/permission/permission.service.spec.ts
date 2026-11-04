@@ -2,6 +2,7 @@ import { SYSTEM_ACTOR_ID } from 'src/common/constants/app.constant';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
+import { actorOf, entriesOf } from 'src/test-support/audit-harness';
 import type { JwtUser } from '../authz/types/authz.types';
 import { PERMISSION_CODES } from './permission.constant';
 import { PermissionService } from './permission.service';
@@ -27,6 +28,9 @@ const SUPER_ADMIN = caller('actor-id', AuthRole.SUPER_ADMIN);
 const MANAGER_CN1 = caller('pm-caller', AuthRole.PHARMACY_MANAGER, CN1);
 
 /** Chỉ cắm những dependency mà từng test cần; phần còn lại là object rỗng. */
+const audit = { record: jest.fn() };
+beforeEach(() => audit.record.mockClear());
+
 function makeService(overrides: {
   roles?: Record<string, jest.Mock>;
   permissions?: Record<string, jest.Mock>;
@@ -39,10 +43,16 @@ function makeService(overrides: {
   const rolePermissions = { ...overrides.rolePermissions } as never;
   const users = { findByIdWithRole: jest.fn(), update: jest.fn(), ...overrides.users } as never;
   const prisma = {
-    $transaction: jest.fn((work: (tx: unknown) => unknown) => work({ $executeRaw: jest.fn() })),
+    $transaction: jest.fn((work: (tx: unknown) => unknown) =>
+      work({
+        $executeRaw: jest.fn(),
+        auth: { findFirst: jest.fn().mockResolvedValue({ username: 'nv01' }) },
+        refreshToken: { updateMany: jest.fn() },
+      }),
+    ),
   } as never;
   const userService = { assertBranchRule: jest.fn().mockResolvedValue(undefined), ...overrides.userService } as never;
-  return new PermissionService(roles, permissions, rolePermissions, users, prisma, userService);
+  return new PermissionService(roles, permissions, rolePermissions, users, prisma, userService, audit as never);
 }
 
 const PHARMACY_MANAGER_ROLE = { id: 'role-pm', code: 'PHARMACY_MANAGER', level: 60 };
@@ -60,7 +70,7 @@ describe('PermissionService — đổi vai trò', () => {
       userService: { assertBranchRule },
     });
 
-    await expect(service.assignRole('u1', 'PHARMACY_MANAGER', SUPER_ADMIN)).resolves.toEqual({
+    await expect(service.assignRole('u1', 'PHARMACY_MANAGER', actorOf(SUPER_ADMIN), 'Lý do thử')).resolves.toEqual({
       userId: 'u1',
       roleCode: 'PHARMACY_MANAGER',
     });
@@ -79,9 +89,11 @@ describe('PermissionService — đổi vai trò', () => {
       },
     });
 
-    await expect(service.assignRole('u1', 'PHARMACY_MANAGER', SUPER_ADMIN)).rejects.toMatchObject({
-      errorCode: ErrorCode.INVALID_REFERENCE,
-    });
+    await expect(service.assignRole('u1', 'PHARMACY_MANAGER', actorOf(SUPER_ADMIN), 'Lý do thử')).rejects.toMatchObject(
+      {
+        errorCode: ErrorCode.INVALID_REFERENCE,
+      },
+    );
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -91,9 +103,11 @@ describe('PermissionService — đổi vai trò', () => {
       users: { findByIdWithRole: jest.fn().mockResolvedValue(null) },
     });
 
-    await expect(service.assignRole('u1', 'PHARMACY_MANAGER', SUPER_ADMIN)).rejects.toMatchObject({
-      errorCode: ErrorCode.USER_NOT_FOUND,
-    });
+    await expect(service.assignRole('u1', 'PHARMACY_MANAGER', actorOf(SUPER_ADMIN), 'Lý do thử')).rejects.toMatchObject(
+      {
+        errorCode: ErrorCode.USER_NOT_FOUND,
+      },
+    );
   });
 
   it('người gọi bị giới hạn chi nhánh đổi vai trò người ngoài chi nhánh thì nhận 1200, không ghi gì', async () => {
@@ -108,7 +122,7 @@ describe('PermissionService — đổi vai trò', () => {
       },
     });
 
-    await expect(service.assignRole('u2', 'SALES_STAFF', MANAGER_CN1)).rejects.toMatchObject({
+    await expect(service.assignRole('u2', 'SALES_STAFF', actorOf(MANAGER_CN1), 'Lý do thử')).rejects.toMatchObject({
       errorCode: ErrorCode.USER_NOT_FOUND,
     });
     expect(update).not.toHaveBeenCalled();
@@ -195,7 +209,9 @@ describe('PermissionService — rào cấp bậc', () => {
       },
     });
 
-    await expect(service.assignRole('sa-2', 'PHARMACY_MANAGER', SUPER_ADMIN)).rejects.toMatchObject({
+    await expect(
+      service.assignRole('sa-2', 'PHARMACY_MANAGER', actorOf(SUPER_ADMIN), 'Lý do thử'),
+    ).rejects.toMatchObject({
       errorCode: ErrorCode.SUPER_ADMIN_PROTECTED,
     });
     expect(update).not.toHaveBeenCalled();
@@ -207,7 +223,7 @@ describe('PermissionService — rào cấp bậc', () => {
       users: { findByIdWithRole: jest.fn().mockResolvedValue(SALES_STAFF_TARGET) },
     });
 
-    await expect(service.assignRole('u1', 'SUPER_ADMIN', SUPER_ADMIN)).rejects.toMatchObject({
+    await expect(service.assignRole('u1', 'SUPER_ADMIN', actorOf(SUPER_ADMIN), 'Lý do thử')).rejects.toMatchObject({
       errorCode: ErrorCode.ROLE_NOT_ASSIGNABLE,
     });
   });
@@ -219,7 +235,7 @@ describe('PermissionService — rào cấp bậc', () => {
       users: { findByIdWithRole: jest.fn().mockResolvedValue(SALES_STAFF_TARGET), update },
     });
 
-    await expect(service.assignRole('u1', 'ADMIN', ADMIN)).rejects.toMatchObject({
+    await expect(service.assignRole('u1', 'ADMIN', actorOf(ADMIN), 'Lý do thử')).rejects.toMatchObject({
       response: { code: ErrorCode.ROLE_LEVEL_FORBIDDEN },
     });
     expect(update).not.toHaveBeenCalled();
@@ -235,7 +251,7 @@ describe('PermissionService — rào cấp bậc', () => {
       },
     });
 
-    await expect(service.assignRole('admin-2', 'SALES_STAFF', ADMIN)).rejects.toMatchObject({
+    await expect(service.assignRole('admin-2', 'SALES_STAFF', actorOf(ADMIN), 'Lý do thử')).rejects.toMatchObject({
       response: { code: ErrorCode.ROLE_LEVEL_FORBIDDEN },
     });
     expect(update).not.toHaveBeenCalled();
@@ -244,7 +260,9 @@ describe('PermissionService — rào cấp bậc', () => {
   it('ADMIN không sửa được ma trận quyền của chính vai trò ADMIN (1508)', async () => {
     const service = makeService({ roles: { findOne: jest.fn().mockResolvedValue(ADMIN_ROLE) } });
 
-    await expect(service.replaceRolePermissions('ADMIN', ['branch:read'], ADMIN)).rejects.toMatchObject({
+    await expect(
+      service.replaceRolePermissions('ADMIN', ['branch:read'], actorOf(ADMIN), 'Lý do thử'),
+    ).rejects.toMatchObject({
       response: { code: ErrorCode.ROLE_LEVEL_FORBIDDEN },
     });
   });
@@ -274,12 +292,17 @@ describe('PermissionService — rào cấp bậc', () => {
     });
 
     await expect(
-      service.replaceRolePermissions('PHARMACY_MANAGER', ['product:read', 'branch:delete'], ADMIN),
+      service.replaceRolePermissions(
+        'PHARMACY_MANAGER',
+        ['product:read', 'branch:delete'],
+        actorOf(ADMIN),
+        'Lý do thử',
+      ),
     ).rejects.toMatchObject({ response: { code: ErrorCode.PERMISSION_NOT_GRANTABLE } });
     expect(replaceForRole).not.toHaveBeenCalled();
 
     await expect(
-      service.replaceRolePermissions('PHARMACY_MANAGER', ['product:read', 'user:read'], ADMIN),
+      service.replaceRolePermissions('PHARMACY_MANAGER', ['product:read', 'user:read'], actorOf(ADMIN), 'Lý do thử'),
     ).resolves.toMatchObject({ permissionCodes: ['product:read', 'user:read'] });
     expect(replaceForRole).toHaveBeenCalledTimes(1);
     // Người ghi nhận là người gọi, không phải id hệ thống hay giá trị rỗng.
@@ -326,7 +349,12 @@ describe('PermissionService — cache quyền theo vai trò', () => {
     await service.getGrantedCodes('PHARMACY_MANAGER');
 
     granted.current = ['product:read', 'user:read'];
-    await service.replaceRolePermissions('PHARMACY_MANAGER', ['product:read', 'user:read'], SUPER_ADMIN);
+    await service.replaceRolePermissions(
+      'PHARMACY_MANAGER',
+      ['product:read', 'user:read'],
+      actorOf(SUPER_ADMIN),
+      'Lý do thử',
+    );
 
     await expect(service.getGrantedCodes('PHARMACY_MANAGER')).resolves.toEqual(new Set(['product:read', 'user:read']));
   });
@@ -344,5 +372,150 @@ describe('PermissionService — cache quyền theo vai trò', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('PermissionService — nhật ký', () => {
+  const TARGET = {
+    id: 'u1',
+    fullName: 'Nguyễn Văn A',
+    branchId: CN1,
+    role: { code: 'SALES_STAFF', level: 40 },
+  };
+
+  function assignSetup() {
+    const update = jest.fn().mockResolvedValue({ id: 'u1' });
+    const refreshUpdateMany = jest.fn();
+    const service = makeService({
+      roles: { findOne: jest.fn().mockResolvedValue(PHARMACY_MANAGER_ROLE) },
+      users: { findByIdWithRole: jest.fn().mockResolvedValue(TARGET), update },
+    });
+    return { service, update, refreshUpdateMany };
+  }
+
+  it('assignRole ghi USER.ROLE_CHANGED với before/after roleCode, reason và branchIds của người bị đổi', async () => {
+    const { service, update } = assignSetup();
+
+    await service.assignRole('u1', 'PHARMACY_MANAGER', actorOf(SUPER_ADMIN), 'Được thăng chức');
+
+    expect(entriesOf(audit)).toEqual([
+      {
+        event: 'USER.ROLE_CHANGED',
+        entityType: 'users',
+        entityId: 'u1',
+        entityLabel: 'nv01',
+        branchIds: [CN1],
+        searchTerms: ['Nguyễn Văn A', 'nv01'],
+        before: { roleCode: 'SALES_STAFF' },
+        after: { roleCode: 'PHARMACY_MANAGER' },
+        reason: 'Được thăng chức',
+      },
+    ]);
+    // update chạy trên cùng tx với audit
+    expect((update.mock.calls as unknown[][])[0][3]).toBe((audit.record.mock.calls as unknown[][])[0][0]);
+  });
+
+  it('đổi role KHÔNG thu hồi phiên: không đụng refresh token, không tăng revision', async () => {
+    const { service } = assignSetup();
+    const prisma = (service as unknown as { prisma: { $transaction: jest.Mock } }).prisma;
+    let usedTx: { refreshToken: { updateMany: jest.Mock } } | undefined;
+    prisma.$transaction.mockImplementation((work: (tx: unknown) => unknown) => {
+      usedTx = {
+        refreshToken: { updateMany: jest.fn() },
+        auth: { findFirst: jest.fn().mockResolvedValue({ username: 'nv01' }) },
+      } as never;
+      return work(usedTx);
+    });
+
+    await service.assignRole('u1', 'PHARMACY_MANAGER', actorOf(SUPER_ADMIN), 'Lý do');
+
+    expect(usedTx?.refreshToken.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('assignRole cùng vai trò hiện tại thì không ghi entry', async () => {
+    const service = makeService({
+      roles: { findOne: jest.fn().mockResolvedValue({ id: 'role-ss', code: 'SALES_STAFF', level: 40 }) },
+      users: {
+        findByIdWithRole: jest.fn().mockResolvedValue(TARGET),
+        update: jest.fn().mockResolvedValue({ id: 'u1' }),
+      },
+    });
+
+    await service.assignRole('u1', 'SALES_STAFF', actorOf(SUPER_ADMIN), 'Lý do');
+
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('assignRole của người dùng ADMIN (không chi nhánh) ghi branchIds []', async () => {
+    const service = makeService({
+      roles: { findOne: jest.fn().mockResolvedValue(PHARMACY_MANAGER_ROLE) },
+      users: {
+        findByIdWithRole: jest.fn().mockResolvedValue({ ...TARGET, branchId: null }),
+        update: jest.fn().mockResolvedValue({ id: 'u1' }),
+      },
+    });
+
+    await service.assignRole('u1', 'PHARMACY_MANAGER', actorOf(SUPER_ADMIN), 'Lý do');
+
+    expect(entriesOf(audit)[0]).toMatchObject({ branchIds: [] });
+  });
+
+  function replaceSetup(current: string[]) {
+    const replaceForRole = jest.fn().mockResolvedValue(undefined);
+    const findGrantedCodes = jest.fn().mockResolvedValue(current);
+    const service = makeService({
+      roles: { findOne: jest.fn().mockResolvedValue(PHARMACY_MANAGER_ROLE) },
+      permissions: {
+        findAllOrdered: jest.fn().mockResolvedValue(PERMISSION_CODES.map((code) => ({ id: `id:${code}`, code }))),
+      },
+      rolePermissions: { findGrantedCodes, replaceForRole },
+    });
+    return { service, replaceForRole, findGrantedCodes };
+  }
+
+  it('replaceRolePermissions ghi ROLE.PERMISSIONS_CHANGED với added/removed đã sắp xếp, một reason chung', async () => {
+    const { service } = replaceSetup(['user:read', 'product:read', 'branch:read']);
+
+    await service.replaceRolePermissions(
+      'PHARMACY_MANAGER',
+      ['user:read', 'supplier:read', 'category:read'],
+      actorOf(SUPER_ADMIN),
+      'Thu hẹp quyền',
+    );
+
+    expect(entriesOf(audit)).toEqual([
+      {
+        event: 'ROLE.PERMISSIONS_CHANGED',
+        entityType: 'roles',
+        entityId: 'role-pm',
+        entityLabel: 'PHARMACY_MANAGER',
+        branchIds: [],
+        metadata: { added: ['category:read', 'supplier:read'], removed: ['branch:read', 'product:read'] },
+        reason: 'Thu hẹp quyền',
+      },
+    ]);
+  });
+
+  it('replaceRolePermissions đọc quyền hiện tại BÊN TRONG transaction đã khoá (sửa TOCTOU)', async () => {
+    const { service, findGrantedCodes } = replaceSetup(['user:read']);
+
+    await service.replaceRolePermissions(
+      'PHARMACY_MANAGER',
+      ['user:read', 'product:read'],
+      actorOf(SUPER_ADMIN),
+      'Lý do',
+    );
+
+    const [roleId, client] = (findGrantedCodes.mock.calls as unknown[][])[0];
+    expect(roleId).toBe('role-pm');
+    expect(client).toMatchObject({ $executeRaw: expect.any(Function) as unknown });
+  });
+
+  it('replaceRolePermissions không đổi gì thì không ghi entry', async () => {
+    const { service } = replaceSetup(['user:read']);
+
+    await service.replaceRolePermissions('PHARMACY_MANAGER', ['user:read'], actorOf(SUPER_ADMIN), 'Lý do');
+
+    expect(audit.record).not.toHaveBeenCalled();
   });
 });

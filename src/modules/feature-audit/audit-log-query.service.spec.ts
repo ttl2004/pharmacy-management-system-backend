@@ -97,7 +97,7 @@ describe('AuditLogQueryService.list', () => {
     const { prisma, service } = setup();
     await service.list(q({ search: 'Hủy', fromDate: '2026-01-01', toDate: '2026-01-31', severity: 1 }), pm);
     expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
-    const sql = firstArg(prisma.$queryRaw) as Prisma.Sql;
+    const sql = firstArg(prisma.$queryRaw) as unknown as Prisma.Sql;
     expect(sql.sql).toContain('"branchIds" @>');
     expect(sql.sql).toContain('"createdAt" >=');
     expect(sql.sql).toContain('"createdAt" <');
@@ -132,5 +132,48 @@ describe('AuditLogQueryService.list', () => {
     ]);
     const res = await service.list(q({}), admin);
     expect(res.items[0]).toMatchObject({ amount: '5000', traceId: 'r' });
+  });
+});
+
+describe('AuditLogQueryService.get / nhãn', () => {
+  it('detail ngoài phạm vi PM → 404 RECORD_NOT_FOUND', async () => {
+    const { prisma, service } = setup();
+    await expect(service.get('11111111-1111-4111-8111-111111111111', pm)).rejects.toMatchObject({
+      status: 404,
+      response: { code: ErrorCode.RECORD_NOT_FOUND },
+    });
+    const where = firstArg(prisma.auditLog.findFirst).where as { AND: unknown[] };
+    expect(JSON.stringify(where.AND)).toContain(BRANCH_A);
+  });
+
+  it('dòng price_books backfill có entityLabel từ loader; dòng đã có nhãn không tra lại', async () => {
+    const { prisma, service } = setup();
+    (prisma as Record<string, unknown>).priceBook = {
+      findMany: jest.fn().mockResolvedValue([{ id: 'pb1', name: 'Bảng giá Tết' }]),
+    };
+    prisma.auditLog.findMany.mockResolvedValue([
+      {
+        id: 'a',
+        createdAt: new Date(),
+        entityType: 'price_books',
+        entityId: 'pb1',
+        entityLabel: null,
+        amount: null,
+        requestId: null,
+      },
+      {
+        id: 'b',
+        createdAt: new Date(),
+        entityType: 'price_books',
+        entityId: 'pb2',
+        entityLabel: 'Đã có',
+        amount: null,
+        requestId: null,
+      },
+    ]);
+    const res = await service.list(q({}), admin);
+    expect(res.items.map((r) => r.entityLabel)).toEqual(['Bảng giá Tết', 'Đã có']);
+    const priceBook = (prisma as unknown as { priceBook: { findMany: jest.Mock } }).priceBook;
+    expect(firstArg(priceBook.findMany).where).toEqual({ id: { in: ['pb1'] } });
   });
 });

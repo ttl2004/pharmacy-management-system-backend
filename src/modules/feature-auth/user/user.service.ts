@@ -280,21 +280,27 @@ export class UserService extends AbstractBaseService<User> {
     if (dto.branchId !== undefined) data.branchId = dto.branchId ?? null;
 
     // Khoá/ngừng tài khoản thì phiên đang sống phải chết ngay, không đợi access token hết hạn (báo cáo bảo mật #7).
-    const revokeSessions =
-      dto.status !== undefined && dto.status !== current.status && dto.status !== UserStatus.ACTIVE;
+    // Thu hồi idempotent nên không cần so với trạng thái cũ (đọc cũ có thể lệch).
+    const revokeSessions = dto.status !== undefined && dto.status !== UserStatus.ACTIVE;
 
     try {
       // `forUser` giữ khoá phiên của người này, chạy nối tiếp với đăng nhập, và bỏ cache phiên (`changed()`) sau commit.
       return await this.transactions.forUser(id, async (tx) => {
+        // Đọc lại trong tx đã giữ khoá phiên: `current` ở trên đọc trước tx nên có thể đã cũ nếu có ai vừa đổi trạng thái.
+        // Diff và STATUS_CHANGED lấy từ lần đọc này.
+        const fresh = await this.userRepository.findByIdWithRole(id, tx);
+        if (!fresh) {
+          throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+        }
         const updated = await this.userRepository.update({ id }, data, { relations: USER_RELATIONS }, tx);
         if (!updated) {
           throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
         }
         const changes = userSnapshotChanges(data);
-        const diff = diffFields(userSnapshot(current), changes, USER_AUDIT_FIELDS);
+        const diff = diffFields(userSnapshot(fresh), changes, USER_AUDIT_FIELDS);
         if (diff) {
           const username = await usernameOf(tx, id);
-          const base = userAuditBase(current, username, [current.branchId, updated.branchId]);
+          const base = userAuditBase(fresh, username, [fresh.branchId, updated.branchId]);
           const entries: AuditEntry[] = [];
           if ('status' in diff.after) {
             entries.push({

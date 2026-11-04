@@ -662,3 +662,52 @@ describe('UserService — nhật ký (D16: danh sách trắng, che PII)', () => 
     ]);
   });
 });
+
+describe('UserService — update đọc lại trong tx (race)', () => {
+  const row = (status: string) => ({
+    id: 'u1',
+    fullName: 'Nguyễn Văn A',
+    status,
+    branchId: CN1,
+    email: null,
+    phoneNumber: '0987654321',
+    role: { code: 'SALES_STAFF', level: 40 },
+  });
+
+  function setup(preTx: string, inTx: string) {
+    const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const service = makeService(
+      {
+        findByIdWithRole: jest.fn().mockResolvedValueOnce(row(preTx)).mockResolvedValueOnce(row(inTx)),
+        update: jest.fn().mockResolvedValue({ id: 'u1', branchId: CN1 }),
+      },
+      { tx: { refreshToken: { updateMany } } },
+    );
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    return { service, updateMany };
+  }
+
+  it('đọc cũ ACTIVE, trong tx đã LOCKED, yêu cầu ACTIVE → vẫn ghi STATUS_CHANGED LOCKED→ACTIVE', async () => {
+    const { service } = setup('ACTIVE', 'LOCKED');
+
+    await service.update('u1', { status: 'ACTIVE' } as never, actorOf(ADMIN));
+
+    expect(entriesOf(audit)[0]).toMatchObject({
+      event: 'USER.STATUS_CHANGED',
+      before: { status: 'LOCKED' },
+      after: { status: 'ACTIVE' },
+    });
+  });
+
+  it('đọc cũ LOCKED nhưng trong tx đã ACTIVE, yêu cầu LOCKED → vẫn thu hồi refresh token', async () => {
+    const { service, updateMany } = setup('LOCKED', 'ACTIVE');
+
+    await service.update('u1', { status: 'LOCKED' } as never, actorOf(ADMIN));
+
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { userId: 'u1', revokedAt: null },
+      data: { revokedAt: expect.any(Date) as Date },
+    });
+    expect(entriesOf(audit)[0]).toMatchObject({ before: { status: 'ACTIVE' }, after: { status: 'LOCKED' } });
+  });
+});

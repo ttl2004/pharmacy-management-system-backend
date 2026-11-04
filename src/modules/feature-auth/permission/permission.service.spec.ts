@@ -421,6 +421,7 @@ describe('PermissionService — nhật ký', () => {
     let usedTx: { refreshToken: { updateMany: jest.Mock } } | undefined;
     prisma.$transaction.mockImplementation((work: (tx: unknown) => unknown) => {
       usedTx = {
+        $executeRaw: jest.fn(),
         refreshToken: { updateMany: jest.fn() },
         auth: { findFirst: jest.fn().mockResolvedValue({ username: 'nv01' }) },
       } as never;
@@ -515,6 +516,43 @@ describe('PermissionService — nhật ký', () => {
     const { service } = replaceSetup(['user:read']);
 
     await service.replaceRolePermissions('PHARMACY_MANAGER', ['user:read'], actorOf(SUPER_ADMIN), 'Lý do');
+
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+});
+
+describe('PermissionService — assignRole đọc lại vai trò trong tx (race)', () => {
+  const stale = { id: 'u1', fullName: 'A', branchId: CN1, role: { code: 'SALES_STAFF', level: 40 } };
+  const fresh = { ...stale, role: { code: 'PHARMACY_MANAGER', level: 60 } };
+
+  it('đọc cũ là A, trong tx đã là B, yêu cầu đặt A → vẫn ghi USER.ROLE_CHANGED với before B', async () => {
+    const service = makeService({
+      roles: { findOne: jest.fn().mockResolvedValue({ id: 'role-ss', code: 'SALES_STAFF', level: 40 }) },
+      users: {
+        findByIdWithRole: jest.fn().mockResolvedValueOnce(stale).mockResolvedValueOnce(fresh),
+        update: jest.fn().mockResolvedValue({ id: 'u1' }),
+      },
+    });
+
+    await service.assignRole('u1', 'SALES_STAFF', actorOf(SUPER_ADMIN), 'Lý do');
+
+    expect(entriesOf(audit)[0]).toMatchObject({
+      event: 'USER.ROLE_CHANGED',
+      before: { roleCode: 'PHARMACY_MANAGER' },
+      after: { roleCode: 'SALES_STAFF' },
+    });
+  });
+
+  it('đọc cũ khác nhưng trong tx đã đúng vai trò yêu cầu → không ghi entry', async () => {
+    const service = makeService({
+      roles: { findOne: jest.fn().mockResolvedValue(PHARMACY_MANAGER_ROLE) },
+      users: {
+        findByIdWithRole: jest.fn().mockResolvedValueOnce(stale).mockResolvedValueOnce(fresh),
+        update: jest.fn().mockResolvedValue({ id: 'u1' }),
+      },
+    });
+
+    await service.assignRole('u1', 'PHARMACY_MANAGER', actorOf(SUPER_ADMIN), 'Lý do');
 
     expect(audit.record).not.toHaveBeenCalled();
   });

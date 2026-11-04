@@ -172,6 +172,13 @@ export class PermissionService {
     await this.userService.assertBranchRule(role.code, target.branchId);
 
     await this.prisma.$transaction(async (tx) => {
+      // Khoá theo người dùng rồi ĐỌC LẠI vai trò hiện tại trong tx: `target` ở trên đọc trước tx nên có thể đã cũ nếu
+      // một admin khác vừa đổi vai trò. Quyết định "không đổi gì" và `before` của nhật ký phải lấy từ lần đọc này.
+      await lockAdvisoryKeys(tx, [`user-role:${userId}`]);
+      const fresh = await this.users.findByIdWithRole(userId, tx);
+      if (!fresh) {
+        throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+      }
       const updated = await this.users.update(
         { id: userId },
         { roleId: role.id, updatedBy: caller.userId },
@@ -181,12 +188,12 @@ export class PermissionService {
       if (!updated) {
         throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
       }
-      if (target.role.code === role.code) return;
+      if (fresh.role.code === role.code) return;
       await this.audit.record(tx, auditActorOf(actor), [
         {
           event: 'USER.ROLE_CHANGED',
-          ...userAuditBase(target, await usernameOf(tx, userId), [target.branchId]),
-          before: { roleCode: target.role.code },
+          ...userAuditBase(fresh, await usernameOf(tx, userId), [fresh.branchId]),
+          before: { roleCode: fresh.role.code },
           after: { roleCode: role.code },
           reason,
         },

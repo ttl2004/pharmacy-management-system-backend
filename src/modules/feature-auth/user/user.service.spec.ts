@@ -215,6 +215,8 @@ describe('UserService — phạm vi chi nhánh', () => {
     const prisma = {
       role: { findFirst: jest.fn().mockResolvedValue({ id: 'role-ss', code: 'SALES_STAFF', level: 40 }) },
       branch: { findFirst: jest.fn().mockResolvedValue({ id: CN1 }) },
+      // Chống leo thang (1509): vai trò đích không đòi quyền nào nên luôn ⊆ quyền người gọi.
+      rolePermission: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const service = makeService({}, {}, { prisma, tx });
 

@@ -1,10 +1,21 @@
 import { Prisma, RecordStatus } from '@prisma/client';
 import { ErrorCode } from 'src/common/types/error-code';
+import type { JwtUser } from 'src/modules/feature-auth/authz/types/authz.types';
+import { AuthRole } from 'src/common/types/common.enum';
 import { BranchService } from './branch.service';
+
+const admin = {
+  userId: 'caller-id',
+  sid: 'sid',
+  email: null,
+  role: AuthRole.ADMIN,
+  branchId: null,
+  roleLevel: 80,
+} as unknown as JwtUser;
 
 function makeService(repositoryOverrides: Record<string, jest.Mock> = {}) {
   const repository = {
-    findOne: jest.fn(),
+    findOne: jest.fn().mockResolvedValue({ id: 'id' }),
     findManyWithPagination: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
@@ -35,7 +46,7 @@ describe('BranchService — danh sách', () => {
     });
     const service = makeService({ findManyWithPagination });
 
-    await service.list({ page: 2, limit: 5, status: RecordStatus.INACTIVE, search: 'CN' });
+    await service.list({ page: 2, limit: 5, status: RecordStatus.INACTIVE, search: 'CN' }, admin);
 
     expect(findManyWithPagination).toHaveBeenCalledWith(
       { status: RecordStatus.INACTIVE },
@@ -58,7 +69,7 @@ describe('BranchService — danh sách', () => {
     });
     const service = makeService({ findManyWithPagination });
 
-    await service.list({ page: 1, limit: 10 });
+    await service.list({ page: 1, limit: 10 }, admin);
 
     expect(findManyWithPagination).toHaveBeenCalledWith({}, expect.anything());
   });
@@ -68,7 +79,7 @@ describe('BranchService — chi tiết', () => {
   it('không tồn tại thì báo RECORD_NOT_FOUND', async () => {
     const service = makeService({ findOne: jest.fn().mockResolvedValue(null) });
 
-    await expect(service.getDetail('khong-co')).rejects.toMatchObject({
+    await expect(service.getDetail('khong-co', admin)).rejects.toMatchObject({
       errorCode: ErrorCode.RECORD_NOT_FOUND,
     });
   });
@@ -79,10 +90,7 @@ describe('BranchService — tạo', () => {
     const create = jest.fn().mockImplementation((data: unknown) => Promise.resolve(data));
     const service = makeService({ create });
 
-    await service.create(
-      { code: 'CN004', name: 'Quận 7', phone: '0900000004', address: 'Quận 7' } as never,
-      'caller-id',
-    );
+    await service.create({ code: 'CN004', name: 'Quận 7', phone: '0900000004', address: 'Quận 7' } as never, admin);
 
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -97,7 +105,7 @@ describe('BranchService — tạo', () => {
     const service = makeService({ create: jest.fn().mockRejectedValue(duplicateError()) });
 
     await expect(
-      service.create({ code: 'CN001', name: 'X', phone: '0900000001', address: 'Y' } as never, 'caller-id'),
+      service.create({ code: 'CN001', name: 'X', phone: '0900000001', address: 'Y' } as never, admin),
     ).rejects.toMatchObject({ errorCode: ErrorCode.DUPLICATE_CODE });
   });
 });
@@ -106,7 +114,7 @@ describe('BranchService — cập nhật', () => {
   it('body rỗng thì báo HTTP_BAD_REQUEST', async () => {
     const service = makeService({});
 
-    await expect(service.update('id', {}, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('id', {}, admin)).rejects.toMatchObject({
       errorCode: ErrorCode.HTTP_BAD_REQUEST,
     });
   });
@@ -119,7 +127,7 @@ describe('BranchService — cập nhật', () => {
     });
     const service = makeService({ update });
 
-    await service.update('id', { phone: '0900000099' } as never, 'caller-id');
+    await service.update('id', { phone: '0900000099' } as never, admin);
 
     expect(payload).toEqual({ phone: '0900000099', updatedBy: 'caller-id' });
   });
@@ -132,7 +140,7 @@ describe('BranchService — cập nhật', () => {
     });
     const service = makeService({ update });
 
-    await service.update('id', { email: null, openingHours: null } as never, 'caller-id');
+    await service.update('id', { email: null, openingHours: null } as never, admin);
 
     expect(payload).toEqual({ email: null, openingHours: null, updatedBy: 'caller-id' });
   });
@@ -140,7 +148,7 @@ describe('BranchService — cập nhật', () => {
   it('không tồn tại thì báo RECORD_NOT_FOUND', async () => {
     const service = makeService({ update: jest.fn().mockResolvedValue(null) });
 
-    await expect(service.update('id', { name: 'X' } as never, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('id', { name: 'X' } as never, admin)).rejects.toMatchObject({
       errorCode: ErrorCode.RECORD_NOT_FOUND,
     });
   });
@@ -148,7 +156,7 @@ describe('BranchService — cập nhật', () => {
   it('trùng code thì báo DUPLICATE_CODE', async () => {
     const service = makeService({ update: jest.fn().mockRejectedValue(duplicateError()) });
 
-    await expect(service.update('id', { code: 'CN001' } as never, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('id', { code: 'CN001' } as never, admin)).rejects.toMatchObject({
       errorCode: ErrorCode.DUPLICATE_CODE,
     });
   });
@@ -163,7 +171,7 @@ describe('BranchService — xoá', () => {
       softDelete,
     });
 
-    await expect(service.remove('id')).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
+    await expect(service.remove('id', admin)).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
     expect(softDelete).not.toHaveBeenCalled();
   });
 
@@ -175,21 +183,21 @@ describe('BranchService — xoá', () => {
       softDelete,
     });
 
-    await expect(service.remove('id')).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
+    await expect(service.remove('id', admin)).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
     expect(softDelete).not.toHaveBeenCalled();
   });
 
   it('không tồn tại thì báo RECORD_NOT_FOUND', async () => {
     const service = makeService({ findOne: jest.fn().mockResolvedValue(null) });
 
-    await expect(service.remove('id')).rejects.toMatchObject({ errorCode: ErrorCode.RECORD_NOT_FOUND });
+    await expect(service.remove('id', admin)).rejects.toMatchObject({ errorCode: ErrorCode.RECORD_NOT_FOUND });
   });
 
   it('hợp lệ thì xoá mềm và trả success', async () => {
     const softDelete = jest.fn().mockResolvedValue(true);
     const service = makeService({ findOne: jest.fn().mockResolvedValue({ id: 'id' }), softDelete });
 
-    await expect(service.remove('id')).resolves.toEqual({ success: true });
+    await expect(service.remove('id', admin)).resolves.toEqual({ success: true });
     expect(softDelete).toHaveBeenCalledWith({ id: 'id' });
   });
 });

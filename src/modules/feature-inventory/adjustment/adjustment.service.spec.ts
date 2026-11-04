@@ -44,14 +44,19 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
   };
   const codes = { next: jest.fn().mockResolvedValue('DCK000001') };
   const audit = { record: jest.fn() };
+  const intake = { intake: jest.fn().mockResolvedValue({}), returnToBatches: jest.fn().mockResolvedValue([]) };
+  // Phiếu không phải trả NCC thì không đụng tiền: assertNoMoney chỉ kiểm DTO, mock để no-op.
+  const returnMoney = { assertNoMoney: jest.fn(), lockSupplierOf: jest.fn() };
   const service = new AdjustmentService(
     repository as never,
     transactions as never,
     ledger as never,
     codes as never,
     audit as never,
+    intake as never,
+    returnMoney as never,
   );
-  return { service, repository, ledger, audit };
+  return { service, repository, ledger, audit, intake };
 }
 
 const create = (type: AdjustmentType, item: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
@@ -246,11 +251,14 @@ describe('AdjustmentService — xác nhận', () => {
     expect(entries[0]).toMatchObject({ type: 'DISPOSE', quantity: -50, note: 'thu hồi' });
   });
 
-  it('phiếu đã xác nhận không huỷ được → 1701', async () => {
+  it('phiếu kiểm kê đã xác nhận không huỷ được → 1701 (biên bản cân bằng; phiếu huỷ/trả đã xác nhận thì đảo bút toán)', async () => {
     const { service } = makeService({
-      findHead: jest
-        .fn()
-        .mockResolvedValue({ id: 'adj1', status: ReceiptStatus.CONFIRMED, type: AdjustmentType.DISPOSE, branchId: A }),
+      findHead: jest.fn().mockResolvedValue({
+        id: 'adj1',
+        status: ReceiptStatus.CONFIRMED,
+        type: AdjustmentType.STOCK_TAKE,
+        branchId: A,
+      }),
     });
     await expect(service.cancel('adj1', { reason: 'x' }, PM_A)).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_DOCUMENT_STATE,

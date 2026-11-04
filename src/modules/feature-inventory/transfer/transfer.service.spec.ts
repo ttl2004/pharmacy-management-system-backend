@@ -52,6 +52,7 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
       },
     ]),
     findShipCosts: jest.fn().mockResolvedValue(new Map([['i1', 900]])),
+    setReceived: jest.fn(),
     setToBatchIds: jest.fn(),
     ...overrides,
   };
@@ -181,6 +182,11 @@ describe('TransferService — xuất/nhận/huỷ theo đúng phía', () => {
       supplierId: 's1',
       goodsReceiptItemId: null,
     });
+    expect(repository.setReceived).toHaveBeenCalledWith(
+      {},
+      [{ itemId: 'i1', receivedQuantity: 30, varianceReason: null }],
+      PM_B.user.userId,
+    );
     expect(repository.setToBatchIds).toHaveBeenCalledWith(
       {},
       [{ itemId: 'i1', toBatchId: 'b-dest' }],

@@ -34,13 +34,13 @@ describe('Mã lỗi phạm vi chi nhánh', () => {
 });
 
 describe('branchScopeKindOf', () => {
-  it('ánh xạ đủ năm vai trò, vai trò lạ là NONE', () => {
+  it('ánh xạ đủ năm vai trò; vai trò tự tạo (mã lạ) gắn với một chi nhánh', () => {
     expect(branchScopeKindOf(AuthRole.SUPER_ADMIN)).toBe('ALL');
     expect(branchScopeKindOf(AuthRole.ADMIN)).toBe('ALL');
     expect(branchScopeKindOf(AuthRole.PHARMACY_MANAGER)).toBe('BRANCH');
     expect(branchScopeKindOf(AuthRole.SALES_STAFF)).toBe('BRANCH');
     expect(branchScopeKindOf(AuthRole.CUSTOMER)).toBe('NONE');
-    expect(branchScopeKindOf('VAI_TRO_LA')).toBe('NONE');
+    expect(branchScopeKindOf('VAI_TRO_LA')).toBe('BRANCH');
   });
 });
 
@@ -70,11 +70,17 @@ describe('resolveBranchScope', () => {
     );
   });
 
-  it('CUSTOMER và vai trò lạ bị chặn 1500', () => {
+  it('CUSTOMER bị chặn 1500', () => {
     expect(codeOf(() => resolveBranchScope({ role: AuthRole.CUSTOMER, branchId: null }))).toBe(
       ErrorCode.PERMISSION_DENIED,
     );
-    expect(codeOf(() => resolveBranchScope({ role: 'VAI_TRO_LA', branchId: CN1 }))).toBe(ErrorCode.PERMISSION_DENIED);
+  });
+
+  it('vai trò tự tạo (mã lạ) bị giới hạn theo chi nhánh như nhân viên; thiếu chi nhánh thì 1507', () => {
+    expect(resolveBranchScope({ role: 'VAI_TRO_LA', branchId: CN1 })).toEqual({ kind: 'BRANCH', branchId: CN1 });
+    expect(codeOf(() => resolveBranchScope({ role: 'VAI_TRO_LA', branchId: null }))).toBe(
+      ErrorCode.BRANCH_NOT_ASSIGNED,
+    );
   });
 });
 

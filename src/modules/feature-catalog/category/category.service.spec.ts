@@ -12,6 +12,7 @@ function makeService(repositoryOverrides: Record<string, jest.Mock> = {}) {
     countChildren: jest.fn().mockResolvedValue(0),
     countProducts: jest.fn().mockResolvedValue(0),
     isInSubtreeOf: jest.fn().mockResolvedValue(false),
+    countActiveProductsWithDescendants: jest.fn().mockResolvedValue(new Map<string, number>()),
     ...repositoryOverrides,
   } as never;
   return new CategoryService(repository);

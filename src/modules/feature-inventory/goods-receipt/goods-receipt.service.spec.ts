@@ -3,6 +3,8 @@ import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import { addDaysToDateOnly, parseDateOnly, todayInVietnam } from 'src/common/utils/date-only.util';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
+import { GoodsReceiptDraftBuilder } from './goods-receipt-draft.builder';
+import { GoodsReceiptLocker } from './goods-receipt-locker';
 import { GoodsReceiptService } from './goods-receipt.service';
 
 const BRANCH_A = '11111111-1111-4111-8111-111111111111';
@@ -29,9 +31,10 @@ const line = (overrides: Record<string, unknown> = {}) => ({
 });
 
 function makeService(overrides: Record<string, jest.Mock> = {}) {
-  const repository = {
+  const repository: Record<string, jest.Mock> = {
     findBranch: jest.fn().mockResolvedValue({ id: BRANCH_A, status: RecordStatus.ACTIVE }),
     findSupplier: jest.fn().mockResolvedValue({ id: 's1', status: RecordStatus.ACTIVE }),
+    isValidReceiver: jest.fn().mockResolvedValue(true),
     findUnitsWithProduct: jest.fn().mockResolvedValue([
       {
         id: 'u-box',
@@ -46,6 +49,8 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     createItems: jest.fn().mockResolvedValue({ count: 1 }),
     findDetail: jest.fn().mockResolvedValue({ id: 'r1' }),
     findStatus: jest.fn(),
+    // Khoá hàng đọc cùng dữ liệu với findStatus: mỗi test chỉ cần mock một chỗ.
+    findStatusForUpdate: jest.fn((...args: unknown[]): unknown => repository.findStatus(...args)),
     transition: jest.fn().mockResolvedValue(1),
     findItemsForConfirm: jest.fn(),
     updateItemConversions: jest.fn(),
@@ -62,12 +67,22 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
   const ledger = { apply: jest.fn().mockResolvedValue([]), lockBatches: jest.fn().mockResolvedValue([]) };
   const codes = { next: jest.fn().mockResolvedValue('PN000001') };
   const audit = { record: jest.fn() };
+  // Khoá NCC khi huỷ phiếu đã xác nhận; nợ chi nhánh 0 nên kiểm "không âm" luôn qua.
+  const debts = { lockSupplier: jest.fn(), debtOf: jest.fn().mockResolvedValue({ scoped: 0n, chain: 0n }) };
+  const supplierPayments = { createForReceipt: jest.fn(), releaseForReceiptCancel: jest.fn() };
+  // Locker và draftBuilder dùng thật trên repository giả: giữ nguyên kiểm tra nghiệp vụ của luồng lập/xác nhận.
+  const locker = new GoodsReceiptLocker(repository as never, debts as never);
+  const draftBuilder = new GoodsReceiptDraftBuilder(repository as never);
   const service = new GoodsReceiptService(
     repository as never,
+    locker,
+    debts as never,
+    draftBuilder,
     intake as never,
     transactions as never,
     ledger as never,
     codes as never,
+    supplierPayments as never,
     audit as never,
   );
   return { service, repository, ledger, audit, intake };
@@ -149,6 +164,9 @@ describe('GoodsReceiptService — xác nhận', () => {
     receivedAt: null,
     totalAmount: 0n,
     paidAmount: 0n,
+    discountAmount: 0n,
+    supplierExpenseAmount: 0n,
+    otherExpenseAmount: 0n,
   };
   const confirmItem = {
     id: 'i1',
@@ -156,6 +174,8 @@ describe('GoodsReceiptService — xác nhận', () => {
     quantity: 2,
     conversionRate: 10,
     importPrice: 10_000,
+    unitDiscount: 0,
+    totalPrice: 20_000n,
     batchNumber: 'L1',
     manufacturingDate: null,
     expiryDate: parseDateOnly(FAR),

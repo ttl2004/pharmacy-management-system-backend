@@ -2,7 +2,18 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { AuditAction } from '@prisma/client';
 import { Transform } from 'class-transformer';
 import {
-  ArrayMaxSize, IsArray, IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min,
+  ArrayMaxSize,
+  IsArray,
+  IsEnum,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Matches,
+  Max,
+  MaxLength,
+  Min,
 } from 'class-validator';
 import { IsDateOnly } from 'src/common/validators/is-date-only.validator';
 import { MAX_PAGE_LIMIT } from 'src/providers/abstract-base/abstract-base.query';
@@ -16,19 +27,55 @@ export class AuditLogQuery {
 
   @IsOptional()
   @Transform(({ value }: { value: unknown }) =>
-    typeof value === 'string' ? value.split(',').map((s) => s.trim()).filter(Boolean) : value,
+    typeof value === 'string'
+      ? value
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : value,
   )
   @IsArray()
   @ArrayMaxSize(50)
   @IsUUID('all', { each: true })
-  @ApiPropertyOptional({ type: String, description: 'Nhiều chi nhánh, phân tách bằng dấu phẩy (ADMIN). PM: chỉ chi nhánh mình' })
+  @ApiPropertyOptional({
+    type: String,
+    description: 'Nhiều chi nhánh, phân tách bằng dấu phẩy (ADMIN). PM: chỉ chi nhánh mình',
+  })
   branchIds?: string[];
 
   @IsOptional()
   @IsString()
   @MaxLength(100)
-  @ApiPropertyOptional({ description: 'Tìm trong lý do và nội dung trước/sau (không phân biệt hoa thường)' })
+  @ApiPropertyOptional({
+    description:
+      'Tìm không dấu, không phân biệt hoa thường trong nhãn đối tượng, lý do và mã chứng từ. Bắt buộc fromDate + toDate (≤ 90 ngày); từ khoá sau khi bỏ dấu ≥ 3 ký tự',
+  })
   search?: string;
+
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string'
+      ? value
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : value,
+  )
+  @IsArray()
+  @ArrayMaxSize(20)
+  @Matches(/^[A-Z_]+\.[A-Z_]+$/, { each: true })
+  @ApiPropertyOptional({
+    type: String,
+    example: 'ORDER.VOID_PAID,PAYMENT.REFUNDED',
+    description: 'Nhiều sự kiện, phân tách bằng dấu phẩy',
+  })
+  event?: string[];
+
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) => (value === undefined || value === '' ? undefined : Number(value)))
+  @IsIn([0, 1, 2])
+  @ApiPropertyOptional({ enum: [0, 1, 2], description: 'Từ mức này trở lên' })
+  severity?: 0 | 1 | 2;
 
   @IsOptional()
   @IsString()

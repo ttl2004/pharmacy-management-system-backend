@@ -123,10 +123,22 @@ const ADJUSTMENT_GROUP = {
   RETURN_TO_SUPPLIER: 'PURCHASE_RETURN',
 } as const satisfies Record<AdjustmentType, string>;
 
-/** Event của phiếu điều chỉnh kho theo loại phiếu. */
-export function adjustmentEvent(
-  type: AdjustmentType,
-  suffix: 'CREATED' | 'UPDATED' | 'CONFIRMED' | 'CANCELLED',
-): AuditEvent {
-  return `${ADJUSTMENT_GROUP[type]}.${suffix}` as AuditEvent;
+type AdjustmentSuffix = 'CREATED' | 'UPDATED' | 'CONFIRMED' | 'CANCELLED';
+
+/** Kiểu event theo loại phiếu: DISPOSE/RETURN_TO_SUPPLIER → event bắt buộc lý do, STOCK_TAKE/OTHER → không. */
+export type AdjustmentEventOf<
+  T extends AdjustmentType,
+  S extends AdjustmentSuffix = AdjustmentSuffix,
+> = `${(typeof ADJUSTMENT_GROUP)[T]}.${S}` extends infer E extends AuditEvent ? E : never;
+
+/**
+ * Event của phiếu điều chỉnh kho theo loại phiếu. Kiểu trả về thu hẹp theo literal truyền vào, nên
+ * `AuditEntry` kiểm được `reason` mà không cần ép kiểu. Truyền `AdjustmentType` rộng thì nhận hợp của các nhóm
+ * (12 event): caller luôn phải kèm `reason: string` mới biên dịch được.
+ */
+export function adjustmentEvent<T extends AdjustmentType, S extends AdjustmentSuffix>(
+  type: T,
+  suffix: S,
+): AdjustmentEventOf<T, S> {
+  return `${ADJUSTMENT_GROUP[type]}.${suffix}` as AdjustmentEventOf<T, S>;
 }

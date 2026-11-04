@@ -10,6 +10,7 @@ import type { AuditEntry, AuditJson } from './audit-log.types';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SEARCH_TEXT_MAX = 500;
+const ENTITY_LABEL_MAX = 120;
 
 function jsonOrNull(value: AuditJson | null | undefined): Prisma.InputJsonValue | typeof Prisma.DbNull {
   return value == null ? Prisma.DbNull : (toAuditJson(value) as Prisma.InputJsonValue);
@@ -55,7 +56,7 @@ export class AuditLogService {
         requestId,
         entityType: entry.entityType,
         entityId: entry.entityId,
-        entityLabel: entry.entityLabel ?? null,
+        entityLabel: entry.entityLabel?.slice(0, ENTITY_LABEL_MAX) ?? null,
         branchIds: [...entry.branchIds],
         branchId: entry.branchIds.length === 1 ? entry.branchIds[0] : null,
         before: jsonOrNull(entry.before),

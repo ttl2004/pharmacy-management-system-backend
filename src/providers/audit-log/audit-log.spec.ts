@@ -1,7 +1,10 @@
+import type { AdjustmentType } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import type { AuditActor } from './audit-actor';
+import { adjustmentEvent } from './audit-events';
+import type { AuditEntry } from './audit-log.types';
 import { diffFields, pickAuditFields, toAuditJson } from './audit-diff';
 import { AuditLogService } from './audit-log.service';
 
@@ -151,6 +154,7 @@ describe('AuditLogService.record', () => {
     ]);
     expect(rows()[0].searchText).toBe('xh000001 thuoc het han dac biet nguyen van a');
     expect((rows()[1].searchText as string).length).toBe(500);
+    expect((rows()[1].entityLabel as string).length).toBe(120);
     expect(rows()[2].searchText).toBe('');
   });
 
@@ -176,5 +180,24 @@ describe('AuditLogService.record', () => {
     const { createMany, tx } = setup();
     await service.record(tx, ACTOR, []);
     expect(createMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('AuditEntry (kiểm kiểu lúc biên dịch, xác nhận bằng tsc)', () => {
+  const base = { entityType: 'a', entityId: 'x', branchIds: [] as string[] };
+
+  it('reason bắt buộc với event nhạy cảm; adjustmentEvent không cần ép kiểu', () => {
+    // @ts-expect-error event bắt buộc lý do mà thiếu reason
+    const missing: AuditEntry = { ...base, event: 'TRANSFER.SHIPPED' };
+    const ok1: AuditEntry = { ...base, event: adjustmentEvent('DISPOSE', 'CREATED'), reason: 'x' };
+    const ok2: AuditEntry = { ...base, event: adjustmentEvent('STOCK_TAKE', 'CREATED') };
+    // @ts-expect-error DISPOSE bắt buộc lý do
+    const bad: AuditEntry = { ...base, event: adjustmentEvent('DISPOSE', 'CREATED') };
+    const generic = 'DISPOSE' as AdjustmentType;
+    const ok3: AuditEntry = { ...base, event: adjustmentEvent(generic, 'CONFIRMED'), reason: 'x' };
+    // @ts-expect-error AdjustmentType rộng mà thiếu reason
+    const bad2: AuditEntry = { ...base, event: adjustmentEvent(generic, 'CONFIRMED') };
+    expect([missing, ok1, ok2, bad, ok3, bad2]).toHaveLength(6);
+    expect(adjustmentEvent('RETURN_TO_SUPPLIER', 'UPDATED')).toBe('PURCHASE_RETURN.UPDATED');
   });
 });

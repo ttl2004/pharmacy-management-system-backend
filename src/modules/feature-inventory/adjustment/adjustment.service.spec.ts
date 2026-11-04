@@ -1,6 +1,7 @@
 import { AdjustmentType, BatchStatus, ReceiptStatus, RecordStatus } from '@prisma/client';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
+import { ErrorException } from 'src/common/exceptions/error.exception';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ADJUSTMENT_MOVEMENT_TYPE, AdjustmentService } from './adjustment.service';
 
@@ -48,7 +49,12 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
   const audit = { record: jest.fn() };
   const intake = { intake: jest.fn().mockResolvedValue({}), returnToBatches: jest.fn().mockResolvedValue([]) };
   // Phiếu không phải trả NCC thì không đụng tiền: assertNoMoney chỉ kiểm DTO, mock để no-op.
-  const returnMoney = { assertNoMoney: jest.fn(), lockSupplierOf: jest.fn(), recheckOnConfirm: jest.fn() };
+  const returnMoney = {
+    assertNoMoney: jest.fn(),
+    lockSupplierOf: jest.fn(),
+    recheckOnConfirm: jest.fn(),
+    assertDebtStaysNonNegative: jest.fn(),
+  };
   const service = new AdjustmentService(
     repository as never,
     transactions as never,
@@ -58,7 +64,7 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     intake as never,
     returnMoney as never,
   );
-  return { service, repository, ledger, audit, intake };
+  return { service, repository, ledger, audit, intake, returnMoney };
 }
 
 type RecordCall = [unknown, Record<string, unknown>, Record<string, unknown>[]];
@@ -351,6 +357,31 @@ describe('AdjustmentService — nhật ký theo loại phiếu', () => {
         branchIds: [A],
       }),
     ]);
+  });
+
+  it('confirm trả NCC làm nợ âm → 1002, không đổi tồn (ledger.apply không chạy), kiểm nợ sau khi khoá NCC', async () => {
+    const { service, ledger, returnMoney } = makeService({
+      findHead: jest.fn().mockResolvedValue(
+        head(AdjustmentType.RETURN_TO_SUPPLIER, ReceiptStatus.DRAFT, {
+          totalAmount: 45_000n,
+          supplierId: 's1',
+          supplierPaid: 0n,
+        }),
+      ),
+      findItems: jest.fn().mockResolvedValue(disposeItems),
+    });
+    returnMoney.assertDebtStaysNonNegative.mockRejectedValue(
+      new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message: 'Trả vượt công nợ hiện có với NCC' }),
+    );
+    await expect(service.confirm('adj1', PM_A)).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+    expect(ledger.apply).not.toHaveBeenCalled();
+    expect(returnMoney.lockSupplierOf.mock.invocationCallOrder[0]).toBeLessThan(
+      returnMoney.assertDebtStaysNonNegative.mock.invocationCallOrder[0],
+    );
+    expect(returnMoney.assertDebtStaysNonNegative).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ supplierId: 's1', branchId: A, totalAmount: 45_000n, supplierPaid: 0n }),
+    );
   });
 
   it('confirm kiểm kê có chênh lệch → STOCK_ADJUSTMENT.CONFIRMED severity 1; khớp sổ → không nâng', async () => {

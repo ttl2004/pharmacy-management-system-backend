@@ -228,7 +228,10 @@ export class AdjustmentService {
       if (isStockTake) await this.assertNoPendingStockTake(tx, batchIds);
       const money = isReturn
         ? await this.returnMoney.build(tx, {
-            dto, branchId, supplierId: dto.supplierId as string, lines: this.returnLines(dto.items, draftLines, batchById),
+            dto,
+            branchId,
+            supplierId: dto.supplierId as string,
+            lines: this.returnLines(dto.items, draftLines, batchById),
           })
         : null;
 
@@ -284,7 +287,10 @@ export class AdjustmentService {
       const head = await this.adjustments.findHead(tx, id, branchWhere(resolveBranchScope(actor.user)));
       if (!head) throw errors.notFound();
       if (head.status !== ReceiptStatus.DRAFT) throw errors.wrongState(head.status);
-      const claimed = await this.adjustments.transition(tx, id, ReceiptStatus.DRAFT, { updatedAt: new Date(), updatedBy: actorId });
+      const claimed = await this.adjustments.transition(tx, id, ReceiptStatus.DRAFT, {
+        updatedAt: new Date(),
+        updatedBy: actorId,
+      });
       if (!claimed) throw errors.wrongState();
 
       const isReturn = head.type === AdjustmentType.RETURN_TO_SUPPLIER;
@@ -322,12 +328,18 @@ export class AdjustmentService {
       if (isStockTake) {
         const pending = await this.adjustments.findPendingStockTake(tx, batchIds, id);
         if (pending) {
-          throw inventoryError(ErrorCode.STOCK_TAKE_PENDING, `lô ${pending.batchNumber} đang nằm trong phiếu ${pending.code}`);
+          throw inventoryError(
+            ErrorCode.STOCK_TAKE_PENDING,
+            `lô ${pending.batchNumber} đang nằm trong phiếu ${pending.code}`,
+          );
         }
       }
       const money = isReturn
         ? await this.returnMoney.build(tx, {
-            dto, branchId: head.branchId, supplierId: dto.supplierId as string, excludeId: id,
+            dto,
+            branchId: head.branchId,
+            supplierId: dto.supplierId as string,
+            excludeId: id,
             lines: this.returnLines(dto.items, draftLines, batchById),
           })
         : null;
@@ -347,7 +359,11 @@ export class AdjustmentService {
         internalUseTypeId: dto.internalUseTypeId ?? null,
         ...(money?.header ?? NO_RETURN_MONEY),
       });
-      await this.adjustments.replaceItems(tx, id, items.map((item) => ({ ...item, ...lineMoneyOf(money, item.batchId) })));
+      await this.adjustments.replaceItems(
+        tx,
+        id,
+        items.map((item) => ({ ...item, ...lineMoneyOf(money, item.batchId) })),
+      );
       const codeChanged = !!code && code !== head.code;
       await this.audit.record(tx, auditActorOf(actor), [
         {
@@ -393,6 +409,8 @@ export class AdjustmentService {
       const items = await this.adjustments.findItems(tx, id);
       if (head.type === AdjustmentType.RETURN_TO_SUPPLIER) {
         await this.returnMoney.lockSupplierOf(tx, id);
+        // Dưới khoá NCC: nợ tại chi nhánh sau phiếu này không âm (hai phiếu cùng NCC không cùng lọt).
+        await this.returnMoney.assertDebtStaysNonNegative(tx, head);
         // Trả theo phiếu nhập: kiểm lại trần SL / chi phí hoàn (phiếu trả khác có thể đã xác nhận sau lúc lưu nháp).
         if (head.goodsReceiptId) {
           await this.returnMoney.recheckOnConfirm(tx, id, head.goodsReceiptId, items, head.refundExpenses);
@@ -543,8 +561,12 @@ export class AdjustmentService {
     const actorId = actor.user.userId;
     const now = new Date();
     const claimed = await this.adjustments.transition(tx, head.id, ReceiptStatus.CONFIRMED, {
-      status: ReceiptStatus.CANCELLED, cancelledAt: now, cancelledBy: actorId, cancelReason: reason,
-      updatedAt: now, updatedBy: actorId,
+      status: ReceiptStatus.CANCELLED,
+      cancelledAt: now,
+      cancelledBy: actorId,
+      cancelReason: reason,
+      updatedAt: now,
+      updatedBy: actorId,
     });
     if (!claimed) throw errors.wrongState();
     // Huỷ phiếu trả NCC làm công nợ tăng lại → khoá NCC như lúc xác nhận.
@@ -556,15 +578,30 @@ export class AdjustmentService {
     const outflows = items.filter((item) => item.quantity < 0);
     const inflows = items.filter((item) => item.quantity > 0);
     await this.intake.returnToBatches(ctx, {
-      type, refType: StockRefType.STOCK_ADJUSTMENT, refId: head.id, actorId, note,
-      lines: outflows.map((item) => ({ batchId: item.batchId, quantity: -item.quantity, unitCost: item.unitCost, refItemId: item.id })),
+      type,
+      refType: StockRefType.STOCK_ADJUSTMENT,
+      refId: head.id,
+      actorId,
+      note,
+      lines: outflows.map((item) => ({
+        batchId: item.batchId,
+        quantity: -item.quantity,
+        unitCost: item.unitCost,
+        refItemId: item.id,
+      })),
     });
     if (inflows.length) {
       await this.ledger.apply(
         ctx,
         inflows.map((item) => ({
-          batchId: item.batchId, type, quantity: -item.quantity, unitCost: item.unitCost,
-          refType: StockRefType.STOCK_ADJUSTMENT, refId: head.id, refItemId: item.id, note,
+          batchId: item.batchId,
+          type,
+          quantity: -item.quantity,
+          unitCost: item.unitCost,
+          refType: StockRefType.STOCK_ADJUSTMENT,
+          refId: head.id,
+          refItemId: item.id,
+          note,
         })),
         actorId,
       );
@@ -585,7 +622,10 @@ export class AdjustmentService {
     dto: { handlerId?: string; receiverId?: string; internalUseTypeId?: string },
     branchId: string,
   ): Promise<void> {
-    for (const [userId, label] of [[dto.handlerId, 'người xuất/trả'], [dto.receiverId, 'người nhận']] as const) {
+    for (const [userId, label] of [
+      [dto.handlerId, 'người xuất/trả'],
+      [dto.receiverId, 'người nhận'],
+    ] as const) {
       if (userId && !(await this.adjustments.isValidStaff(tx, userId, branchId))) {
         throw invalidReference(`${label} không thuộc chi nhánh hoặc đã ngừng hoạt động`);
       }

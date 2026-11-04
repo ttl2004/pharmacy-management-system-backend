@@ -44,4 +44,18 @@ describe('validateEnv', () => {
     const env = validateEnv({ ...base, SUPER_ADMIN_FULL_NAME: '' });
     expect(env.SUPER_ADMIN_FULL_NAME).toBe('Super Admin');
   });
+
+  describe('TRUST_PROXY', () => {
+    it('mặc định 0', () => {
+      expect(validateEnv(base).TRUST_PROXY).toBe(0);
+    });
+
+    it("nhận '1' thành số 1", () => {
+      expect(validateEnv({ ...base, TRUST_PROXY: '1' }).TRUST_PROXY).toBe(1);
+    });
+
+    it("'9' bị từ chối (tối đa 5)", () => {
+      expect(() => validateEnv({ ...base, TRUST_PROXY: '9' })).toThrow(/TRUST_PROXY/);
+    });
+  });
 });

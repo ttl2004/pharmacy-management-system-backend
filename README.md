@@ -90,6 +90,7 @@ src/
 |---|---|---|
 | `PORT` | Port HTTP server | `3790` |
 | `CORS_ORIGINS` | Origin frontend được gọi API kèm cookie, ngăn cách bằng dấu phẩy (vd. `http://localhost:5790`). Để trống: chặn mọi lời gọi chéo origin | (trống) |
+| `TRUST_PROXY` | Số proxy tin cậy phía trước app (0–5), dùng để xác định IP client từ `X-Forwarded-For` | `0` |
 | `DATABASE_URL` | Chuỗi kết nối PostgreSQL, dạng `postgresql://user:password@host:5432/dbname?connection_limit=10&pool_timeout=20`. Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`). Luôn đặt `connection_limit` — DB chỉ có 60 kết nối dùng chung | (bắt buộc) |
 | `DB_LOGGING` | In câu SQL ra log | `false` |
 | `JWT_ACCESS_SECRET` | Secret ký access JWT, tối thiểu 32 ký tự | (bắt buộc) |
@@ -108,6 +109,12 @@ src/
 | `SUPER_ADMIN_GENDER` | `MALE`, `FEMALE` hoặc `OTHER` | — |
 
 > ENV authentication được validate khi khởi động. Xem [hướng dẫn authentication](docs/AUTHENTICATION.md) để chuyển cấu hình cũ, test Swagger, tích hợp frontend và chuẩn bị Redis.
+
+### TRUST_PROXY
+
+- `0`: app không đứng sau proxy, `request.ip` là địa chỉ socket và bỏ qua `X-Forwarded-For`.
+- `N` (1–5): app đứng sau đúng N proxy tin cậy (nginx, load balancer...); IP client lấy từ `X-Forwarded-For` đã đi qua N proxy đó.
+- Đặt sai giá trị thì IP ghi vào nhật ký sai hoặc bị giả mạo qua header, và có thể khoá nhầm người dùng khác theo IP.
 
 > **Không commit file `.env`** — đã được liệt kê trong `.gitignore`.
 

@@ -8,6 +8,8 @@ const A = '11111111-1111-4111-8111-111111111111';
 const PM_A: RequestActor = {
   user: { userId: 'pm-a', sid: 's', email: null, role: AuthRole.PHARMACY_MANAGER, branchId: A, roleLevel: 60 },
   ip: null,
+  userAgent: null,
+  requestId: null,
 };
 
 function makeService(overrides: Record<string, jest.Mock> = {}) {

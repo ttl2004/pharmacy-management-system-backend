@@ -18,6 +18,14 @@ const duration = z
 const boolStr = (defaultValue: 'true' | 'false') =>
   z.enum(['true', 'false'], { error: 'Chỉ nhận giá trị true hoặc false' }).default(defaultValue);
 
+// Số proxy tin cậy phía trước app (0 = không có proxy). Dùng chung cho schema env và main.ts (adapter dựng trước ConfigService).
+export const trustProxySchema = z.coerce
+  .number({ error: 'TRUST_PROXY phải là số' })
+  .int('TRUST_PROXY phải là số nguyên')
+  .min(0, 'TRUST_PROXY không được âm')
+  .max(5, 'TRUST_PROXY tối đa là 5')
+  .default(0);
+
 export const envSchema = z
   .object({
     //- Ứng dụng
@@ -45,6 +53,8 @@ export const envSchema = z
             ),
         ),
       ),
+
+    TRUST_PROXY: trustProxySchema,
 
     //- Cơ sở dữ liệu
     DB_LOGGING: boolStr('false'),

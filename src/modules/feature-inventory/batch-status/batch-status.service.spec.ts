@@ -10,6 +10,8 @@ const A = '11111111-1111-4111-8111-111111111111';
 const actor = (role: AuthRole, branchId: string | null): RequestActor => ({
   user: { userId: `${role}-id`, sid: 's', email: null, role, branchId, roleLevel: 60 },
   ip: '1.1.1.1',
+  userAgent: null,
+  requestId: null,
 });
 const PM_A = actor(AuthRole.PHARMACY_MANAGER, A);
 const ADMIN = actor(AuthRole.ADMIN, null);

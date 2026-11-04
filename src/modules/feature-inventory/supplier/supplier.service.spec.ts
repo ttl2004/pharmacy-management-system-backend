@@ -7,6 +7,8 @@ import { SupplierService } from './supplier.service';
 const ADMIN: RequestActor = {
   user: { userId: 'admin-1', sid: 's', email: null, role: AuthRole.ADMIN, branchId: null, roleLevel: 80 },
   ip: '10.0.0.1',
+  userAgent: null,
+  requestId: null,
 };
 
 const EXISTING = {

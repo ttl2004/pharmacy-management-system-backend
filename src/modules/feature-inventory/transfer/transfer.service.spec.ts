@@ -11,6 +11,8 @@ const B = '22222222-2222-4222-8222-222222222222';
 const actor = (role: AuthRole, branchId: string | null = null): RequestActor => ({
   user: { userId: `${role}-${branchId ?? 'all'}`, sid: 's', email: null, role, branchId, roleLevel: 60 },
   ip: null,
+  userAgent: null,
+  requestId: null,
 });
 const PM_A = actor(AuthRole.PHARMACY_MANAGER, A);
 const PM_B = actor(AuthRole.PHARMACY_MANAGER, B);

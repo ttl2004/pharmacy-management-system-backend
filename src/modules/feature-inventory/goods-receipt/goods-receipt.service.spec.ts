@@ -14,6 +14,8 @@ function actor(role: AuthRole, branchId: string | null = null): RequestActor {
   return {
     user: { userId: `${role}-id`, sid: 's', email: null, role, branchId, roleLevel: 60 },
     ip: '127.0.0.1',
+    userAgent: null,
+    requestId: null,
   };
 }
 const PM_A = actor(AuthRole.PHARMACY_MANAGER, BRANCH_A);

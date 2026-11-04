@@ -115,8 +115,12 @@ export class PriceBookController {
   @RequirePermissions('price-book:update')
   @Put(':id/items')
   @ApiOperation({ description: 'Sửa giá một ô: price là số -> thêm/cập nhật, null -> bỏ hàng khỏi bảng.' })
-  setItem(@Param('id', new ParseUUIDPipe()) id: string, @Body() dto: SetBookItemRequest, @CurrentUser() user: JwtUser) {
-    return this.itemsService.setItem(id, dto, user);
+  setItem(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: SetBookItemRequest,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.itemsService.setItem(id, dto, actor);
   }
 
   @RequirePermissions('price-book:update')
@@ -127,9 +131,9 @@ export class PriceBookController {
   applyFormula(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: PriceRowsFilterRequest,
-    @CurrentUser() user: JwtUser,
+    @CurrentActor() actor: RequestActor,
   ) {
-    return this.itemsService.applyFormulaToFilter(id, dto, user);
+    return this.itemsService.applyFormulaToFilter(id, dto, actor);
   }
 
   @RequirePermissions('price-book:update')

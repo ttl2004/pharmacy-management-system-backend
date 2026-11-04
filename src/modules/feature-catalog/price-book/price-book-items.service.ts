@@ -1,10 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
 import { resolveBranchScope, scopedBranchFilter } from '../../feature-auth/permission/branch-scope';
 import { PriceRowsFilterRequest, SetBookItemRequest } from './dtos/price-book-rows.request';
+import { PRICE_BOOK_AUDIT_ENTITY } from './price-book-audit';
 import { computeFormulaPrice, FormulaTerms } from './price-book-formula';
 import { toRowsFilter } from './price-book-rows-filter';
 import { assertCanEditBook } from './price-book-scope';
@@ -17,25 +21,52 @@ export interface BasePriceRow {
   basePrice: number | null;
 }
 
+/** Phạm vi = chi nhánh áp dụng của bảng (`[]` = toàn chuỗi); nhãn = tên bảng. */
+function bookAuditBase(book: PriceBookRow) {
+  return {
+    entityType: PRICE_BOOK_AUDIT_ENTITY,
+    entityId: book.id,
+    entityLabel: book.name,
+    branchIds: book.branches.map((b) => b.branchId),
+  };
+}
+
 /** Sửa giá từng ô của một bảng và áp công thức. */
 @Injectable()
 export class PriceBookItemsService {
   constructor(
     private readonly rowsRepository: PriceBookRowsRepository,
     private readonly bookRepository: PriceBookRepository,
+    private readonly audit: AuditLogService,
   ) {}
 
   /** Số → thêm/cập nhật giá; `null` → bỏ hàng khỏi bảng. */
-  async setItem(bookId: string, dto: SetBookItemRequest, user: JwtUser): Promise<{ ok: true }> {
-    const book = await this.getEditableBook(bookId, user);
+  async setItem(bookId: string, dto: SetBookItemRequest, actor: RequestActor): Promise<{ ok: true }> {
+    const book = await this.getEditableBook(bookId, actor.user);
     const unit = await this.rowsRepository.findProductUnit(dto.drugId, dto.unitId);
     if (!unit) throw new ErrorException({ code: ErrorCode.INVALID_REFERENCE, message: 'Đơn vị không thuộc hàng này' });
-    await this.rowsRepository.setItem(book.id, unit.id, dto.price);
+    await this.bookRepository.transaction(async (tx) => {
+      await this.rowsRepository.setItem(book.id, unit.id, dto.price, tx);
+      await this.audit.record(tx, auditActorOf(actor), [
+        {
+          event: 'PRICE_BOOK.ITEMS_SET',
+          ...bookAuditBase(book),
+          // Tiền đi bằng bigint, JSON lưu chuỗi. `null` = bỏ hàng khỏi bảng.
+          metadata: { productUnitId: unit.id, price: dto.price === null ? null : BigInt(dto.price).toString() },
+          ...(dto.price === null ? {} : { amount: BigInt(dto.price) }),
+        },
+      ]);
+    });
     return { ok: true };
   }
 
   /** Áp công thức của bảng cho MỌI dòng khớp bộ lọc (không phân trang); giá gốc theo `branchId` gửi kèm. */
-  async applyFormulaToFilter(bookId: string, dto: PriceRowsFilterRequest, user: JwtUser): Promise<{ count: number }> {
+  async applyFormulaToFilter(
+    bookId: string,
+    dto: PriceRowsFilterRequest,
+    actor: RequestActor,
+  ): Promise<{ count: number }> {
+    const user = actor.user;
     const book = await this.getEditableBook(bookId, user);
     if (!book.formulaBase) {
       throw new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message: 'Bảng giá chưa có công thức' });
@@ -43,19 +74,49 @@ export class PriceBookItemsService {
     const branchId = scopedBranchFilter(resolveBranchScope(user), dto.branchId);
     const rows = await this.rowsRepository.findAll(toRowsFilter(dto, branchId));
     const bases = await this.toBasePrices(book.formulaBase, rows);
-    return { count: await this.applyFormula(book.id, bases) };
+    // MỘT entry cho cả lần áp (có thể hàng trăm dòng), cùng transaction với việc ghi giá.
+    const count = await this.bookRepository.transaction(async (tx) => {
+      const written = await this.applyFormula(book.id, bases, tx);
+      if (written > 0) {
+        await this.audit.record(tx, auditActorOf(actor), [
+          {
+            event: 'PRICE_BOOK.FORMULA_APPLIED',
+            ...bookAuditBase(book),
+            metadata: {
+              count: written,
+              formula: {
+                base: book.formulaBase,
+                op: book.formulaOp,
+                amount: book.formulaAmount === null ? null : String(book.formulaAmount),
+                unit: book.formulaUnit,
+              },
+            },
+          },
+        ]);
+      }
+      return written;
+    });
+    return { count };
   }
 
   /**
    * Tính lại giá các dòng ĐANG CÓ trong bảng theo công thức hiện tại (PUT với `reapplyFormula`). Chạy trong
    * transaction của lần sửa nên công thức mới đã nằm trong `tx`.
    */
-  async reapplyExisting(tx: Prisma.TransactionClient, book: PriceBookRow, branchId: string | undefined): Promise<number> {
+  async reapplyExisting(
+    tx: Prisma.TransactionClient,
+    book: PriceBookRow,
+    branchId: string | undefined,
+  ): Promise<number> {
     if (!book.formulaBase) return 0;
     const unitIds = await this.rowsRepository.findItemUnitIds(tx, book.id);
     if (!unitIds.length) return 0;
     const rows = await this.rowsRepository.findAll({
-      codes: [], categoryIds: [], stock: 'all', branchId, productUnitIds: unitIds,
+      codes: [],
+      categoryIds: [],
+      stock: 'all',
+      branchId,
+      productUnitIds: unitIds,
     });
     return this.applyFormula(book.id, await this.toBasePrices(book.formulaBase, rows), tx);
   }
@@ -83,20 +144,30 @@ export class PriceBookItemsService {
       return rows.map((r) => ({ productUnitId: r.productUnitId, basePrice: r[base] }));
     }
     if (base === 'general') return rows.map((r) => ({ productUnitId: r.productUnitId, basePrice: r.generalPrice }));
-    const prices = await this.rowsRepository.findBookPrices([base], rows.map((r) => r.productUnitId));
+    const prices = await this.rowsRepository.findBookPrices(
+      [base],
+      rows.map((r) => r.productUnitId),
+    );
     const priceOf = new Map(prices.map((p) => [p.productUnitId, p.price]));
     return rows.map((r) => ({ productUnitId: r.productUnitId, basePrice: priceOf.get(r.productUnitId) ?? null }));
   }
 
   private termsOf(book: PriceBookRow): FormulaTerms | null {
     if (!book.formulaBase || !book.formulaOp || book.formulaAmount === null || !book.formulaUnit) return null;
-    return { op: book.formulaOp as '+' | '-', amount: Number(book.formulaAmount), unit: book.formulaUnit as 'vnd' | '%' };
+    return {
+      op: book.formulaOp as '+' | '-',
+      amount: Number(book.formulaAmount),
+      unit: book.formulaUnit as 'vnd' | '%',
+    };
   }
 
   private async getEditableBook(bookId: string, user: JwtUser): Promise<PriceBookRow> {
     const book = await this.bookRepository.findById(bookId);
     if (!book) throw new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Bảng giá không tồn tại' });
-    assertCanEditBook(resolveBranchScope(user), book.branches.map((b) => b.branchId));
+    assertCanEditBook(
+      resolveBranchScope(user),
+      book.branches.map((b) => b.branchId),
+    );
     return book;
   }
 }

@@ -14,7 +14,9 @@ const PM_A: RequestActor = {
 function makeService(auditEntries: unknown[]) {
   const tx = {
     branch: { findFirst: jest.fn().mockResolvedValue({ id: A, status: RecordStatus.ACTIVE }) },
-    product: { findFirst: jest.fn().mockResolvedValue({ id: 'p1', trackBatches: false }) },
+    product: {
+      findFirst: jest.fn().mockResolvedValue({ id: 'p1', code: 'SP001', name: 'Panadol', trackBatches: false }),
+    },
     stockBatch: { count: jest.fn().mockResolvedValue(0) },
   };
   const transactions = { run: jest.fn((work: (ctx: unknown) => unknown) => work({ tx })) };
@@ -29,19 +31,33 @@ function makeService(auditEntries: unknown[]) {
 describe('StockOpeningService — nhật ký', () => {
   const dto = { branchId: A, productId: 'p1', quantity: 10, unitCost: 1000 };
 
-  it('lô tồn đầu thừa hưởng thu hồi → record entry intake trả về (một lần, actor của request)', async () => {
+  it('lô tồn đầu thừa hưởng thu hồi → MỘT lần record gồm entry intake trả về và STOCK.OPENING', async () => {
     const recalled = { event: 'BATCH.RECALLED', entityId: 'b1', branchIds: [A], reason: 'QĐ' };
     const { service, audit } = makeService([recalled]);
     await service.create(dto, PM_A);
     expect(audit.record).toHaveBeenCalledTimes(1);
-    expect(audit.record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ userId: 'pm-a' }), [
-      recalled,
-    ]);
+    const entries = (audit.record.mock.calls[0] as [unknown, unknown, Record<string, unknown>[]])[2];
+    expect(entries[0]).toEqual(recalled);
+    expect(entries.map((e) => e.event)).toEqual(['BATCH.RECALLED', 'STOCK.OPENING']);
+    expect((audit.record.mock.calls as unknown[][])[0][1]).toMatchObject({ userId: 'pm-a' });
   });
 
-  it('không có entry → không gọi record', async () => {
+  it('opening ghi STOCK.OPENING amount đúng (quantity × unitCost, bigint), branchIds [chi nhánh]', async () => {
     const { service, audit } = makeService([]);
-    await service.create(dto, PM_A);
-    expect(audit.record).not.toHaveBeenCalled();
+    await service.create({ ...dto, quantity: 10, unitCost: 1500 }, PM_A);
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const entries = (audit.record.mock.calls[0] as [unknown, unknown, Record<string, unknown>[]])[2];
+    expect(entries).toEqual([
+      {
+        event: 'STOCK.OPENING',
+        entityType: 'products',
+        entityId: 'p1',
+        entityLabel: 'SP001',
+        branchIds: [A],
+        searchTerms: ['SP001', 'Panadol'],
+        amount: 15000n,
+        metadata: { batchId: 'b1', quantity: 10, unitCost: '1500' },
+      },
+    ]);
   });
 });

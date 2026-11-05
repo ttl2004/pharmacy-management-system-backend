@@ -5,6 +5,7 @@ import { InMemoryReportCache, REPORT_CACHE } from './report-cache';
 import { SalesReportController } from './sales-report.controller';
 import { SalesReportRepository } from './sales-report.repository';
 import { SalesReportService } from './sales-report.service';
+import { SalesRollupReconcileJob } from './sales-rollup.reconcile';
 import { SalesRollupRepository } from './sales-rollup.repository';
 
 /**
@@ -16,6 +17,7 @@ import { SalesRollupRepository } from './sales-rollup.repository';
   controllers: [SalesReportController],
   providers: [
     SalesRollupRepository,
+    SalesRollupReconcileJob,
     SalesReportRepository,
     SalesReportService,
     { provide: REPORT_CACHE, useFactory: () => new InMemoryReportCache() },

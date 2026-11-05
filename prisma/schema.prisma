@@ -82,6 +82,8 @@ model Branch {
   priceBookBranches       PriceBookBranch[]
   supplierPayments        SupplierPayment[]
   supplierDebtAdjustments SupplierDebtAdjustment[]
+  salesDaily              SalesDaily[]
+  salesDailyProducts      SalesDailyProduct[]
 
   @@map("branches")
 }
@@ -375,6 +377,7 @@ model Product {
   stockAdjustmentItems StockAdjustmentItem[]
   branchProducts       BranchProduct[]
   orderItems           OrderItem[]
+  salesDailyProducts   SalesDailyProduct[]
 
   @@index([categoryId])
   @@index([manufacturerId])
@@ -1385,4 +1388,36 @@ model Payment {
   @@unique([method, transactionCode])
   @@index([orderId])
   @@map("payments")
+}
+
+/// Tổng hợp doanh thu theo (chi nhánh, ngày VN, kênh). Cập nhật trong transaction thu tiền / huỷ hoá đơn; đối soát hằng đêm.
+model SalesDaily {
+  branchId   String       @db.Uuid
+  date       DateTime     @db.Date
+  channel    OrderChannel
+  orderCount Int          @default(0)
+  revenue    BigInt       @default(0)
+  updatedAt  DateTime     @default(now()) @updatedAt @db.Timestamptz(3)
+  branch     Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@id([branchId, date, channel])
+  @@index([date])
+  @@map("sales_daily")
+}
+
+/// Tổng hợp theo sản phẩm. `cogsAmount` = giá vốn (Σ quantity × unitCost của lô xuất) — lưu sẵn cho lãi gộp, CHƯA trả qua API.
+model SalesDailyProduct {
+  branchId   String       @db.Uuid
+  date       DateTime     @db.Date
+  channel    OrderChannel
+  productId  String       @db.Uuid
+  qtyBase    Int          @default(0)
+  revenue    BigInt       @default(0)
+  cogsAmount BigInt       @default(0)
+  branch     Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  product    Product      @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@id([branchId, date, channel, productId])
+  @@index([date, branchId])
+  @@map("sales_daily_product")
 }

@@ -14,7 +14,7 @@ const admin = actorOf(AuthRole.ADMIN, null);
 
 describe('SalesReportService', () => {
   let now = 5_000_000;
-  const repo = { daily: jest.fn(), byBranch: jest.fn(), topProducts: jest.fn() };
+  const repo = { daily: jest.fn(), byBranch: jest.fn(), topProducts: jest.fn(), topProductsChain: jest.fn() };
   let service: SalesReportService;
 
   beforeEach(() => {
@@ -23,6 +23,7 @@ describe('SalesReportService', () => {
     repo.daily.mockResolvedValue([]);
     repo.byBranch.mockResolvedValue([]);
     repo.topProducts.mockResolvedValue([]);
+    repo.topProductsChain.mockResolvedValue([]);
     service = new SalesReportService(repo as unknown as SalesReportRepository, new InMemoryReportCache(() => now));
   });
 
@@ -78,11 +79,21 @@ describe('SalesReportService', () => {
 
   it('byBranch và topDrugs đổi bigint sang number, ánh xạ tên trường theo contract; topDrugs tối đa 10', async () => {
     repo.byBranch.mockResolvedValue([{ branchId: BRANCH_1, branchName: 'CN1', orderCount: 2, revenue: 70000n }]);
-    repo.topProducts.mockResolvedValue([{ productId: 'p1', productName: 'Thuốc', qtyBase: 5, revenue: 50000n }]);
+    repo.topProductsChain.mockResolvedValue([{ productId: 'p1', productName: 'Thuốc', qtyBase: 5, revenue: 50000n }]);
     const report = await service.salesReport({ from: '2026-11-01', to: '2026-11-01' }, admin);
-    expect(repo.topProducts).toHaveBeenCalledWith(expect.anything(), 10);
+    expect(repo.topProductsChain).toHaveBeenCalledWith(expect.anything(), 10);
     expect(report.byBranch).toEqual([{ branchId: BRANCH_1, branchName: 'CN1', revenue: 70000, orderCount: 2 }]);
     expect(report.topDrugs).toEqual([{ drugId: 'p1', drugName: 'Thuốc', qtyInBase: 5, revenue: 50000 }]);
+  });
+
+  it('topDrugs: ADMIN không lọc chi nhánh → bảng chuỗi; PM hoặc có branchIds → bảng theo chi nhánh', async () => {
+    await service.salesReport({ from: '2026-11-01', to: '2026-11-01' }, admin);
+    expect(repo.topProductsChain).toHaveBeenCalledTimes(1);
+    expect(repo.topProducts).not.toHaveBeenCalled();
+    await service.salesReport({ from: '2026-11-02', to: '2026-11-02', branchIds: [BRANCH_2] }, admin);
+    await service.salesReport({ from: '2026-11-03', to: '2026-11-03' }, pm);
+    expect(repo.topProductsChain).toHaveBeenCalledTimes(1);
+    expect(repo.topProducts).toHaveBeenCalledTimes(2);
   });
 
   it('cache: cùng tham số + cùng phạm vi gọi lần 2 không chạm DB; khác phạm vi → không dùng chung', async () => {

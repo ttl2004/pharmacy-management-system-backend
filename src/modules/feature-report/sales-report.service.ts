@@ -46,7 +46,10 @@ export class SalesReportService {
     const [daily, byBranch, top] = await Promise.all([
       this.repo.daily(filter),
       this.repo.byBranch(filter),
-      this.repo.topProducts(filter, SALES_REPORT_TOP_LIMIT),
+      // Chỉ ADMIN không lọc chi nhánh mới đọc bảng chuỗi; PM và truy vấn có lọc giữ bảng theo chi nhánh.
+      branchIds
+        ? this.repo.topProducts(filter, SALES_REPORT_TOP_LIMIT)
+        : this.repo.topProductsChain(filter, SALES_REPORT_TOP_LIMIT),
     ]);
 
     const byDate = new Map(daily.map((row) => [row.date, row]));
@@ -71,7 +74,7 @@ export class SalesReportService {
         revenue: Number(row.revenue),
         orderCount: row.orderCount,
       })),
-      topDrugs: top.slice(0, SALES_REPORT_TOP_LIMIT).map((row) => ({
+      topDrugs: top.map((row) => ({
         drugId: row.productId,
         drugName: row.productName,
         qtyInBase: row.qtyBase,

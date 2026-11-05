@@ -65,6 +65,23 @@ export class SalesReportRepository {
       ORDER BY "revenue" DESC, b."name", b."id"`);
   }
 
+  /** Toàn chuỗi (không lọc chi nhánh): đọc bảng gộp mọi chi nhánh, nhỏ hơn ~10 lần. */
+  topProductsChain(filter: Pick<SalesReportFilter, 'from' | 'to'>, limit: number): Promise<ProductRow[]> {
+    return this.prisma.$queryRaw<ProductRow[]>(Prisma.sql`
+      SELECT p."id" AS "productId", p."name" AS "productName", t."qtyBase"::int AS "qtyBase", t."revenue"::bigint AS "revenue"
+      FROM (
+        SELECT s."productId", SUM(s."qtyBase") AS "qtyBase", SUM(s."revenue") AS "revenue"
+        FROM sales_daily_product_chain s
+        WHERE s."date" BETWEEN ${filter.from}::date AND ${filter.to}::date
+        GROUP BY s."productId"
+        HAVING SUM(s."qtyBase") > 0
+        ORDER BY SUM(s."revenue") DESC, SUM(s."qtyBase") DESC, s."productId"
+        LIMIT ${limit}
+      ) t
+      JOIN products p ON p."id" = t."productId"
+      ORDER BY t."revenue" DESC, t."qtyBase" DESC, p."id"`);
+  }
+
   topProducts(filter: SalesReportFilter, limit: number): Promise<ProductRow[]> {
     return this.prisma.$queryRaw<ProductRow[]>(Prisma.sql`
       SELECT p."id" AS "productId", p."name" AS "productName", t."qtyBase"::int AS "qtyBase", t."revenue"::bigint AS "revenue"

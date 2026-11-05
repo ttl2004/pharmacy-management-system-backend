@@ -7,7 +7,7 @@ import { OrderVoidAndPreviewService } from 'src/modules/feature-sales/order/orde
 import { OrderService } from 'src/modules/feature-sales/order/order.service';
 import { OrderRepository } from 'src/modules/feature-sales/order/repositories/order.repository';
 import { createTestPrisma, resetSchema } from 'src/test-support/db-test';
-import { ReportBase, seedPaidOrder, seedReportBase } from './report-db-seed';
+import { ReportBase, seedPaidOrder, seedReportBase } from 'src/test-support/report-db-seed';
 import { SalesRollupRepository } from './sales-rollup.repository';
 
 /** Mốc theo giờ Việt Nam (UTC+7) cho dễ đọc. */
@@ -40,6 +40,17 @@ describe('bảng tổng hợp doanh thu (db)', () => {
       { branchId: string; date: string; productId: string; qtyBase: number; revenue: bigint; cogsAmount: bigint }[]
     >`SELECT "branchId", to_char("date", 'YYYY-MM-DD') AS "date", "productId", "qtyBase", "revenue", "cogsAmount"
       FROM sales_daily_product ORDER BY "branchId", "date", "productId"`;
+
+  const chain = () =>
+    prisma.$queryRaw<{ date: string; productId: string; qtyBase: number; revenue: bigint; cogsAmount: bigint }[]>`
+      SELECT to_char("date", 'YYYY-MM-DD') AS "date", "productId", "qtyBase", "revenue", "cogsAmount"
+      FROM sales_daily_product_chain ORDER BY "date", "productId"`;
+  /** Bảng chuỗi phải bằng Σ các chi nhánh của bảng sản phẩm. */
+  const chainFromBranches = () =>
+    prisma.$queryRaw<{ date: string; productId: string; qtyBase: number; revenue: bigint; cogsAmount: bigint }[]>`
+      SELECT to_char("date", 'YYYY-MM-DD') AS "date", "productId", SUM("qtyBase")::int AS "qtyBase",
+             SUM("revenue")::bigint AS "revenue", SUM("cogsAmount")::bigint AS "cogsAmount"
+      FROM sales_daily_product GROUP BY "date", "productId" ORDER BY "date", "productId"`;
 
   it('applyOrder(+1) hai đơn cùng CN cùng ngày VN → 1 dòng sales_daily orderCount 2, revenue = tổng', async () => {
     const a = await seedPaidOrder(prisma, base, {
@@ -232,12 +243,93 @@ describe('bảng tổng hợp doanh thu (db)', () => {
 
     const dailyBefore = await daily();
     const productsBefore = await products();
+    const chainBefore = await chain();
     expect(dailyBefore.length).toBeGreaterThan(0);
+    expect(chainBefore.length).toBeGreaterThan(0);
+    expect(chainBefore).toEqual(await chainFromBranches());
 
     const result = await prisma.$transaction((tx) => repo.rebuild(tx, '2026-10-30', '2026-11-03'));
     expect(result.days).toBe(5);
     expect(await daily()).toEqual(dailyBefore);
     expect(await products()).toEqual(productsBefore);
+    expect(await chain()).toEqual(chainBefore);
+    expect(await chain()).toEqual(await chainFromBranches());
+  });
+
+  it('bảng chuỗi gộp đúng nhiều chi nhánh cùng sản phẩm, và trừ đúng khi huỷ', async () => {
+    const a = await seedPaidOrder(prisma, base, {
+      branch: 0,
+      completedAt: vn('2026-11-01T09:00:00'),
+      lines: [{ product: 0, qty: 2, unitPrice: 10000, unitCost: 4000 }],
+    });
+    const b = await seedPaidOrder(prisma, base, {
+      branch: 1,
+      completedAt: vn('2026-11-01T10:00:00'),
+      lines: [{ product: 0, qty: 3, unitPrice: 10000, unitCost: 4500 }],
+      voidedRefund: 30000n,
+    });
+    await apply(a.id, 1, a.total);
+    await apply(b.id, 1, b.total);
+    expect(await chain()).toEqual([
+      { date: '2026-11-01', productId: base.products[0].id, qtyBase: 5, revenue: 50000n, cogsAmount: 21500n },
+    ]);
+    await apply(b.id, -1, -30000n);
+    expect(await chain()).toEqual([
+      { date: '2026-11-01', productId: base.products[0].id, qtyBase: 2, revenue: 20000n, cogsAmount: 8000n },
+    ]);
+    expect(await chain()).toEqual(await chainFromBranches());
+  });
+
+  it('đơn isDeleted: applyOrder không ghi gì, giống rebuild', async () => {
+    const o = await seedPaidOrder(prisma, base, {
+      branch: 0,
+      completedAt: vn('2026-11-01T09:00:00'),
+      lines: [{ product: 0, qty: 2, unitPrice: 10000, unitCost: 4000 }],
+    });
+    await prisma.order.update({ where: { id: o.id }, data: { isDeleted: true } });
+    await apply(o.id, 1, o.total);
+    expect(await daily()).toEqual([]);
+    expect(await products()).toEqual([]);
+    expect(await chain()).toEqual([]);
+    await prisma.$transaction((tx) => repo.rebuild(tx, '2026-11-01', '2026-11-01'));
+    expect(await daily()).toEqual([]);
+    expect(await chain()).toEqual([]);
+  });
+
+  it('hai thu tiền ở HAI chi nhánh bán cùng sản phẩm, chạy đồng thời → cả hai commit, bảng chuỗi đủ cả hai, không deadlock', async () => {
+    const mk = (branch: number) =>
+      seedPaidOrder(prisma, base, {
+        branch,
+        completedAt: vn('2026-11-05T10:00:00'),
+        lines: [
+          { product: 0, qty: 2, unitPrice: 10000, unitCost: 4000 },
+          { product: 1, qty: 1, unitPrice: 50000, unitCost: 20000 },
+          { product: 2, qty: 4, unitPrice: 2500, unitCost: 1000 },
+        ],
+      });
+    const orders = [await mk(0), await mk(1)];
+    const hold = gate();
+    let ready = 0;
+    const both = gate();
+    // Giữ cả hai transaction mở sau khi đã cộng, để chắc chắn chúng chồng lên nhau; khoá chuỗi do bên đến sau chờ.
+    const run = (o: { id: string; total: bigint }, releaseOnStart: boolean) =>
+      prisma.$transaction(async (tx) => {
+        await repo.applyOrder(tx, o.id, 1, o.total);
+        ready += 1;
+        if (ready === 1 && !releaseOnStart) both.open();
+        await hold.promise;
+      });
+    const first = run(orders[0], false);
+    await both.promise;
+    const second = run(orders[1], true);
+    await sleep(300);
+    hold.open();
+    await Promise.all([first, second]);
+    const rows = await chain();
+    expect(rows).toHaveLength(3);
+    expect(rows.find((r) => r.productId === base.products[0].id)).toMatchObject({ qtyBase: 4, revenue: 40000n });
+    expect(rows).toEqual(await chainFromBranches());
+    expect((await daily()).map((r) => r.orderCount)).toEqual([1, 1]);
   });
 });
 

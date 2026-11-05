@@ -19,4 +19,14 @@ SELECT md5('branch' || b)::uuid, d::date, 'POS', md5('product' || p)::uuid,
        1 + (random() * 30)::int, 10000 + (random() * 500000)::bigint, 5000 + (random() * 250000)::bigint
 FROM generate_series(1, 10) b, generate_series(date '2025-11-05', date '2026-11-05', interval '1 day') d, generate_series(1, 800) p;
 
+-- Bảng chuỗi (gộp mọi chi nhánh) dựng từ bảng theo chi nhánh.
+INSERT INTO sales_daily_product_chain ("date", channel, "productId", "qtyBase", revenue, "cogsAmount")
+SELECT "date", channel, "productId", SUM("qtyBase"), SUM(revenue), SUM("cogsAmount") FROM sales_daily_product GROUP BY 1, 2, 3;
+
+-- ~300 nghìn đơn đã thu rải trong 1 năm, để đo `rebuild` (EXPLAIN theo chỉ mục completedAt).
+INSERT INTO orders (id, code, "branchId", channel, status, "paymentStatus", "totalAmount", "subtotalAmount", "completedAt")
+SELECT md5('order' || i)::uuid, 'BD' || lpad(i::text, 7, '0'), md5('branch' || (1 + i % 10))::uuid, 'POS', 'COMPLETED', 'PAID', 100000, 100000,
+       timestamptz '2026-11-05 23:00+07' - (random() * 366) * interval '1 day'
+FROM generate_series(1, 300000) i;
+
 VACUUM ANALYZE;

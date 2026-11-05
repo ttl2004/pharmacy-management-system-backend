@@ -3,7 +3,7 @@ import type { RequestActor } from 'src/common/decorators/current-actor.decorator
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { AuthRole } from 'src/common/types/common.enum';
 import { createTestPrisma, resetSchema } from 'src/test-support/db-test';
-import { ReportBase, seedPaidOrder, seedReportBase, SeedOrderInput } from './report-db-seed';
+import { ReportBase, seedPaidOrder, seedReportBase, SeedOrderInput } from 'src/test-support/report-db-seed';
 import { InMemoryReportCache } from './report-cache';
 import { SalesReportRepository } from './sales-report.repository';
 import { SalesReportService } from './sales-report.service';
@@ -96,6 +96,36 @@ describe('GET /reports/sales — truy vấn thật (db)', () => {
         { drugId: base.products[0].id, drugName: 'Paracetamol', qtyInBase: 4, revenue: 40000 },
       ],
     });
+  });
+
+  it('topDrugs toàn chuỗi (bảng chuỗi) bằng topDrugs khi liệt kê mọi chi nhánh (bảng theo chi nhánh)', async () => {
+    await sell({
+      branch: 0,
+      completedAt: vn('2026-11-01T09:00:00'),
+      lines: [
+        { product: 0, qty: 3, unitPrice: 10000, unitCost: 4000 },
+        { product: 1, qty: 1, unitPrice: 50000, unitCost: 1 },
+      ],
+    });
+    await sell({
+      branch: 1,
+      completedAt: vn('2026-11-02T09:00:00'),
+      lines: [{ product: 0, qty: 2, unitPrice: 10000, unitCost: 4000 }],
+      voidedRefund: 10000n,
+    });
+    await sell({
+      branch: 1,
+      completedAt: vn('2026-11-02T10:00:00'),
+      lines: [
+        { product: 2, qty: 7, unitPrice: 9000, unitCost: 1 },
+        { product: 0, qty: 1, unitPrice: 10000, unitCost: 1 },
+      ],
+    });
+    const ids = base.branches.map((b) => b.id);
+    const viaChain = await service.salesReport({ from: '2026-11-01', to: '2026-11-03' }, adminActor);
+    const viaBranch = await service.salesReport({ from: '2026-11-01', to: '2026-11-03', branchIds: ids }, adminActor);
+    expect(viaChain.topDrugs.length).toBeGreaterThan(0);
+    expect(viaChain.topDrugs).toEqual(viaBranch.topDrugs);
   });
 
   it('lọc theo chi nhánh; PM chỉ thấy chi nhánh mình; chi nhánh không có đơn vẫn có dòng 0đ', async () => {

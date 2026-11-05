@@ -378,6 +378,7 @@ model Product {
   branchProducts       BranchProduct[]
   orderItems           OrderItem[]
   salesDailyProducts   SalesDailyProduct[]
+  salesDailyChain      SalesDailyProductChain[]
 
   @@index([categoryId])
   @@index([manufacturerId])
@@ -1311,6 +1312,7 @@ model Order {
   @@index([branchId, createdAt])
   @@index([customerId])
   @@index([createdAt])
+  @@index([completedAt])
   /// Job tự huỷ quét đơn PENDING theo kênh và thời điểm.
   @@index([status, channel, createdAt])
   @@index([priceBookId])
@@ -1420,4 +1422,20 @@ model SalesDailyProduct {
   @@id([branchId, date, channel, productId])
   @@index([date, branchId])
   @@map("sales_daily_product")
+}
+
+/// Tổng hợp theo sản phẩm gộp MỌI chi nhánh — nguồn của `topDrugs` khi báo cáo toàn chuỗi (nhỏ hơn ~10 lần so với bảng theo chi nhánh).
+model SalesDailyProductChain {
+  date       DateTime     @db.Date
+  channel    OrderChannel
+  productId  String       @db.Uuid
+  qtyBase    Int          @default(0)
+  revenue    BigInt       @default(0)
+  cogsAmount BigInt       @default(0)
+  updatedAt  DateTime     @default(now()) @updatedAt @db.Timestamptz(3)
+  product    Product      @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@id([date, channel, productId])
+  @@index([date])
+  @@map("sales_daily_product_chain")
 }

@@ -17,5 +17,6 @@ run() { # tên, days, one
   printf '%-22s %8s %8s %8s %8s\n' "$1" "$tps" "$2" "$3" "$4"
 }
 run 1cn-30ngay 29 1
+run chuoi-30ngay 29 0
 run chuoi-90ngay 89 0
 run chuoi-366ngay 365 0

@@ -5,8 +5,15 @@ import { addDaysToDateOnly, daysBetweenDateOnly, vietnamDayStartUtc } from 'src/
 /** Ngày của đơn = ngày giờ Việt Nam của `completedAt`. Cùng một biểu thức cho cả khoá, upsert và dựng lại. */
 const VN_DAY = Prisma.sql`(o."completedAt" AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`;
 
-/** Khoá advisory theo ngày: `applyOrder` giữ chế độ chia sẻ (nhiều đơn song song), `rebuild` giữ độc quyền. */
-const dayLockKey = (date: Prisma.Sql) => Prisma.sql`hashtextextended('sales-rollup:' || (${date})::text, 0)`;
+/**
+ * Khoá advisory theo ngày VN — MỘT hàm cho cả `applyOrder` (chia sẻ) và `rebuild` (độc quyền) để hai bên luôn cùng khoá.
+ * Dùng `to_char` (không phụ thuộc DateStyle) để khoá luôn là `sales-rollup:YYYY-MM-DD`.
+ */
+const dayLockKey = (date: Prisma.Sql) =>
+  Prisma.sql`hashtextextended('sales-rollup:' || to_char(${date}, 'YYYY-MM-DD'), 0)`;
+
+/** Đơn đã xoá mềm không tính — cùng điều kiện ở `applyOrder` và `rebuild`. */
+const LIVE_ORDER = Prisma.sql`o."isDeleted" = false`;
 
 /**
  * Bảng tổng hợp doanh thu theo ngày (`sales_daily`, `sales_daily_product`). Ghi bằng SQL thô vì cần upsert cộng dồn
@@ -17,18 +24,20 @@ export class SalesRollupRepository {
   /**
    * Cộng (sign = 1) hoặc trừ (sign = -1) một đơn vào tổng hợp, theo ngày thu VN của đơn. `revenueDelta` là phần doanh
    * thu thêm/bớt của đơn (thu: +tổng; huỷ: −tiền hoàn); dòng sản phẩm luôn cộng/trừ trọn vẹn số lượng, doanh thu và
-   * giá vốn của đơn. Đúng 1 câu cho mỗi bảng, thêm 1 câu khoá chia sẻ theo ngày để `rebuild` không chạy xen vào.
+   * giá vốn của đơn. Đúng 1 câu cho mỗi bảng (ngày, sản phẩm theo chi nhánh, sản phẩm toàn chuỗi), thêm 1 câu khoá chia
+   * sẻ theo ngày để `rebuild` không chạy xen vào. Thứ tự khoá dòng cố định: dòng ngày → dòng sản phẩm chi nhánh → dòng
+   * sản phẩm chuỗi, mỗi nhóm theo productId tăng dần — mọi giao dịch cùng thứ tự nên không deadlock.
    */
   async applyOrder(tx: Prisma.TransactionClient, orderId: string, sign: 1 | -1, revenueDelta: bigint): Promise<void> {
     await tx.$executeRaw(Prisma.sql`
       SELECT pg_advisory_xact_lock_shared(${dayLockKey(VN_DAY)})
-      FROM orders o WHERE o."id" = ${orderId}::uuid AND o."completedAt" IS NOT NULL`);
+      FROM orders o WHERE o."id" = ${orderId}::uuid AND o."completedAt" IS NOT NULL AND ${LIVE_ORDER}`);
 
     await tx.$executeRaw(Prisma.sql`
       INSERT INTO sales_daily ("branchId", "date", "channel", "orderCount", "revenue", "updatedAt")
       SELECT o."branchId", ${VN_DAY}, o."channel", ${sign}::int, ${revenueDelta}::bigint, now()
       FROM orders o
-      WHERE o."id" = ${orderId}::uuid AND o."completedAt" IS NOT NULL
+      WHERE o."id" = ${orderId}::uuid AND o."completedAt" IS NOT NULL AND ${LIVE_ORDER}
       ON CONFLICT ("branchId", "date", "channel") DO UPDATE SET
         "orderCount" = sales_daily."orderCount" + EXCLUDED."orderCount",
         "revenue" = sales_daily."revenue" + EXCLUDED."revenue",
@@ -47,13 +56,36 @@ export class SalesRollupRepository {
         SELECT SUM(b."quantity"::bigint * b."unitCost") AS "cost"
         FROM order_item_batches b WHERE b."orderItemId" = oi."id"
       ) c ON true
-      WHERE o."id" = ${orderId}::uuid AND o."completedAt" IS NOT NULL
+      WHERE o."id" = ${orderId}::uuid AND o."completedAt" IS NOT NULL AND ${LIVE_ORDER}
       GROUP BY o."branchId", ${VN_DAY}, o."channel", oi."productId"
       ORDER BY oi."productId"
       ON CONFLICT ("branchId", "date", "channel", "productId") DO UPDATE SET
         "qtyBase" = sales_daily_product."qtyBase" + EXCLUDED."qtyBase",
         "revenue" = sales_daily_product."revenue" + EXCLUDED."revenue",
         "cogsAmount" = sales_daily_product."cogsAmount" + EXCLUDED."cogsAmount"`);
+
+    // Gộp mọi chi nhánh: nguồn của topDrugs toàn chuỗi. Các chi nhánh tranh nhau dòng này (cùng sản phẩm, cùng ngày).
+    await tx.$executeRaw(Prisma.sql`
+      INSERT INTO sales_daily_product_chain ("date", "channel", "productId", "qtyBase", "revenue", "cogsAmount", "updatedAt")
+      SELECT ${VN_DAY}, o."channel", oi."productId",
+             (${sign}::bigint * SUM(oi."baseQuantity"))::int,
+             ${sign}::bigint * SUM(oi."totalPrice"),
+             ${sign}::bigint * COALESCE(SUM(c."cost"), 0),
+             now()
+      FROM orders o
+      JOIN order_items oi ON oi."orderId" = o."id" AND oi."isDeleted" = false
+      LEFT JOIN LATERAL (
+        SELECT SUM(b."quantity"::bigint * b."unitCost") AS "cost"
+        FROM order_item_batches b WHERE b."orderItemId" = oi."id"
+      ) c ON true
+      WHERE o."id" = ${orderId}::uuid AND o."completedAt" IS NOT NULL AND ${LIVE_ORDER}
+      GROUP BY ${VN_DAY}, o."channel", oi."productId"
+      ORDER BY oi."productId"
+      ON CONFLICT ("date", "channel", "productId") DO UPDATE SET
+        "qtyBase" = sales_daily_product_chain."qtyBase" + EXCLUDED."qtyBase",
+        "revenue" = sales_daily_product_chain."revenue" + EXCLUDED."revenue",
+        "cogsAmount" = sales_daily_product_chain."cogsAmount" + EXCLUDED."cogsAmount",
+        "updatedAt" = now()`);
   }
 
   /**
@@ -71,7 +103,7 @@ export class SalesRollupRepository {
     const end = vietnamDayStartUtc(addDaysToDateOnly(toDate, 1));
 
     await tx.$executeRaw(Prisma.sql`
-      SELECT pg_advisory_xact_lock(hashtextextended('sales-rollup:' || g."d"::date::text, 0))
+      SELECT pg_advisory_xact_lock(${dayLockKey(Prisma.sql`g."d"::date`)})
       FROM generate_series(${fromDate}::date, ${toDate}::date, interval '1 day') AS g("d")`);
 
     await tx.$executeRaw(
@@ -79,6 +111,9 @@ export class SalesRollupRepository {
     );
     await tx.$executeRaw(
       Prisma.sql`DELETE FROM sales_daily_product WHERE "date" BETWEEN ${fromDate}::date AND ${toDate}::date`,
+    );
+    await tx.$executeRaw(
+      Prisma.sql`DELETE FROM sales_daily_product_chain WHERE "date" BETWEEN ${fromDate}::date AND ${toDate}::date`,
     );
 
     // Đơn đã thu = COMPLETED (còn hiệu lực) hoặc CANCELLED mà có `completedAt` (thu rồi mới huỷ). Đơn huỷ vẫn sinh dòng
@@ -95,7 +130,7 @@ export class SalesRollupRepository {
         WHERE p."orderId" = o."id" AND p."kind" = 'REFUND' AND p."status" = 'SUCCESS'
       ) r ON true
       WHERE o."completedAt" >= ${start} AND o."completedAt" < ${end}
-        AND o."status" IN ('COMPLETED', 'CANCELLED') AND o."isDeleted" = false
+        AND o."status" IN ('COMPLETED', 'CANCELLED') AND ${LIVE_ORDER}
       GROUP BY o."branchId", ${VN_DAY}, o."channel"`);
 
     const perProduct = await tx.$executeRaw(Prisma.sql`
@@ -111,9 +146,17 @@ export class SalesRollupRepository {
         FROM order_item_batches b WHERE b."orderItemId" = oi."id"
       ) c ON true
       WHERE o."completedAt" >= ${start} AND o."completedAt" < ${end}
-        AND o."status" IN ('COMPLETED', 'CANCELLED') AND o."isDeleted" = false
+        AND o."status" IN ('COMPLETED', 'CANCELLED') AND ${LIVE_ORDER}
       GROUP BY o."branchId", ${VN_DAY}, o."channel", oi."productId"`);
 
-    return { days, rows: daily + perProduct };
+    // Bảng chuỗi dựng từ bảng chi nhánh vừa dựng, dưới cùng các khoá ngày.
+    const chain = await tx.$executeRaw(Prisma.sql`
+      INSERT INTO sales_daily_product_chain ("date", "channel", "productId", "qtyBase", "revenue", "cogsAmount", "updatedAt")
+      SELECT s."date", s."channel", s."productId", SUM(s."qtyBase")::int, SUM(s."revenue")::bigint, SUM(s."cogsAmount")::bigint, now()
+      FROM sales_daily_product s
+      WHERE s."date" BETWEEN ${fromDate}::date AND ${toDate}::date
+      GROUP BY s."date", s."channel", s."productId"`);
+
+    return { days, rows: daily + perProduct + chain };
   }
 }

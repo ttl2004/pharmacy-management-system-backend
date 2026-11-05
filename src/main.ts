@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 
@@ -15,19 +15,18 @@ import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Logger } from 'nestjs-pino';
 import { AUTH_JWT } from './common/constants/app.constant';
+import { createFastifyAdapter } from './common/configs/fastify-adapter';
+import { trustProxySchema } from './common/configs/env.validation';
 import { ResolveExceptionFilter } from './common/exceptions/resolve.exception';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { UPLOAD_ROOT } from './modules/feature-catalog/product/product-image.service';
 
 async function bootstrap() {
+  // Adapter dựng trước ConfigService nên đọc TRUST_PROXY qua đúng schema zod của env.
+  const trustProxy = trustProxySchema.parse(process.env.TRUST_PROXY);
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter({
-      trustProxy: false,
-      logger: false,
-      // Mặc định 1MB; ảnh sản phẩm gửi base64 (≤2MB nhị phân ≈ 2.8MB) qua POST /product-image.
-      bodyLimit: 4 * 1024 * 1024,
-    }),
+    createFastifyAdapter({ TRUST_PROXY: trustProxy }),
     { bufferLogs: true }, // không để bị log kép
   );
 
@@ -98,6 +97,7 @@ async function bootstrap() {
   await app.listen(port, '0.0.0.0');
 
   pinoLogger.log(`App Running at: http://localhost:${port}`, 'Bootstrap');
+  pinoLogger.log(`trustProxy=${trustProxy || false}`, 'Bootstrap');
   pinoLogger.log(`Swagger at: http://localhost:${port}/docs`, 'Swagger');
 }
 

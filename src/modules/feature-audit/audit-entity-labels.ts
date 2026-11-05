@@ -6,7 +6,8 @@ type Loader = (prisma: PrismaClient, ids: string[]) => Promise<{ id: string; lab
 const byCode = (rows: { id: string; code: string }[]) => rows.map((r) => ({ id: r.id, label: r.code }));
 
 /**
- * Nhãn đọc được theo `entityType` (tên bảng). Nhật ký chỉ lưu id; tra lúc đọc để log cũ cũng có tên/mã. Không lọc
+ * Nhãn đọc được theo `entityType` (tên bảng). Chỉ dùng cho dòng có `entityLabel` null (log backfill/cũ); dòng mới đã
+ * mang nhãn lúc ghi. Không lọc
  * xoá mềm: đối tượng đã xoá vẫn là chủ thể của dòng log.
  */
 const LOADERS: Record<string, Loader> = {
@@ -38,7 +39,8 @@ const LOADERS: Record<string, Loader> = {
     byCode(await p.supplierPayment.findMany({ where: { id: { in: ids } }, select: { id: true, code: true } })),
   supplier_debt_adjustments: async (p, ids) =>
     byCode(await p.supplierDebtAdjustment.findMany({ where: { id: { in: ids } }, select: { id: true, code: true } })),
-  orders: async (p, ids) => byCode(await p.order.findMany({ where: { id: { in: ids } }, select: { id: true, code: true } })),
+  orders: async (p, ids) =>
+    byCode(await p.order.findMany({ where: { id: { in: ids } }, select: { id: true, code: true } })),
   users: async (p, ids) =>
     (await p.user.findMany({ where: { id: { in: ids } }, select: { id: true, fullName: true } })).map((r) => ({
       id: r.id,
@@ -51,6 +53,16 @@ const LOADERS: Record<string, Loader> = {
         select: { id: true, batchNumber: true, product: { select: { code: true } } },
       })
     ).map((r) => ({ id: r.id, label: `${r.product.code} · lô ${r.batchNumber}` })),
+  price_books: async (p, ids) =>
+    (await p.priceBook.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } })).map((r) => ({
+      id: r.id,
+      label: r.name,
+    })),
+  drugs: async (p, ids) =>
+    (await p.drug.findMany({ where: { id: { in: ids } }, select: { id: true, code: true, name: true } })).map((r) => ({
+      id: r.id,
+      label: `${r.code} · ${r.name}`,
+    })),
   branch_products: async (p, ids) =>
     (
       await p.branchProduct.findMany({

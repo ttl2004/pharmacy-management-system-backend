@@ -1,11 +1,30 @@
 import { DosageForm, Prisma, ProductType, RecordStatus } from '@prisma/client';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
+import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import { ProductService } from './product.service';
 import { DRUG_INGREDIENTS_SEARCH_FIELD } from './repositories/product.repository';
 
+const ACTOR: RequestActor = {
+  user: { userId: 'caller-id', sid: 's', email: null, role: AuthRole.ADMIN, branchId: null, roleLevel: 80 },
+  ip: '10.0.0.1',
+  userAgent: null,
+  requestId: 'req-1',
+};
+
+type AuditMock = { record: jest.Mock };
+const makeAudit = (): AuditMock => ({ record: jest.fn().mockResolvedValue(undefined) });
+
+/** Các entry của lần `record` duy nhất. */
+function recordedEntries(audit: AuditMock): Record<string, unknown>[] {
+  expect(audit.record).toHaveBeenCalledTimes(1);
+  return (audit.record.mock.calls[0] as [unknown, unknown, Record<string, unknown>[]])[2];
+}
+
 function makeService(
   repositoryOverrides: Record<string, jest.Mock> = {},
   transactionOverrides: Record<string, jest.Mock> = {},
+  audit: AuditMock = makeAudit(),
 ) {
   const repository = {
     findPageWithSummary: jest.fn(),
@@ -38,8 +57,7 @@ function makeService(
       ),
     ...transactionOverrides,
   } as never;
-  const audit = { record: jest.fn().mockResolvedValue(undefined) } as never;
-  return new ProductService(repository, transactions, audit);
+  return new ProductService(repository, transactions, audit as never);
 }
 
 function duplicateError(target = 'code'): Prisma.PrismaClientKnownRequestError {
@@ -144,7 +162,7 @@ describe('ProductService — tạo', () => {
       findDetailWith: jest.fn().mockResolvedValue(detail),
     });
 
-    await expect(service.create(validCreatePayload(), 'caller-id')).resolves.toEqual(detail);
+    await expect(service.create(validCreatePayload(), ACTOR)).resolves.toEqual(detail);
 
     expect(createProduct).toHaveBeenCalledWith(
       expect.anything(),
@@ -163,7 +181,7 @@ describe('ProductService — tạo', () => {
       findDetailWith: jest.fn().mockResolvedValue({ id: 'product-id' }),
     });
 
-    await service.create(validCreatePayload(), 'caller-id');
+    await service.create(validCreatePayload(), ACTOR);
 
     expect(createProduct).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ manufacturerId: null }));
   });
@@ -171,7 +189,7 @@ describe('ProductService — tạo', () => {
   it('nhóm sản phẩm không tồn tại hoặc đã ngừng hoạt động thì báo INVALID_REFERENCE', async () => {
     const service = makeService({ findActiveCategory: jest.fn().mockResolvedValue(null) });
 
-    await expect(service.create(validCreatePayload(), 'caller-id')).rejects.toMatchObject({
+    await expect(service.create(validCreatePayload(), ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_REFERENCE,
     });
   });
@@ -180,14 +198,14 @@ describe('ProductService — tạo', () => {
     const service = makeService({ findActiveManufacturer: jest.fn().mockResolvedValue(null) });
 
     await expect(
-      service.create(validCreatePayload({ manufacturerId: 'manufacturer-id' }), 'caller-id'),
+      service.create(validCreatePayload({ manufacturerId: 'manufacturer-id' }), ACTOR),
     ).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
   });
 
   it('đơn vị không tồn tại hoặc đã xoá mềm thì báo INVALID_REFERENCE', async () => {
     const service = makeService({ findUnits: jest.fn().mockResolvedValue([{ id: 'unit-vien' }]) });
 
-    await expect(service.create(validCreatePayload(), 'caller-id')).rejects.toMatchObject({
+    await expect(service.create(validCreatePayload(), ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_REFERENCE,
     });
   });
@@ -203,7 +221,7 @@ describe('ProductService — tạo', () => {
             { unitId: 'unit-vi', conversionRate: 10, salePrice: 4500, isBaseUnit: false },
           ],
         }),
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
   });
@@ -219,7 +237,7 @@ describe('ProductService — tạo', () => {
             { unitId: 'unit-vi', conversionRate: 1, salePrice: 4500, isBaseUnit: true },
           ],
         }),
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
   });
@@ -235,7 +253,7 @@ describe('ProductService — tạo', () => {
             { unitId: 'unit-vi', conversionRate: 10, salePrice: 4500, isBaseUnit: false },
           ],
         }),
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
   });
@@ -251,7 +269,7 @@ describe('ProductService — tạo', () => {
             { unitId: 'unit-vi', conversionRate: 1, salePrice: 4500, isBaseUnit: false },
           ],
         }),
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
   });
@@ -267,7 +285,7 @@ describe('ProductService — tạo', () => {
             { unitId: 'unit-vien', conversionRate: 10, salePrice: 4500, isBaseUnit: false },
           ],
         }),
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
   });
@@ -281,7 +299,7 @@ describe('ProductService — tạo', () => {
           barcode: '8935000002',
           units: [{ unitId: 'unit-vien', conversionRate: 1, salePrice: 500, isBaseUnit: true, barcode: '8935000002' }],
         }),
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
   });
@@ -297,7 +315,7 @@ describe('ProductService — tạo', () => {
             { unitId: 'unit-vi', conversionRate: 10, salePrice: 4500, isBaseUnit: false, barcode: '8935000001' },
           ],
         }),
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
   });
@@ -307,7 +325,7 @@ describe('ProductService — tạo', () => {
       findBarcodeConflict: jest.fn().mockResolvedValue({ barcode: '8935000001', source: 'product_units' }),
     });
 
-    await expect(service.create(validCreatePayload({ barcode: '8935000001' }), 'caller-id')).rejects.toMatchObject({
+    await expect(service.create(validCreatePayload({ barcode: '8935000001' }), ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.DUPLICATE_CODE,
     });
   });
@@ -315,7 +333,7 @@ describe('ProductService — tạo', () => {
   it('trùng code sản phẩm thì báo DUPLICATE_CODE', async () => {
     const service = makeService({ createProduct: jest.fn().mockRejectedValue(duplicateError()) });
 
-    await expect(service.create(validCreatePayload(), 'caller-id')).rejects.toMatchObject({
+    await expect(service.create(validCreatePayload(), ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.DUPLICATE_CODE,
     });
   });
@@ -327,7 +345,7 @@ describe('ProductService — tạo', () => {
       findDetailWith,
     });
 
-    await expect(service.create(validCreatePayload(), 'caller-id')).rejects.toThrow('insert failed');
+    await expect(service.create(validCreatePayload(), ACTOR)).rejects.toThrow('insert failed');
     expect(findDetailWith).not.toHaveBeenCalled();
   });
 });
@@ -353,7 +371,7 @@ describe('ProductService — liên kết danh mục thuốc (luật A)', () => {
     const createProduct = jest.fn();
     const service = makeService({ createProduct });
 
-    await expect(service.create(validCreatePayload({ drugId: undefined }), 'caller-id')).rejects.toMatchObject({
+    await expect(service.create(validCreatePayload({ drugId: undefined }), ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_REFERENCE,
     });
     expect(createProduct).not.toHaveBeenCalled();
@@ -362,7 +380,7 @@ describe('ProductService — liên kết danh mục thuốc (luật A)', () => {
   it('tạo hàng DRUG gửi drugId null cũng bị từ chối', async () => {
     const service = makeService({});
 
-    await expect(service.create(validCreatePayload({ drugId: null }), 'caller-id')).rejects.toMatchObject({
+    await expect(service.create(validCreatePayload({ drugId: null }), ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_REFERENCE,
     });
   });
@@ -370,7 +388,7 @@ describe('ProductService — liên kết danh mục thuốc (luật A)', () => {
   it('thuốc không tồn tại hoặc đã INACTIVE thì báo INVALID_REFERENCE', async () => {
     const service = makeService({ findActiveDrug: jest.fn().mockResolvedValue(null) });
 
-    await expect(service.create(validCreatePayload(), 'caller-id')).rejects.toMatchObject({
+    await expect(service.create(validCreatePayload(), ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_REFERENCE,
     });
   });
@@ -379,7 +397,7 @@ describe('ProductService — liên kết danh mục thuốc (luật A)', () => {
     const createProduct = jest.fn().mockResolvedValue({ id: 'product-id' });
     const service = makeService({ createProduct, findDetailWith: jest.fn().mockResolvedValue({ id: 'product-id' }) });
 
-    await service.create(validCreatePayload(), 'caller-id');
+    await service.create(validCreatePayload(), ACTOR);
 
     expect(createProduct).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ drugId: 'drug-id' }));
   });
@@ -388,10 +406,10 @@ describe('ProductService — liên kết danh mục thuốc (luật A)', () => {
     const createProduct = jest.fn().mockResolvedValue({ id: 'product-id' });
     const service = makeService({ createProduct, findDetailWith: jest.fn().mockResolvedValue({ id: 'product-id' }) });
 
-    await service.create(validCreatePayload({ type: ProductType.GOODS, drugId: undefined }), 'caller-id');
+    await service.create(validCreatePayload({ type: ProductType.GOODS, drugId: undefined }), ACTOR);
     expect(createProduct).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ drugId: null }));
 
-    await expect(service.create(validCreatePayload({ type: ProductType.GOODS }), 'caller-id')).rejects.toMatchObject({
+    await expect(service.create(validCreatePayload({ type: ProductType.GOODS }), ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.HTTP_BAD_REQUEST,
     });
   });
@@ -401,7 +419,7 @@ describe('ProductService — liên kết danh mục thuốc (luật A)', () => {
       findDetailWith: jest.fn().mockResolvedValue({ ...existingProduct, drugId: 'drug-id' }),
     });
 
-    await expect(service.update('product-id', { drugId: null }, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('product-id', { drugId: null }, ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_REFERENCE,
     });
   });
@@ -415,7 +433,7 @@ describe('ProductService — liên kết danh mục thuốc (luật A)', () => {
       updateProduct,
     });
 
-    await service.update('product-id', { name: 'Tên mới' }, 'caller-id');
+    await service.update('product-id', { name: 'Tên mới' }, ACTOR);
 
     expect(findActiveDrug).not.toHaveBeenCalled();
     expect(updateProduct).toHaveBeenCalled();
@@ -425,7 +443,7 @@ describe('ProductService — liên kết danh mục thuốc (luật A)', () => {
     const updateProduct = jest.fn().mockResolvedValue(1);
     const service = makeService({ findDetailWith: jest.fn().mockResolvedValue(existingProduct), updateProduct });
 
-    await service.update('product-id', { drugId: 'drug-id' }, 'caller-id');
+    await service.update('product-id', { drugId: 'drug-id' }, ACTOR);
 
     expect(updateProduct).toHaveBeenCalledWith(
       expect.anything(),
@@ -442,7 +460,7 @@ describe('ProductService — liên kết danh mục thuốc (luật A)', () => {
       updateProduct,
     });
 
-    await expect(service.update('product-id', { drugId: 'drug-khac' }, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('product-id', { drugId: 'drug-khac' }, ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.PRODUCT_HAS_STOCK,
     });
     expect(updateProduct).not.toHaveBeenCalled();
@@ -457,7 +475,7 @@ describe('ProductService — liên kết danh mục thuốc (luật A)', () => {
       updateProduct,
     });
 
-    await service.update('product-id', { drugId: 'drug-id' }, 'caller-id');
+    await service.update('product-id', { drugId: 'drug-id' }, ACTOR);
 
     expect(hasInventoryHistory).not.toHaveBeenCalled();
     expect(updateProduct).toHaveBeenCalled();
@@ -475,7 +493,7 @@ describe('ProductService — cờ kê đơn theo danh mục thuốc', () => {
       findDetailWith: jest.fn().mockResolvedValue({ id: 'product-id' }),
     });
 
-    await service.create(validCreatePayload(), 'caller-id');
+    await service.create(validCreatePayload(), ACTOR);
 
     expect(createProduct).toHaveBeenCalledWith(
       expect.anything(),
@@ -487,9 +505,9 @@ describe('ProductService — cờ kê đơn theo danh mục thuốc', () => {
     const createProduct = jest.fn();
     const service = makeService({ createProduct, findActiveDrug: jest.fn().mockResolvedValue(prescriptionDrug) });
 
-    await expect(
-      service.create(validCreatePayload({ requiresPrescription: false }), 'caller-id'),
-    ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+    await expect(service.create(validCreatePayload({ requiresPrescription: false }), ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.HTTP_BAD_REQUEST,
+    });
     expect(createProduct).not.toHaveBeenCalled();
   });
 
@@ -500,7 +518,7 @@ describe('ProductService — cờ kê đơn theo danh mục thuốc', () => {
       updateProduct,
     });
 
-    await expect(service.update('product-id', { requiresPrescription: false }, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('product-id', { requiresPrescription: false }, ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.HTTP_BAD_REQUEST,
     });
     expect(updateProduct).not.toHaveBeenCalled();
@@ -514,7 +532,7 @@ describe('ProductService — cờ kê đơn theo danh mục thuốc', () => {
       updateProduct,
     });
 
-    await service.update('product-id', { drugId: 'drug-id' }, 'caller-id');
+    await service.update('product-id', { drugId: 'drug-id' }, ACTOR);
 
     expect(updateProduct).toHaveBeenCalledWith(
       expect.anything(),
@@ -527,7 +545,7 @@ describe('ProductService — cờ kê đơn theo danh mục thuốc', () => {
     const updateProduct = jest.fn().mockResolvedValue(1);
     const service = makeService({ findDetailWith: jest.fn().mockResolvedValue(existingProduct), updateProduct });
 
-    await service.update('product-id', { requiresPrescription: true }, 'caller-id');
+    await service.update('product-id', { requiresPrescription: true }, ACTOR);
 
     expect(updateProduct).toHaveBeenCalledWith(
       expect.anything(),
@@ -554,7 +572,7 @@ describe('ProductService — điền sẵn từ danh mục thuốc', () => {
       findDetailWith: jest.fn().mockResolvedValue({ id: 'product-id' }),
     });
 
-    await service.create(validCreatePayload({ dosageNote: 'Trẻ em nửa viên' }), 'caller-id');
+    await service.create(validCreatePayload({ dosageNote: 'Trẻ em nửa viên' }), ACTOR);
 
     expect(createProduct).toHaveBeenCalledWith(
       expect.anything(),
@@ -580,7 +598,7 @@ describe('ProductService — điền sẵn từ danh mục thuốc', () => {
       updateProduct,
     });
 
-    await service.update('product-id', { drugId: 'drug-id' }, 'caller-id');
+    await service.update('product-id', { drugId: 'drug-id' }, ACTOR);
 
     const data = (updateProduct.mock.calls[0] as unknown[])[2] as Record<string, unknown>;
     expect(data).not.toHaveProperty('indications');
@@ -603,7 +621,7 @@ describe('ProductService — chống trùng thuốc + bộ đơn vị', () => {
     const createProduct = jest.fn();
     const service = makeService({ createProduct, findPacksByDrug: jest.fn().mockResolvedValue([samePack]) });
 
-    const attempt = service.create(validCreatePayload(), 'caller-id');
+    const attempt = service.create(validCreatePayload(), ACTOR);
     await expect(attempt).rejects.toMatchObject({ errorCode: ErrorCode.DUPLICATE_CODE });
     await expect(attempt).rejects.toThrow('SP0099');
     expect(createProduct).not.toHaveBeenCalled();
@@ -622,7 +640,7 @@ describe('ProductService — chống trùng thuốc + bộ đơn vị', () => {
       findDetailWith: jest.fn().mockResolvedValue({ id: 'product-id' }),
     });
 
-    await service.create(validCreatePayload(), 'caller-id');
+    await service.create(validCreatePayload(), ACTOR);
 
     expect(createProduct).toHaveBeenCalled();
   });
@@ -644,7 +662,7 @@ describe('ProductService — chống trùng thuốc + bộ đơn vị', () => {
       { write: jest.fn().mockImplementation((_locks: string[], work: (client: unknown) => unknown) => work(tx)) },
     );
 
-    await service.create(validCreatePayload(), 'caller-id');
+    await service.create(validCreatePayload(), ACTOR);
 
     expect(order).toEqual(['lock', 'read']);
     expect(findPacksByDrug).toHaveBeenCalledWith(tx, 'drug-id', undefined);
@@ -668,7 +686,7 @@ describe('ProductService — chống trùng thuốc + bộ đơn vị', () => {
             { unitId: 'unit-vi', conversionRate: 10, salePrice: 4500, isBaseUnit: false },
           ],
         },
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.DUPLICATE_CODE });
     expect(findPacksByDrug).toHaveBeenCalledWith(expect.anything(), 'drug-id', 'product-id');
@@ -683,7 +701,7 @@ describe('ProductService — chống trùng thuốc + bộ đơn vị', () => {
       findPacksByDrug,
     });
 
-    await service.update('product-id', { name: 'Tên mới' }, 'caller-id');
+    await service.update('product-id', { name: 'Tên mới' }, ACTOR);
 
     expect(findPacksByDrug).not.toHaveBeenCalled();
   });
@@ -693,7 +711,7 @@ describe('ProductService — cập nhật', () => {
   it('body rỗng thì báo HTTP_BAD_REQUEST', async () => {
     const service = makeService({});
 
-    await expect(service.update('product-id', {}, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('product-id', {}, ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.HTTP_BAD_REQUEST,
     });
   });
@@ -702,7 +720,7 @@ describe('ProductService — cập nhật', () => {
     const updateProduct = jest.fn();
     const service = makeService({ findDetailWith: jest.fn().mockResolvedValue(null), updateProduct });
 
-    await expect(service.update('product-id', { name: 'X' }, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('product-id', { name: 'X' }, ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.RECORD_NOT_FOUND,
     });
     expect(updateProduct).not.toHaveBeenCalled();
@@ -718,7 +736,7 @@ describe('ProductService — cập nhật', () => {
       },
     );
 
-    await service.update('product-id', { name: 'Tên mới' }, 'caller-id');
+    await service.update('product-id', { name: 'Tên mới' }, ACTOR);
 
     expect(findDetailWith).toHaveBeenCalledWith(tx, 'product-id');
   });
@@ -727,7 +745,7 @@ describe('ProductService — cập nhật', () => {
     const write = jest.fn().mockImplementation((_locks: string[], work: (client: unknown) => unknown) => work({}));
     const service = makeService({ findDetailWith: jest.fn().mockResolvedValue(existingProduct) }, { write });
 
-    await service.update('product-id', { barcode: '8930001' }, 'caller-id');
+    await service.update('product-id', { barcode: '8930001' }, ACTOR);
 
     expect(write).toHaveBeenCalledWith(['product:product-id', 'barcode:8930001'], expect.any(Function));
   });
@@ -738,7 +756,7 @@ describe('ProductService — cập nhật', () => {
       updateProduct: jest.fn().mockResolvedValue(0),
     });
 
-    await expect(service.update('product-id', { name: 'X' }, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('product-id', { name: 'X' }, ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.RECORD_NOT_FOUND,
     });
   });
@@ -754,7 +772,7 @@ describe('ProductService — cập nhật', () => {
     await service.update(
       'product-id',
       { units: [{ unitId: 'unit-vien', conversionRate: 1, salePrice: 500, isBaseUnit: true }] },
-      'caller-id',
+      ACTOR,
     );
 
     const [, , data] = updateUnit.mock.calls[0] as [unknown, string, Record<string, unknown>];
@@ -768,7 +786,7 @@ describe('ProductService — cập nhật', () => {
       updateProduct,
     });
 
-    await service.update('product-id', { name: 'Tên mới' }, 'caller-id');
+    await service.update('product-id', { name: 'Tên mới' }, ACTOR);
 
     expect(updateProduct).toHaveBeenCalledWith(expect.anything(), 'product-id', {
       name: 'Tên mới',
@@ -787,7 +805,7 @@ describe('ProductService — cập nhật', () => {
       softDeleteUnits,
     });
 
-    await service.update('product-id', { name: 'Tên mới' }, 'caller-id');
+    await service.update('product-id', { name: 'Tên mới' }, ACTOR);
 
     expect(createUnits).not.toHaveBeenCalled();
     expect(updateUnit).not.toHaveBeenCalled();
@@ -817,7 +835,7 @@ describe('ProductService — cập nhật', () => {
           { unitId: 'unit-hop', conversionRate: 100, salePrice: 42000, isBaseUnit: false },
         ],
       },
-      'caller-id',
+      ACTOR,
     );
 
     expect(updateUnit).toHaveBeenCalledWith(
@@ -845,7 +863,7 @@ describe('ProductService — cập nhật', () => {
         units: [{ unitId: 'unit-hop', conversionRate: 1, salePrice: 42000, isBaseUnit: true }],
         baseUnitId: 'unit-hop',
       },
-      'caller-id',
+      ACTOR,
     );
 
     expect(updateUnit).toHaveBeenCalledWith(
@@ -871,7 +889,7 @@ describe('ProductService — cập nhật', () => {
           { unitId: 'unit-hop', conversionRate: 1, salePrice: 42000, isBaseUnit: true, status: RecordStatus.INACTIVE },
         ],
       },
-      'caller-id',
+      ACTOR,
     );
 
     expect(updateUnit).toHaveBeenCalledWith(
@@ -884,7 +902,7 @@ describe('ProductService — cập nhật', () => {
   it('gửi units rỗng thì báo HTTP_BAD_REQUEST', async () => {
     const service = makeService({ findDetailWith: jest.fn().mockResolvedValue(existingProduct) });
 
-    await expect(service.update('product-id', { units: [] }, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('product-id', { units: [] }, ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.HTTP_BAD_REQUEST,
     });
   });
@@ -892,7 +910,7 @@ describe('ProductService — cập nhật', () => {
   it('đổi baseUnit mà không gửi units thì báo HTTP_BAD_REQUEST', async () => {
     const service = makeService({ findDetailWith: jest.fn().mockResolvedValue(existingProduct) });
 
-    await expect(service.update('product-id', { baseUnitId: 'unit-hop' }, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('product-id', { baseUnitId: 'unit-hop' }, ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.HTTP_BAD_REQUEST,
     });
   });
@@ -910,7 +928,7 @@ describe('ProductService — cập nhật', () => {
         baseUnitId: 'unit-hop',
         units: [{ unitId: 'unit-hop', conversionRate: 1, salePrice: 42000, isBaseUnit: true }],
       },
-      'caller-id',
+      ACTOR,
     );
 
     expect(updateProduct).toHaveBeenCalledWith(
@@ -930,7 +948,7 @@ describe('ProductService — cập nhật', () => {
           baseUnitId: 'unit-hop',
           units: [{ unitId: 'unit-vien', conversionRate: 1, salePrice: 500, isBaseUnit: true }],
         },
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
   });
@@ -949,7 +967,7 @@ describe('ProductService — cập nhật', () => {
         barcode: '8935000000',
         units: [{ unitId: 'unit-vien', conversionRate: 1, salePrice: 500, isBaseUnit: true, barcode: '8935000001' }],
       },
-      'caller-id',
+      ACTOR,
     );
 
     expect(findBarcodeConflict).toHaveBeenCalledWith(expect.anything(), ['8935000000', '8935000001'], {
@@ -964,7 +982,7 @@ describe('ProductService — cập nhật', () => {
       findBarcodeConflict: jest.fn().mockResolvedValue({ barcode: '8935000009', source: 'product_units' }),
     });
 
-    await expect(service.update('product-id', { barcode: '8935000009' }, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('product-id', { barcode: '8935000009' }, ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.DUPLICATE_CODE,
     });
   });
@@ -975,7 +993,7 @@ describe('ProductService — cập nhật', () => {
       findActiveCategory: jest.fn().mockResolvedValue(null),
     });
 
-    await expect(service.update('product-id', { categoryId: 'category-khac' }, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('product-id', { categoryId: 'category-khac' }, ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.INVALID_REFERENCE,
     });
   });
@@ -987,7 +1005,7 @@ describe('ProductService — cập nhật', () => {
       findActiveCategory,
     });
 
-    await service.update('product-id', { name: 'Tên mới' }, 'caller-id');
+    await service.update('product-id', { name: 'Tên mới' }, ACTOR);
 
     expect(findActiveCategory).not.toHaveBeenCalled();
   });
@@ -1004,7 +1022,7 @@ describe('ProductService — cập nhật', () => {
       service.update(
         'product-id',
         { units: [{ unitId: 'unit-vien', conversionRate: 1, salePrice: 500, isBaseUnit: true }] },
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toThrow('insert failed');
     expect(findDetailWith).toHaveBeenCalledTimes(1);
@@ -1020,7 +1038,7 @@ describe('ProductService — cập nhật', () => {
           barcode: '8935000999',
           units: [{ unitId: 'unit-vien', conversionRate: 1, salePrice: 500, isBaseUnit: true, barcode: '8935000999' }],
         },
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
   });
@@ -1042,7 +1060,7 @@ describe('ProductService — rào kho', () => {
           baseUnitId: 'unit-vi',
           units: [{ unitId: 'unit-vi', conversionRate: 1, salePrice: 4500, isBaseUnit: true }],
         } as never,
-        'caller-id',
+        ACTOR,
       ),
     ).rejects.toMatchObject({ errorCode: ErrorCode.PRODUCT_HAS_STOCK });
     expect(updateProduct).not.toHaveBeenCalled();
@@ -1056,7 +1074,7 @@ describe('ProductService — rào kho', () => {
       softDeleteProduct,
     });
 
-    await expect(service.remove('product-id', 'caller-id')).rejects.toMatchObject({
+    await expect(service.remove('product-id', ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.PRODUCT_HAS_STOCK,
     });
     expect(softDeleteProduct).not.toHaveBeenCalled();
@@ -1073,7 +1091,7 @@ describe('ProductService — xoá', () => {
       softDeleteUnits,
     });
 
-    await expect(service.remove('product-id', 'caller-id')).rejects.toMatchObject({
+    await expect(service.remove('product-id', ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.RECORD_NOT_FOUND,
     });
     expect(softDeleteProduct).not.toHaveBeenCalled();
@@ -1094,7 +1112,7 @@ describe('ProductService — xoá', () => {
       softDeleteUnits,
     });
 
-    await expect(service.remove('product-id', 'caller-id')).resolves.toEqual({ success: true });
+    await expect(service.remove('product-id', ACTOR)).resolves.toEqual({ success: true });
 
     expect(softDeleteUnits).toHaveBeenCalledWith(expect.anything(), ['row-vien', 'row-vi'], 'caller-id');
     expect(softDeleteProduct).toHaveBeenCalledWith(expect.anything(), 'product-id', 'caller-id');
@@ -1106,6 +1124,193 @@ describe('ProductService — xoá', () => {
       softDeleteProduct: jest.fn().mockRejectedValue(new Error('update failed')),
     });
 
-    await expect(service.remove('product-id', 'caller-id')).rejects.toThrow('update failed');
+    await expect(service.remove('product-id', ACTOR)).rejects.toThrow('update failed');
+  });
+});
+
+describe('ProductService — nhật ký', () => {
+  const detail = (overrides: Record<string, unknown> = {}) => ({
+    ...existingProduct,
+    name: 'Paracetamol 500mg',
+    status: RecordStatus.ACTIVE,
+    requiresPrescription: false,
+    isControlled: false,
+    units: [
+      { id: 'row-vien', salePrice: 500, conversionRate: 1, unit: { id: 'unit-vien' } },
+      { id: 'row-vi', salePrice: 4500, conversionRate: 10, unit: { id: 'unit-vi' } },
+    ],
+    ...overrides,
+  });
+
+  it('tạo ghi PRODUCT.CREATED, branchIds [], nhãn = mã, tìm theo mã + tên', async () => {
+    const audit = makeAudit();
+    const service = makeService({ findDetailWith: jest.fn().mockResolvedValue(detail()) }, {}, audit);
+
+    await service.create(validCreatePayload(), ACTOR);
+
+    const [, actor] = audit.record.mock.calls[0] as [unknown, Record<string, unknown>];
+    expect(actor).toMatchObject({ userId: 'caller-id', type: 'USER', ip: '10.0.0.1', requestId: 'req-1' });
+    expect(recordedEntries(audit)).toEqual([
+      expect.objectContaining({
+        event: 'PRODUCT.CREATED',
+        entityType: 'products',
+        entityId: 'product-id',
+        entityLabel: 'SP0001',
+        branchIds: [],
+        searchTerms: ['SP0001', 'Paracetamol 500mg'],
+      }),
+    ]);
+  });
+
+  it('sửa tên ghi PRODUCT.UPDATED chỉ với trường đổi', async () => {
+    const audit = makeAudit();
+    const findDetailWith = jest
+      .fn()
+      .mockResolvedValueOnce(detail())
+      .mockResolvedValueOnce(detail({ name: 'Paracetamol 650mg' }));
+    const service = makeService({ findDetailWith }, {}, audit);
+
+    await service.update('product-id', { name: 'Paracetamol 650mg' }, ACTOR);
+
+    expect(recordedEntries(audit)).toEqual([
+      {
+        event: 'PRODUCT.UPDATED',
+        entityType: 'products',
+        entityId: 'product-id',
+        entityLabel: 'SP0001',
+        branchIds: [],
+        before: { name: 'Paracetamol 500mg' },
+        after: { name: 'Paracetamol 650mg' },
+        searchTerms: ['SP0001', 'Paracetamol 650mg'],
+      },
+    ]);
+  });
+
+  it('chỉ đổi status ghi PRODUCT.STATUS_CHANGED', async () => {
+    const audit = makeAudit();
+    const findDetailWith = jest
+      .fn()
+      .mockResolvedValueOnce(detail())
+      .mockResolvedValueOnce(detail({ status: RecordStatus.INACTIVE }));
+    const service = makeService({ findDetailWith }, {}, audit);
+
+    await service.update('product-id', { status: RecordStatus.INACTIVE }, ACTOR);
+
+    expect(recordedEntries(audit)).toEqual([
+      expect.objectContaining({
+        event: 'PRODUCT.STATUS_CHANGED',
+        before: { status: 'ACTIVE' },
+        after: { status: 'INACTIVE' },
+      }),
+    ]);
+  });
+
+  it('đổi isControlled ghi PRODUCT.CONTROL_FLAGS_CHANGED', async () => {
+    const audit = makeAudit();
+    const findDetailWith = jest
+      .fn()
+      .mockResolvedValueOnce(detail())
+      .mockResolvedValueOnce(detail({ isControlled: true, name: 'Tên mới' }));
+    const service = makeService({ findDetailWith }, {}, audit);
+
+    await service.update('product-id', { isControlled: true, name: 'Tên mới' } as never, ACTOR);
+
+    const entries = recordedEntries(audit);
+    expect(entries).toHaveLength(2);
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: 'PRODUCT.UPDATED',
+          before: { name: 'Paracetamol 500mg' },
+          after: { name: 'Tên mới' },
+        }),
+        expect.objectContaining({
+          event: 'PRODUCT.CONTROL_FLAGS_CHANGED',
+          entityId: 'product-id',
+          entityLabel: 'SP0001',
+          branchIds: [],
+          before: { isControlled: false },
+          after: { isControlled: true },
+        }),
+      ]),
+    );
+  });
+
+  it('đổi salePrice của đơn vị ghi PRODUCT.PRICE_CHANGED', async () => {
+    const audit = makeAudit();
+    const findDetailWith = jest
+      .fn()
+      .mockResolvedValueOnce(detail())
+      .mockResolvedValueOnce(
+        detail({
+          units: [
+            { id: 'row-vien', salePrice: 600, conversionRate: 1, unit: { id: 'unit-vien' } },
+            { id: 'row-vi', salePrice: 4500, conversionRate: 10, unit: { id: 'unit-vi' } },
+          ],
+        }),
+      );
+    const service = makeService(
+      {
+        findDetailWith,
+        findUnitsForReconcile: jest.fn().mockResolvedValue([
+          { id: 'row-vien', unitId: 'unit-vien', isDeleted: false },
+          { id: 'row-vi', unitId: 'unit-vi', isDeleted: false },
+        ]),
+      },
+      {},
+      audit,
+    );
+
+    await service.update(
+      'product-id',
+      {
+        units: [
+          { unitId: 'unit-vien', conversionRate: 1, salePrice: 600, isBaseUnit: true },
+          { unitId: 'unit-vi', conversionRate: 10, salePrice: 4500, isBaseUnit: false },
+        ],
+      },
+      ACTOR,
+    );
+
+    expect(recordedEntries(audit)).toEqual([
+      {
+        event: 'PRODUCT.PRICE_CHANGED',
+        entityType: 'products',
+        entityId: 'product-id',
+        entityLabel: 'SP0001',
+        branchIds: [],
+        before: { unitId: 'unit-vien', salePrice: 500 },
+        after: { unitId: 'unit-vien', salePrice: 600 },
+        amount: 600n,
+        searchTerms: ['SP0001', 'Paracetamol 500mg'],
+      },
+    ]);
+  });
+
+  it('không trường theo dõi nào đổi thì không gọi record', async () => {
+    const audit = makeAudit();
+    const service = makeService({ findDetailWith: jest.fn().mockResolvedValue(detail()) }, {}, audit);
+
+    await service.update('product-id', { indications: 'mới' } as never, ACTOR);
+
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('xoá ghi PRODUCT.DELETED với ảnh chụp trước', async () => {
+    const audit = makeAudit();
+    const service = makeService({ findDetailWith: jest.fn().mockResolvedValue(detail()) }, {}, audit);
+
+    await service.remove('product-id', ACTOR);
+
+    expect(recordedEntries(audit)).toEqual([
+      expect.objectContaining({
+        event: 'PRODUCT.DELETED',
+        entityId: 'product-id',
+        entityLabel: 'SP0001',
+        branchIds: [],
+        before: expect.objectContaining({ code: 'SP0001', name: 'Paracetamol 500mg' }) as unknown,
+        searchTerms: ['SP0001', 'Paracetamol 500mg'],
+      }),
+    ]);
   });
 });

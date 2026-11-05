@@ -13,6 +13,7 @@ import {
   PosProductQuery,
   PreviewAllocationRequest,
   ReplaceOrderItemsRequest,
+  VoidPaidOrderRequest,
 } from './dtos/order.request';
 import { OrderVoidAndPreviewService } from './order-void-and-preview.service';
 import { OrderService } from './order.service';
@@ -110,11 +111,12 @@ export class OrderController {
   @RequirePermissions('order:cancel')
   @Post(':id/void')
   @ApiOperation({
-    description: 'Huỷ hoá đơn tại quầy ĐÃ THU (COMPLETED): hoàn tiền (REFUNDED) + hàng về đúng lô đã bán (RETURN_IN).',
+    description:
+      'Huỷ hoá đơn tại quầy ĐÃ THU (COMPLETED): bắt buộc lý do + số tiền đã hoàn (refundAmount, refundMethod); ghi dòng payments REFUND, hàng về đúng lô đã bán (RETURN_IN).',
   })
   voidPaid(
     @Param('id', new ParseUUIDPipe()) id: string,
-    @Body() dto: CancelOrderRequest,
+    @Body() dto: VoidPaidOrderRequest,
     @CurrentActor() actor: RequestActor,
   ) {
     return this.afterSale.voidPaid(id, dto, actor);

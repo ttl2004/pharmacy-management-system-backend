@@ -1,10 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Cron } from '@nestjs/schedule';
 import { Auth, Prisma, Role, User, UserStatus } from '@prisma/client';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { ErrorCode } from 'src/common/types/error-code';
+import type { RequestContext } from 'src/common/decorators/request-context';
+import { SecurityEventService } from 'src/providers/security-event/security-event.service';
+import { isStaffRole } from '../permission/staff-role';
 import { AuthConfig } from './auth.config';
 import { authError } from './auth.error';
 import { SessionStore, SessionTransactions } from './session.store';
@@ -22,12 +25,15 @@ type UserWithRole = User & { role: Role };
 
 @Injectable()
 export class TokenService {
+  private readonly logger = new Logger(TokenService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly transactions: SessionTransactions,
     private readonly sessions: SessionStore,
     private readonly jwt: JwtService,
     private readonly config: AuthConfig,
+    private readonly security: SecurityEventService,
   ) {}
 
   private hash(token: string) {
@@ -55,7 +61,8 @@ export class TokenService {
   }
 
   /** Đăng nhập một máy: thu hồi mọi phiên cũ và cấp phiên mới trong cùng transaction, khoá theo người dùng. */
-  async login(auth: Auth, metadata: TokenMetadata): Promise<TokenPair> {
+  async login(auth: Auth, ctx: RequestContext): Promise<TokenPair> {
+    const metadata: TokenMetadata = { userAgent: ctx.userAgent ?? undefined, ip: ctx.ip ?? undefined };
     const sid = randomUUID();
     const pair = await this.transactions.forUser(auth.userId, async (tx) => {
       // Kiểm tra lại thông tin đăng nhập sau khi lấy khóa: mật khẩu có thể đã được đổi
@@ -70,7 +77,15 @@ export class TokenService {
         where: { userId: user.id, revokedAt: null },
         data: { revokedAt: new Date() },
       });
-      return this.issue(tx, user, sid, metadata);
+      const issued = await this.issue(tx, user, sid, metadata);
+      // Cùng transaction: đăng nhập rollback thì không còn dòng LOGIN_OK.
+      if (isStaffRole(user.role.code)) {
+        await this.security.record(
+          [{ type: 'AUTH.LOGIN_OK', actorId: user.id, actorRoleCode: user.role.code, sessionId: sid, context: ctx }],
+          tx,
+        );
+      }
+      return issued;
     });
     await this.sessions.activate(sid, auth.userId, this.config.refreshTtl);
     return pair;
@@ -80,19 +95,37 @@ export class TokenService {
    * Cấp AT mới từ RT. Không cần transaction hay khoá: chỉ đọc phiên và ghi lần sử dụng. Phiên bị thu hồi xen giữa
    * thì AT vừa cấp cũng không dùng được — mỗi request đều kiểm phiên (`SessionStore.isActive`).
    */
-  async refresh(raw: string | undefined): Promise<{ accessToken: string }> {
+  async refresh(raw: string | undefined, ctx: RequestContext): Promise<{ accessToken: string }> {
     if (!raw) throw authError(ErrorCode.INVALID_TOKEN);
     const token = await this.prisma.refreshToken.findFirst({ where: { tokenHash: this.hash(raw) } });
     if (!token) throw authError(ErrorCode.INVALID_TOKEN);
     if (token.revokedAt) throw authError(ErrorCode.SESSION_REVOKED);
     if (token.expiresAt.getTime() <= Date.now()) throw authError(ErrorCode.TOKEN_EXPIRED);
 
-    const user = await this.prisma.user.findFirst({
-      where: { id: token.userId, isDeleted: false, status: UserStatus.ACTIVE },
-      include: { role: true },
-    });
+    // Đọc không lọc trạng thái để biết vai trò khi từ chối; một câu truy vấn như trước.
+    const found = await this.prisma.user.findFirst({ where: { id: token.userId }, include: { role: true } });
+    const user = found && !found.isDeleted && found.status === UserStatus.ACTIVE ? found : null;
     if (!user) {
       await this.sessions.revoke(token.sid);
+      if (found && isStaffRole(found.role.code)) {
+        // Lỗi ghi audit không được đổi SESSION_REVOKED thành 500.
+        await this.security
+          .record([
+            {
+              type: 'AUTH.REFRESH_DENIED_INACTIVE',
+              actorId: found.id,
+              actorRoleCode: found.role.code,
+              sessionId: token.sid,
+              context: ctx,
+            },
+          ])
+          .catch((error: unknown) =>
+            this.logger.error(
+              'Không ghi được AUTH.REFRESH_DENIED_INACTIVE',
+              error instanceof Error ? error.stack : String(error),
+            ),
+          );
+      }
       throw authError(ErrorCode.SESSION_REVOKED);
     }
     // RT cố định cho cả phiên: chỉ cấp AT mới và cập nhật lần sử dụng.

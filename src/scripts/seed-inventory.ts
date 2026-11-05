@@ -34,6 +34,8 @@ const SYSTEM_ACTOR: RequestActor = {
     roleLevel: 100,
   },
   ip: null,
+  userAgent: null,
+  requestId: null,
 };
 
 async function bootstrap() {

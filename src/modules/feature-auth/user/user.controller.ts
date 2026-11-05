@@ -1,7 +1,9 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
+import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+import { DeleteReasonQuery } from 'src/common/dtos/delete-reason.query';
 import { AuthzGuard } from '../authz/guards/auth.guard';
 import type { JwtUser } from '../authz/types/authz.types';
 import { RequirePermissions } from '../permission/decorators/require-permissions.decorator';
@@ -49,23 +51,34 @@ export class UserController {
   @ApiOperation({
     description: 'Tạo người dùng. Gửi kèm username/password thì tạo luôn tài khoản đăng nhập.',
   })
-  create(@Body() dto: CreateUserRequest, @CurrentUser() user: JwtUser) {
-    return this.userService.create(dto, user);
+  create(@Body() dto: CreateUserRequest, @CurrentActor() actor: RequestActor) {
+    return this.userService.create(dto, actor);
   }
 
   @RequirePermissions('user:update')
   @Patch(':id')
   @ApiOperation({
-    description: 'Sửa hồ sơ, chi nhánh, trạng thái. Không đổi vai trò — dùng PATCH /permission/users/:userId/role.',
+    description:
+      'Sửa hồ sơ, chi nhánh, trạng thái (khoá/ngừng tài khoản thì đăng xuất người đó khỏi mọi thiết bị; `reason` tuỳ chọn). Không đổi vai trò — dùng PATCH /permission/users/:userId/role.',
   })
-  update(@Param('id', new ParseUUIDPipe()) id: string, @Body() dto: UpdateUserRequest, @CurrentUser() user: JwtUser) {
-    return this.userService.update(id, dto, user);
+  update(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: UpdateUserRequest,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.userService.update(id, dto, actor);
   }
 
   @RequirePermissions('user:delete')
   @Delete(':id')
-  @ApiOperation({ description: 'Xoá mềm người dùng và thu hồi toàn bộ phiên đăng nhập của họ.' })
-  remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentUser() user: JwtUser) {
-    return this.userService.remove(id, user);
+  @ApiOperation({
+    description: 'Xoá mềm người dùng và thu hồi toàn bộ phiên đăng nhập của họ. `?reason=` (tuỳ chọn) ghi vào nhật ký.',
+  })
+  remove(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Query() query: DeleteReasonQuery,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.userService.remove(id, actor, query.reason);
   }
 }

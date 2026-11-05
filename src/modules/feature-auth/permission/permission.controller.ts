@@ -1,7 +1,21 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Put,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
+import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+import { DeleteReasonQuery } from 'src/common/dtos/delete-reason.query';
 import { AuthzGuard } from '../authz/guards/auth.guard';
 import type { JwtUser } from '../authz/types/authz.types';
 import { AnyAuthenticated, RequirePermissions } from './decorators/require-permissions.decorator';
@@ -53,8 +67,7 @@ export class PermissionController {
   @RequirePermissions('permission:read')
   @Get('roles')
   @ApiOperation({
-    description:
-      'Danh sách vai trò kèm số quyền, số người dùng, cờ hệ thống; sắp theo cấp bậc giảm dần.',
+    description: 'Danh sách vai trò kèm số quyền, số người dùng, cờ hệ thống; sắp theo cấp bậc giảm dần.',
   })
   roles() {
     return this.roleAdminService.getRoles();
@@ -66,15 +79,18 @@ export class PermissionController {
     description:
       'Tạo vai trò tự tạo (luôn gắn một chi nhánh). Mã sinh từ tên; cấp bậc phải lớn hơn CUSTOMER và nhỏ hơn cấp người tạo.',
   })
-  createRole(@Body() dto: CreateRoleRequest, @CurrentUser() user: JwtUser) {
-    return this.roleAdminService.createRole(dto, user);
+  createRole(@Body() dto: CreateRoleRequest, @CurrentActor() actor: RequestActor) {
+    return this.roleAdminService.createRole(dto, actor);
   }
 
   @RequirePermissions('permission:update')
   @Delete('roles/:code')
-  @ApiOperation({ description: 'Xoá mềm vai trò tự tạo (mã được nhả để dùng lại). Vai trò hệ thống trả 1504; còn người dùng chưa xoá trả 1510.' })
-  deleteRole(@Param('code') code: string, @CurrentUser() user: JwtUser) {
-    return this.roleAdminService.deleteRole(code, user);
+  @ApiOperation({
+    description:
+      'Xoá mềm vai trò tự tạo (mã được nhả để dùng lại). Vai trò hệ thống trả 1504; còn người dùng chưa xoá trả 1510. `?reason=` (tuỳ chọn) ghi vào nhật ký.',
+  })
+  deleteRole(@Param('code') code: string, @Query() query: DeleteReasonQuery, @CurrentActor() actor: RequestActor) {
+    return this.roleAdminService.deleteRole(code, actor, query.reason);
   }
 
   @RequirePermissions('permission:read')
@@ -88,28 +104,28 @@ export class PermissionController {
   @Put('roles/:code/permissions')
   @ApiOperation({
     description:
-      'Ghi đè toàn bộ tập quyền của vai trò. Quyền không có trong danh sách gửi lên sẽ bị thu hồi. Không sửa được SUPER_ADMIN.',
+      'Ghi đè toàn bộ tập quyền của vai trò. Quyền không có trong danh sách gửi lên sẽ bị thu hồi. Không sửa được SUPER_ADMIN. `reason` bắt buộc (một lý do chung cho cả lần lưu).',
   })
   replaceRolePermissions(
     @Param('code') code: string,
     @Body() dto: ReplaceRolePermissionsRequest,
-    @CurrentUser() user: JwtUser,
+    @CurrentActor() actor: RequestActor,
   ) {
-    return this.permissionService.replaceRolePermissions(code, dto.permissionCodes, user);
+    return this.permissionService.replaceRolePermissions(code, dto.permissionCodes, actor, dto.reason);
   }
 
   @RequirePermissions('user:role:update')
   @Patch('users/:userId/role')
   @ApiOperation({
     description:
-      'Đổi vai trò cho một người dùng. Không đổi được vai trò của chính mình; người ngoài phạm vi chi nhánh trả 1200.',
+      'Đổi vai trò cho một người dùng. `reason` bắt buộc. Không đổi được vai trò của chính mình; người ngoài phạm vi chi nhánh trả 1200.',
   })
   assignRole(
     // Cột `users.id` là uuid: id sai định dạng phải trả 400, nếu không Prisma ném P2023 thành 500.
     @Param('userId', new ParseUUIDPipe()) userId: string,
     @Body() dto: AssignRoleRequest,
-    @CurrentUser() user: JwtUser,
+    @CurrentActor() actor: RequestActor,
   ) {
-    return this.permissionService.assignRole(userId, dto.roleCode, user);
+    return this.permissionService.assignRole(userId, dto.roleCode, actor, dto.reason);
   }
 }

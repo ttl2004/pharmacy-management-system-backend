@@ -1,6 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { TokenService, TokenMetadata } from './token.service';
+import { LoginFailureMonitor } from './login-failure.monitor';
+import { BruteForceDetector } from './brute-force.detector';
+import { TokenService } from './token.service';
+import { SessionStore, SessionTransactions } from './session.store';
+import type { RequestContext } from 'src/common/decorators/request-context';
+import { SecurityEventService } from 'src/providers/security-event/security-event.service';
+import { isStaffRole } from '../permission/staff-role';
 import { authError } from './auth.error';
 import * as bcrypt from 'bcrypt';
 import { SYSTEM_ACTOR_ID } from 'src/common/constants/app.constant';
@@ -17,6 +23,12 @@ import { JwtUser } from './types/authz.types';
 import { AuthzRepository } from './repositories/authz.repository';
 import { PrismaService } from 'src/common/databases/prisma.service';
 
+function isLoginInvalid(error: unknown): boolean {
+  if (!(error instanceof UnauthorizedException)) return false;
+  const body = error.getResponse() as { code?: number };
+  return body?.code === ErrorCode.LOGIN_INVALID;
+}
+
 @Injectable()
 export class AuthzService extends AbstractBaseService<Auth> {
   private readonly authzLogger = new Logger(AuthzService.name);
@@ -29,6 +41,11 @@ export class AuthzService extends AbstractBaseService<Auth> {
     // Đọc thẳng qua Prisma thay vì dùng RoleRepository: PermissionModule import AuthzModule,
     // nên AuthzModule không được phép import ngược lại.
     private readonly prisma: PrismaService,
+    private readonly sessions: SessionStore,
+    private readonly security: SecurityEventService,
+    private readonly loginFailures: LoginFailureMonitor,
+    private readonly bruteForce: BruteForceDetector,
+    private readonly sessionTransactions: SessionTransactions,
   ) {
     super(authzRepository);
   }
@@ -111,19 +128,99 @@ export class AuthzService extends AbstractBaseService<Auth> {
     }
   }
 
-  async login(dto: LoginRequest, metadata: TokenMetadata = {}) {
+  async login(dto: LoginRequest, ctx: RequestContext) {
     const authz = await this.getAuthzByUsername(dto.username);
     // Trả cùng thông báo và đều so sánh bcrypt khi tên đăng nhập không tồn tại hoặc mật khẩu sai.
     const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
     const valid = await bcrypt.compare(dto.password, authz?.password ?? dummyHash);
-    if (!authz || !valid || !authz.user || authz.user.isDeleted || authz.user.status !== UserStatus.ACTIVE) {
+    const user = authz?.user;
+    if (!authz || !user || !valid || user.isDeleted || user.status !== UserStatus.ACTIVE) {
+      this.recordLoginFailureDetached(user, ctx);
       throw authError(ErrorCode.LOGIN_INVALID);
     }
-    return this.tokens.login(authz, metadata);
+    try {
+      return await this.tokens.login(authz, ctx);
+    } catch (error) {
+      // Mật khẩu/trạng thái đổi trong lúc bcrypt chạy: tính như đăng nhập thất bại.
+      if (isLoginInvalid(error)) this.recordLoginFailureDetached(user, ctx);
+      throw error;
+    }
   }
 
-  async refreshToken(token: string | undefined) {
-    return this.tokens.refresh(token);
+  /**
+   * Nhân viên: ghi `LOGIN_FAILED` rồi kiểm tra dò mật khẩu (D4, không khoá). Khách hàng: không ghi gì (D2).
+   * Username không tồn tại: không ghi từng lần, chỉ đếm theo IP và báo một dòng `LOGIN_FAILED_BURST` (D3).
+   * Mọi trường hợp client đều nhận cùng `LOGIN_INVALID`.
+   */
+  /**
+   * Không await: nhánh nhân viên không được tốn thêm thời gian so với username lạ/khách hàng (lộ username qua thời
+   * gian phản hồi), và lỗi ghi audit không được đổi `LOGIN_INVALID` thành 500.
+   */
+  private recordLoginFailureDetached(
+    user: { id: string; role: { code: string } } | null | undefined,
+    ctx: RequestContext,
+  ): void {
+    void this.recordLoginFailure(user, ctx).catch((error: unknown) =>
+      this.authzLogger.error(
+        'Không ghi được sự kiện đăng nhập thất bại',
+        error instanceof Error ? error.stack : String(error),
+      ),
+    );
+  }
+
+  private async recordLoginFailure(
+    user: { id: string; role: { code: string } } | null | undefined,
+    ctx: RequestContext,
+  ) {
+    if (!user) {
+      const result = this.loginFailures.recordUnknownUsername(ctx.ip);
+      if (result.burst) {
+        await this.security.record([
+          {
+            type: 'AUTH.LOGIN_FAILED_BURST',
+            actorId: null,
+            context: ctx,
+            metadata: { count: result.count, windowStart: result.windowStart.toISOString() },
+          },
+        ]);
+      }
+      return;
+    }
+    if (!isStaffRole(user.role.code)) return;
+    await this.security.record([
+      { type: 'AUTH.LOGIN_FAILED', actorId: user.id, actorRoleCode: user.role.code, context: ctx },
+    ]);
+    await this.bruteForce.check(user.id, user.role.code, ctx);
+  }
+
+  async refreshToken(token: string | undefined, ctx: RequestContext) {
+    return this.tokens.refresh(token, ctx);
+  }
+
+  /** Thu hồi mọi phiên của người dùng; nhân viên thì ghi `AUTH.LOGOUT_ALL`. */
+  async logoutAll(user: JwtUser, ctx: RequestContext) {
+    // Thu hồi phiên và sự kiện LOGOUT_ALL cùng một transaction (có khoá phiên): không có sự kiện nào mà phiên còn sống,
+    // cũng không có thu hồi nào mất dấu.
+    await this.sessionTransactions.forUser(user.userId, async (tx) => {
+      await tx.refreshToken.updateMany({
+        where: { userId: user.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      if (isStaffRole(user.role)) {
+        await this.security.record(
+          [
+            {
+              type: 'AUTH.LOGOUT_ALL',
+              actorId: user.userId,
+              actorRoleCode: user.role,
+              sessionId: user.sid,
+              context: ctx,
+            },
+          ],
+          tx,
+        );
+      }
+    });
   }
   async logout(sid: string, token: string | undefined) {
     await this.tokens.logout(sid, token);

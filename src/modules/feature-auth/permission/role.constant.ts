@@ -88,6 +88,7 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'branch-product:read',
     'branch-product:update',
     'audit-log:read',
+    'security-event:read',
     'transfer:read',
     'transfer:create',
     'transfer:ship',
@@ -97,6 +98,7 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'stock-adjustment:create',
     'stock-adjustment:confirm',
     'stock-adjustment:cancel',
+    'internal-use-type:manage',
     'stock-batch:block',
     // Bán hàng — phạm vi chi nhánh do service ép (ma trận bán hàng 2026-10-16).
     'order:read',

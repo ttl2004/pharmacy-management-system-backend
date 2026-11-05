@@ -1,16 +1,18 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, Product, ProductType, RecordStatus } from '@prisma/client';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { lockAdvisoryKeys } from 'src/common/databases/advisory-lock';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { CatalogTransactions, productWriteLocks } from '../catalog-transactions';
 import { CreateProductRequest, ProductUnitRequest, UpdateProductRequest } from './dtos/product.request';
 import { ProductQuery } from './dtos/product.query';
-import { productCreatedEntry, productDeletedEntry, productUpdatedEntry } from './product-audit';
+import { productCreatedEntry, productDeletedEntry, productUpdatedEntries } from './product-audit';
 import { toExtraCreateData, toExtraUpdateData } from './product-extra-fields.mapper';
 import {
   DRUG_INGREDIENTS_SEARCH_FIELD,
@@ -53,7 +55,8 @@ export class ProductService extends AbstractBaseService<Product> {
     return product;
   }
 
-  async create(dto: CreateProductRequest, callerId: string): Promise<ProductDetail> {
+  async create(dto: CreateProductRequest, actor: RequestActor): Promise<ProductDetail> {
+    const callerId = actor.user.userId;
     this.assertUnitConfig(dto.units, dto.baseUnitId, dto.barcode ?? null);
 
     let created: ProductDetail | null;
@@ -111,7 +114,7 @@ export class ProductService extends AbstractBaseService<Product> {
         );
 
         const detail = await this.productRepository.findDetailWith(tx, product.id);
-        if (detail) await this.audit.record(tx, [productCreatedEntry(callerId, product.id, detail)]);
+        if (detail) await this.audit.record(tx, auditActorOf(actor), [productCreatedEntry(product.id, detail)]);
         return detail;
       });
     } catch (error) {
@@ -122,7 +125,8 @@ export class ProductService extends AbstractBaseService<Product> {
     return created;
   }
 
-  async update(id: string, dto: UpdateProductRequest, callerId: string): Promise<ProductDetail> {
+  async update(id: string, dto: UpdateProductRequest, actor: RequestActor): Promise<ProductDetail> {
+    const callerId = actor.user.userId;
     if (Object.keys(dto).length === 0) throw this.badRequest('Cần gửi ít nhất một trường để cập nhật');
 
     let updated: ProductDetail | null;
@@ -186,8 +190,8 @@ export class ProductService extends AbstractBaseService<Product> {
         if (locationIds) await this.productRepository.replaceLocations(tx, id, locationIds);
 
         const detail = await this.productRepository.findDetailWith(tx, id);
-        const entry = detail && productUpdatedEntry(callerId, id, existing, detail);
-        if (entry) await this.audit.record(tx, [entry]);
+        const entries = detail ? productUpdatedEntries(id, existing, detail) : [];
+        if (entries.length) await this.audit.record(tx, auditActorOf(actor), entries);
         return detail;
       });
     } catch (error) {
@@ -202,7 +206,8 @@ export class ProductService extends AbstractBaseService<Product> {
    * Xoá mềm Product cùng toàn bộ ProductUnit đang hoạt động trong một transaction. Không xoá vật lý
    * để chứng từ kho/đơn hàng về sau vẫn tham chiếu được lịch sử.
    */
-  async remove(id: string, callerId: string): Promise<{ success: true }> {
+  async remove(id: string, actor: RequestActor): Promise<{ success: true }> {
+    const callerId = actor.user.userId;
     await this.transactions.write(productWriteLocks(id, []), async (tx) => {
       const existing = await this.productRepository.findDetailWith(tx, id);
       if (!existing) throw this.notFound();
@@ -218,7 +223,7 @@ export class ProductService extends AbstractBaseService<Product> {
 
       await this.productRepository.softDeleteUnits(tx, activeIds, callerId);
       await this.productRepository.softDeleteProduct(tx, id, callerId);
-      await this.audit.record(tx, [productDeletedEntry(callerId, id, existing)]);
+      await this.audit.record(tx, auditActorOf(actor), [productDeletedEntry(id, existing)]);
     });
 
     return { success: true };

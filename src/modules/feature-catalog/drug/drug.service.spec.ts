@@ -1,4 +1,6 @@
 import { RecordStatus } from '@prisma/client';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
+import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import type { DrugSourceRecord } from './drug-source.client';
@@ -30,6 +32,13 @@ const sourceDrug = (code: string): DrugSourceRecord => ({
 
 const TX = { marker: 'tx' };
 
+const ACTOR: RequestActor = {
+  user: { userId: 'caller-id', sid: 's', email: null, role: AuthRole.ADMIN, branchId: null, roleLevel: 80 },
+  ip: '10.0.0.1',
+  userAgent: 'jest',
+  requestId: 'req-1',
+};
+
 function makeService(
   repositoryOverrides: Record<string, jest.Mock> = {},
   fetchAll: jest.Mock = jest.fn().mockResolvedValue([]),
@@ -42,11 +51,12 @@ function makeService(
     upsertAll: jest.fn().mockImplementation((_tx: unknown, drugs: unknown[]) => drugs.length),
     countStale: jest.fn().mockResolvedValue(0),
     deactivateStale: jest.fn().mockResolvedValue(0),
-    syncProductPrescription: jest.fn().mockResolvedValue(0),
+    syncProductPrescription: jest.fn().mockResolvedValue([]),
     ...repositoryOverrides,
   };
-  const service = new DrugService(repository as never, { fetchAll } as never);
-  return { service, repository };
+  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const service = new DrugService(repository as never, { fetchAll } as never, audit as never);
+  return { service, repository, audit };
 }
 
 describe('DrugService — danh sách', () => {
@@ -91,12 +101,16 @@ describe('DrugService — đồng bộ', () => {
         countActive: jest.fn().mockResolvedValue(20),
         countStale: jest.fn().mockResolvedValue(1),
         deactivateStale: jest.fn().mockResolvedValue(1),
-        syncProductPrescription: jest.fn().mockResolvedValue(3),
+        syncProductPrescription: jest.fn().mockResolvedValue([
+          { id: 'p1', code: 'SP1', before: false, after: true },
+          { id: 'p2', code: 'SP2', before: false, after: true },
+          { id: 'p3', code: 'SP3', before: true, after: false },
+        ]),
       },
       jest.fn().mockResolvedValue(drugs),
     );
 
-    const result = await service.sync('caller-id');
+    const result = await service.sync(ACTOR);
 
     expect(repository.upsertAll).toHaveBeenCalledWith(TX, drugs, expect.any(Date), 'caller-id');
     const syncedAt = (repository.upsertAll.mock.calls[0] as unknown[])[2] as Date;
@@ -117,7 +131,7 @@ describe('DrugService — đồng bộ', () => {
     });
     const { service } = makeService({ withSyncLock }, fetchAll);
 
-    await service.sync('caller-id');
+    await service.sync(ACTOR);
 
     expect(order).toEqual(['lock', 'fetch']);
   });
@@ -127,14 +141,14 @@ describe('DrugService — đồng bộ', () => {
     const fetchAll = jest.fn();
     const { service } = makeService({ withSyncLock: jest.fn().mockRejectedValue(busy) }, fetchAll);
 
-    await expect(service.sync('caller-id')).rejects.toBe(busy);
+    await expect(service.sync(ACTOR)).rejects.toBe(busy);
     expect(fetchAll).not.toHaveBeenCalled();
   });
 
   it('nguồn trả rỗng thì huỷ, không ghi gì', async () => {
     const { service, repository } = makeService({}, jest.fn().mockResolvedValue([]));
 
-    await expect(service.sync('caller-id')).rejects.toMatchObject({ errorCode: ErrorCode.DRUG_SOURCE_UNAVAILABLE });
+    await expect(service.sync(ACTOR)).rejects.toMatchObject({ errorCode: ErrorCode.DRUG_SOURCE_UNAVAILABLE });
     expect(repository.upsertAll).not.toHaveBeenCalled();
   });
 
@@ -142,7 +156,7 @@ describe('DrugService — đồng bộ', () => {
     const failure = new ErrorException({ code: ErrorCode.DRUG_SOURCE_UNAVAILABLE, message: 'down' });
     const { service, repository } = makeService({}, jest.fn().mockRejectedValue(failure));
 
-    await expect(service.sync('caller-id')).rejects.toBe(failure);
+    await expect(service.sync(ACTOR)).rejects.toBe(failure);
     expect(repository.upsertAll).not.toHaveBeenCalled();
   });
 
@@ -152,7 +166,7 @@ describe('DrugService — đồng bộ', () => {
       jest.fn().mockResolvedValue([sourceDrug('A')]),
     );
 
-    await expect(service.sync('caller-id')).rejects.toMatchObject({ errorCode: ErrorCode.DRUG_SYNC_SUSPICIOUS });
+    await expect(service.sync(ACTOR)).rejects.toMatchObject({ errorCode: ErrorCode.DRUG_SYNC_SUSPICIOUS });
     expect(repository.deactivateStale).not.toHaveBeenCalled();
   });
 
@@ -162,22 +176,103 @@ describe('DrugService — đồng bộ', () => {
       { countActive: jest.fn().mockResolvedValue(100), countStale: jest.fn().mockResolvedValue(10) },
       jest.fn().mockResolvedValue(drugs),
     );
-    await atLimit.service.sync('caller-id');
+    await atLimit.service.sync(ACTOR);
     expect(atLimit.repository.deactivateStale).toHaveBeenCalled();
 
     const forced = makeService(
       { countActive: jest.fn().mockResolvedValue(100), countStale: jest.fn().mockResolvedValue(90) },
       jest.fn().mockResolvedValue(drugs),
     );
-    await forced.service.sync('caller-id', true);
+    await forced.service.sync(ACTOR, true);
     expect(forced.repository.deactivateStale).toHaveBeenCalled();
   });
 
   it('lần đồng bộ đầu (chưa có thuốc nào) không bị rào chặn', async () => {
     const { service, repository } = makeService({}, jest.fn().mockResolvedValue([sourceDrug('A')]));
 
-    await service.sync('caller-id');
+    await service.sync(ACTOR);
 
     expect(repository.deactivateStale).toHaveBeenCalled();
+  });
+
+  it('sync ghi DRUG.SYNCED + PRODUCT.CONTROL_FLAGS_CHANGED cho từng sản phẩm đổi cờ, 1 lần record', async () => {
+    const changed = [
+      { id: 'p1', code: 'SP1', before: false, after: true },
+      { id: 'p2', code: 'SP2', before: true, after: false },
+    ];
+    const { service, audit } = makeService(
+      {
+        countActive: jest.fn().mockResolvedValue(20),
+        countStale: jest.fn().mockResolvedValue(1),
+        deactivateStale: jest.fn().mockResolvedValue(1),
+        syncProductPrescription: jest.fn().mockResolvedValue(changed),
+      },
+      jest.fn().mockResolvedValue([sourceDrug('A'), sourceDrug('B')]),
+    );
+
+    await service.sync(ACTOR);
+
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [tx, actor, entries] = audit.record.mock.calls[0] as [
+      unknown,
+      Record<string, unknown>,
+      Record<string, unknown>[],
+    ];
+    expect(tx).toBe(TX);
+    expect(actor).toMatchObject({ userId: 'caller-id', type: 'USER', ip: '10.0.0.1', requestId: 'req-1' });
+    expect(entries).toHaveLength(3);
+    const synced = entries[0];
+    expect(synced).toMatchObject({
+      event: 'DRUG.SYNCED',
+      entityType: 'drugs',
+      entityLabel: 'Đồng bộ CSDL Dược',
+      branchIds: [],
+      metadata: { total: 2, upserted: 2, deactivated: 1, productsUpdated: 2, force: false },
+    });
+    expect(synced.entityId).toMatch(/^[0-9a-f-]{36}$/);
+    expect((synced.metadata as Record<string, unknown>).syncId).toBe(synced.entityId);
+    expect(entries.slice(1)).toEqual([
+      {
+        event: 'PRODUCT.CONTROL_FLAGS_CHANGED',
+        entityType: 'products',
+        entityId: 'p1',
+        entityLabel: 'SP1',
+        branchIds: [],
+        before: { requiresPrescription: false },
+        after: { requiresPrescription: true },
+        metadata: { syncId: synced.entityId },
+      },
+      {
+        event: 'PRODUCT.CONTROL_FLAGS_CHANGED',
+        entityType: 'products',
+        entityId: 'p2',
+        entityLabel: 'SP2',
+        branchIds: [],
+        before: { requiresPrescription: true },
+        after: { requiresPrescription: false },
+        metadata: { syncId: synced.entityId },
+      },
+    ]);
+  });
+
+  it('sync không đổi sản phẩm nào → chỉ DRUG.SYNCED', async () => {
+    const { service, audit } = makeService({}, jest.fn().mockResolvedValue([sourceDrug('A')]));
+
+    await service.sync(ACTOR);
+
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    const [, , entries] = audit.record.mock.calls[0] as [unknown, unknown, Record<string, unknown>[]];
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ event: 'DRUG.SYNCED', metadata: { productsUpdated: 0 } });
+  });
+
+  it('sync bị rào tỉ lệ chặn thì không ghi nhật ký', async () => {
+    const { service, audit } = makeService(
+      { countActive: jest.fn().mockResolvedValue(100), countStale: jest.fn().mockResolvedValue(11) },
+      jest.fn().mockResolvedValue([sourceDrug('A')]),
+    );
+
+    await expect(service.sync(ACTOR)).rejects.toMatchObject({ errorCode: ErrorCode.DRUG_SYNC_SUSPICIOUS });
+    expect(audit.record).not.toHaveBeenCalled();
   });
 });

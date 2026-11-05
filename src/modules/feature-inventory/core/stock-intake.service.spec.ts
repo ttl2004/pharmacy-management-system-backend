@@ -47,9 +47,8 @@ function makeIntake(lockedRows: IntakeBatch[]) {
   };
   const ledger = { apply: jest.fn().mockResolvedValue([]), lockBatches: jest.fn().mockResolvedValue(lockedRows) };
   const ctx: InventoryTxContext = { tx: {} as never, afterCommit: jest.fn() };
-  const audit = { record: jest.fn() };
-  const intake = new StockIntakeService(batches as never, ledger as never, audit as never);
-  return { intake, batches, ledger, audit, ctx };
+  const intake = new StockIntakeService(batches as never, ledger as never);
+  return { intake, batches, ledger, ctx };
 }
 
 const request = (lines: IntakeLine[]) => ({
@@ -166,29 +165,37 @@ describe('StockIntakeService', () => {
       return setup;
     }
 
-    it('cùng số lô bị thu hồi nơi khác → lô mới RECALLED, cùng lý do và người thu hồi, có nhật ký; hàng vẫn vào sổ', async () => {
-      const { intake, batches, ledger, audit, ctx } = intakeCreating({ recallReason: 'QĐ 9/QLD', recalledBy: 'admin' });
-      await intake.intake(ctx, request([line()]));
+    it('cùng số lô bị thu hồi nơi khác → lô mới RECALLED, cùng lý do và người thu hồi, trả entry nhật ký; hàng vẫn vào sổ', async () => {
+      const { intake, batches, ledger, ctx } = intakeCreating({ recallReason: 'QĐ 9/QLD', recalledBy: 'admin' });
+      const result = await intake.intake(ctx, request([line()]));
       const [, rows] = batches.insertSkipExisting.mock.calls[0] as [unknown, NewBatchRow[]];
       expect(batches.markRecalled).toHaveBeenCalledWith(
         {},
         [{ id: rows[0].id, reason: 'QĐ 9/QLD', recalledBy: 'admin' }],
         'actor',
       );
-      const [, entries] = audit.record.mock.calls[0] as [unknown, Record<string, unknown>[]];
-      expect(entries[0]).toMatchObject({
-        entityId: rows[0].id,
-        before: { status: 'AVAILABLE' },
-        after: { status: 'RECALLED' },
-        reason: 'QĐ 9/QLD',
-      });
+      // Caller (phiếu nhập, nhận điều chuyển) gom entry này vào lần record duy nhất của transaction.
+      expect(result.auditEntries).toEqual([
+        expect.objectContaining({
+          event: 'BATCH.RECALLED',
+          entityType: 'stock_batches',
+          entityId: rows[0].id,
+          entityLabel: 'L1',
+          branchIds: ['br'],
+          before: { status: 'AVAILABLE' },
+          after: { status: 'RECALLED', inheritedRecallBy: 'admin' },
+          metadata: { inherited: true },
+          reason: 'QĐ 9/QLD',
+        }),
+      ]);
       expect(ledger.apply).toHaveBeenCalled();
     });
 
-    it('không có thu hồi nào → không đổi trạng thái', async () => {
+    it('không có thu hồi nào → không đổi trạng thái, không có entry', async () => {
       const { intake, batches, ctx } = intakeCreating({});
-      await intake.intake(ctx, request([line()]));
+      const result = await intake.intake(ctx, request([line()]));
       expect(batches.markRecalled).not.toHaveBeenCalled();
+      expect(result.auditEntries).toEqual([]);
     });
 
     it('lô ĐÃ CÓ từ trước giữ trạng thái của nó dù nơi khác đã thu hồi', async () => {

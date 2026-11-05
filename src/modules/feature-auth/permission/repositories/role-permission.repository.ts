@@ -10,8 +10,8 @@ export class RolePermissionRepository extends PrismaBaseRepository<RolePermissio
   }
 
   /** Mã các quyền đang hoạt động của một vai trò. Guard gọi hàm này ở mỗi request. */
-  async findGrantedCodes(roleId: string): Promise<string[]> {
-    const rows = await this.prisma.rolePermission.findMany({
+  async findGrantedCodes(roleId: string, client?: Prisma.TransactionClient): Promise<string[]> {
+    const rows = await (client ?? this.prisma).rolePermission.findMany({
       where: { roleId, isDeleted: false },
       select: { permission: { select: { code: true } } },
     });

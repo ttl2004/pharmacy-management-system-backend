@@ -90,6 +90,7 @@ src/
 |---|---|---|
 | `PORT` | Port HTTP server | `3790` |
 | `CORS_ORIGINS` | Origin frontend được gọi API kèm cookie, ngăn cách bằng dấu phẩy (vd. `http://localhost:5790`). Để trống: chặn mọi lời gọi chéo origin | (trống) |
+| `TRUST_PROXY` | Số proxy tin cậy phía trước app (0–5), dùng để xác định IP client từ `X-Forwarded-For` | `0` |
 | `DATABASE_URL` | Chuỗi kết nối PostgreSQL, dạng `postgresql://user:password@host:5432/dbname?connection_limit=10&pool_timeout=20`. Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`). Luôn đặt `connection_limit` — DB chỉ có 60 kết nối dùng chung | (bắt buộc) |
 | `DB_LOGGING` | In câu SQL ra log | `false` |
 | `JWT_ACCESS_SECRET` | Secret ký access JWT, tối thiểu 32 ký tự | (bắt buộc) |
@@ -108,6 +109,12 @@ src/
 | `SUPER_ADMIN_GENDER` | `MALE`, `FEMALE` hoặc `OTHER` | — |
 
 > ENV authentication được validate khi khởi động. Xem [hướng dẫn authentication](docs/AUTHENTICATION.md) để chuyển cấu hình cũ, test Swagger, tích hợp frontend và chuẩn bị Redis.
+
+### TRUST_PROXY
+
+- `0`: app không đứng sau proxy, `request.ip` là địa chỉ socket và bỏ qua `X-Forwarded-For`.
+- `N` (1–5): app đứng sau đúng N proxy tin cậy (nginx, load balancer...); IP client lấy từ `X-Forwarded-For` đã đi qua N proxy đó.
+- Đặt sai giá trị thì IP ghi vào nhật ký sai hoặc bị giả mạo qua header, và có thể khoá nhầm người dùng khác theo IP.
 
 > **Không commit file `.env`** — đã được liệt kê trong `.gitignore`.
 
@@ -158,6 +165,13 @@ Thứ tự này không tuỳ tiện: `seed:users` cần vai trò (do `seed:permi
 (`src/common/constants/app.constant.ts`), tên "Hệ thống", trạng thái INACTIVE, không có tài khoản đăng nhập. Seed
 và job ghi id này vào `createdBy`/`updatedBy`; nó phải là người dùng thật để các cột người thao tác gắn được khoá
 ngoại sang `users` (bắt đầu từ nhóm bảng kho).
+
+### Nhật ký thao tác là bất biến
+
+- `audit_logs` và `security_events` chỉ cho thêm: trigger `audit_block_mutation` chặn UPDATE/DELETE/TRUNCATE (lỗi `append-only`).
+- Dọn DB dev: `npx prisma migrate reset` (**xoá sạch toàn bộ dữ liệu DB dev — sẽ mất dữ liệu**), hoặc trong code test dùng `withAuditMaintenance` (`src/test-support/db-test.ts`) — bật cờ `app.audit_maintenance` trong một transaction. `npm run test:db` chạy trên schema riêng `audit_db_test`.
+- Giới hạn đã biết (D7): app đang kết nối bằng superuser `postgres` nên về kỹ thuật trigger vẫn tắt được. Trước khi deploy thật phải tạo role DB riêng (NOSUPERUSER, không có UPDATE/DELETE/TRUNCATE trên hai bảng log, đặt `ALTER DEFAULT PRIVILEGES`), tách `DATABASE_URL` cho app và `DIRECT_URL` cho migrate/seed.
+- IP ghi vào nhật ký phụ thuộc cấu hình proxy — xem [TRUST_PROXY](#trust_proxy).
 
 Xem cấu hình tại: `src/common/configs/configuration.ts` và `src/common/databases/prisma.service.ts`.
 

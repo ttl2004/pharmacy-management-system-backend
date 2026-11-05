@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Role, User } from '@prisma/client';
+import { Prisma, Role, User } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { PrismaBaseRepository } from 'src/providers/abstract-base/repositories/prisma-base.repository';
 
@@ -24,8 +24,8 @@ export class UserRepository extends PrismaBaseRepository<User> {
    * Lấy user kèm vai trò — vai trò nằm ở bảng `roles` từ khi chuyển sang khoá ngoại.
    * Vai trò đã xoá mềm coi như không có user (fail closed: không cấp quyền nào).
    */
-  async findByIdWithRole(id: string): Promise<(User & { role: Role }) | null> {
-    return this.prisma.user.findFirst({
+  async findByIdWithRole(id: string, client?: Prisma.TransactionClient): Promise<(User & { role: Role }) | null> {
+    return (client ?? this.prisma).user.findFirst({
       where: { id, isDeleted: false, role: { isDeleted: false } },
       include: { role: true },
     });

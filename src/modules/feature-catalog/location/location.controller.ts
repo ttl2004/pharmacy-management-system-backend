@@ -1,9 +1,8 @@
 import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
-import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthzGuard } from '../../feature-auth/authz/guards/auth.guard';
-import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
 import { CreateLocationRequest } from './dtos/location.request';
@@ -28,7 +27,7 @@ export class LocationController {
   @RequirePermissions('product:create')
   @Post()
   @ApiOperation({ description: 'Tạo vị trí. Tên trùng (không phân biệt hoa thường) → 1601.' })
-  create(@Body() dto: CreateLocationRequest, @CurrentUser() user: JwtUser) {
-    return this.locationService.create(dto, user.userId);
+  create(@Body() dto: CreateLocationRequest, @CurrentActor() actor: RequestActor) {
+    return this.locationService.create(dto, actor);
   }
 }

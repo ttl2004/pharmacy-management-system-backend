@@ -137,4 +137,11 @@ export class UpdateUserRequest {
   @IsUUID()
   @ApiPropertyOptional({ nullable: true })
   branchId?: string | null;
+
+  /** Lý do đổi trạng thái (tuỳ chọn), ghi vào nhật ký `USER.STATUS_CHANGED`. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  @ApiPropertyOptional({ maxLength: 500 })
+  reason?: string;
 }

@@ -1,10 +1,25 @@
 import { Prisma, RecordStatus } from '@prisma/client';
 import { ErrorCode } from 'src/common/types/error-code';
+import type { JwtUser } from 'src/modules/feature-auth/authz/types/authz.types';
+import { AuthRole } from 'src/common/types/common.enum';
+import { ADMIN_ACTOR, entriesOf, fakePrisma } from 'src/test-support/audit-harness';
 import { BranchService } from './branch.service';
+
+const admin = {
+  userId: 'caller-id',
+  sid: 'sid',
+  email: null,
+  role: AuthRole.ADMIN,
+  branchId: null,
+  roleLevel: 80,
+} as unknown as JwtUser;
+
+const audit = { record: jest.fn() };
+beforeEach(() => audit.record.mockClear());
 
 function makeService(repositoryOverrides: Record<string, jest.Mock> = {}) {
   const repository = {
-    findOne: jest.fn(),
+    findOne: jest.fn().mockResolvedValue({ id: 'id' }),
     findManyWithPagination: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
@@ -13,7 +28,7 @@ function makeService(repositoryOverrides: Record<string, jest.Mock> = {}) {
     hasOpenInventory: jest.fn().mockResolvedValue(false),
     ...repositoryOverrides,
   } as never;
-  return new BranchService(repository);
+  return new BranchService(repository, fakePrisma() as never, audit as never);
 }
 
 function duplicateError(target = 'code'): Prisma.PrismaClientKnownRequestError {
@@ -35,7 +50,7 @@ describe('BranchService — danh sách', () => {
     });
     const service = makeService({ findManyWithPagination });
 
-    await service.list({ page: 2, limit: 5, status: RecordStatus.INACTIVE, search: 'CN' });
+    await service.list({ page: 2, limit: 5, status: RecordStatus.INACTIVE, search: 'CN' }, admin);
 
     expect(findManyWithPagination).toHaveBeenCalledWith(
       { status: RecordStatus.INACTIVE },
@@ -58,7 +73,7 @@ describe('BranchService — danh sách', () => {
     });
     const service = makeService({ findManyWithPagination });
 
-    await service.list({ page: 1, limit: 10 });
+    await service.list({ page: 1, limit: 10 }, admin);
 
     expect(findManyWithPagination).toHaveBeenCalledWith({}, expect.anything());
   });
@@ -68,7 +83,7 @@ describe('BranchService — chi tiết', () => {
   it('không tồn tại thì báo RECORD_NOT_FOUND', async () => {
     const service = makeService({ findOne: jest.fn().mockResolvedValue(null) });
 
-    await expect(service.getDetail('khong-co')).rejects.toMatchObject({
+    await expect(service.getDetail('khong-co', admin)).rejects.toMatchObject({
       errorCode: ErrorCode.RECORD_NOT_FOUND,
     });
   });
@@ -81,15 +96,16 @@ describe('BranchService — tạo', () => {
 
     await service.create(
       { code: 'CN004', name: 'Quận 7', phone: '0900000004', address: 'Quận 7' } as never,
-      'caller-id',
+      ADMIN_ACTOR,
     );
 
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
         code: 'CN004',
         status: RecordStatus.ACTIVE,
-        createdBy: 'caller-id',
+        createdBy: 'admin-1',
       }),
+      expect.anything(),
     );
   });
 
@@ -97,7 +113,7 @@ describe('BranchService — tạo', () => {
     const service = makeService({ create: jest.fn().mockRejectedValue(duplicateError()) });
 
     await expect(
-      service.create({ code: 'CN001', name: 'X', phone: '0900000001', address: 'Y' } as never, 'caller-id'),
+      service.create({ code: 'CN001', name: 'X', phone: '0900000001', address: 'Y' } as never, ADMIN_ACTOR),
     ).rejects.toMatchObject({ errorCode: ErrorCode.DUPLICATE_CODE });
   });
 });
@@ -106,7 +122,7 @@ describe('BranchService — cập nhật', () => {
   it('body rỗng thì báo HTTP_BAD_REQUEST', async () => {
     const service = makeService({});
 
-    await expect(service.update('id', {}, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('id', {}, ADMIN_ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.HTTP_BAD_REQUEST,
     });
   });
@@ -119,9 +135,9 @@ describe('BranchService — cập nhật', () => {
     });
     const service = makeService({ update });
 
-    await service.update('id', { phone: '0900000099' } as never, 'caller-id');
+    await service.update('id', { phone: '0900000099' } as never, ADMIN_ACTOR);
 
-    expect(payload).toEqual({ phone: '0900000099', updatedBy: 'caller-id' });
+    expect(payload).toEqual({ phone: '0900000099', updatedBy: 'admin-1' });
   });
 
   it('gửi null để xoá email và giờ mở cửa', async () => {
@@ -132,15 +148,15 @@ describe('BranchService — cập nhật', () => {
     });
     const service = makeService({ update });
 
-    await service.update('id', { email: null, openingHours: null } as never, 'caller-id');
+    await service.update('id', { email: null, openingHours: null } as never, ADMIN_ACTOR);
 
-    expect(payload).toEqual({ email: null, openingHours: null, updatedBy: 'caller-id' });
+    expect(payload).toEqual({ email: null, openingHours: null, updatedBy: 'admin-1' });
   });
 
   it('không tồn tại thì báo RECORD_NOT_FOUND', async () => {
     const service = makeService({ update: jest.fn().mockResolvedValue(null) });
 
-    await expect(service.update('id', { name: 'X' } as never, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('id', { name: 'X' } as never, ADMIN_ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.RECORD_NOT_FOUND,
     });
   });
@@ -148,7 +164,7 @@ describe('BranchService — cập nhật', () => {
   it('trùng code thì báo DUPLICATE_CODE', async () => {
     const service = makeService({ update: jest.fn().mockRejectedValue(duplicateError()) });
 
-    await expect(service.update('id', { code: 'CN001' } as never, 'caller-id')).rejects.toMatchObject({
+    await expect(service.update('id', { code: 'CN001' } as never, ADMIN_ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.DUPLICATE_CODE,
     });
   });
@@ -163,7 +179,7 @@ describe('BranchService — xoá', () => {
       softDelete,
     });
 
-    await expect(service.remove('id')).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
+    await expect(service.remove('id', ADMIN_ACTOR)).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
     expect(softDelete).not.toHaveBeenCalled();
   });
 
@@ -175,21 +191,117 @@ describe('BranchService — xoá', () => {
       softDelete,
     });
 
-    await expect(service.remove('id')).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
+    await expect(service.remove('id', ADMIN_ACTOR)).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
     expect(softDelete).not.toHaveBeenCalled();
   });
 
   it('không tồn tại thì báo RECORD_NOT_FOUND', async () => {
     const service = makeService({ findOne: jest.fn().mockResolvedValue(null) });
 
-    await expect(service.remove('id')).rejects.toMatchObject({ errorCode: ErrorCode.RECORD_NOT_FOUND });
+    await expect(service.remove('id', ADMIN_ACTOR)).rejects.toMatchObject({ errorCode: ErrorCode.RECORD_NOT_FOUND });
   });
 
   it('hợp lệ thì xoá mềm và trả success', async () => {
     const softDelete = jest.fn().mockResolvedValue(true);
     const service = makeService({ findOne: jest.fn().mockResolvedValue({ id: 'id' }), softDelete });
 
-    await expect(service.remove('id')).resolves.toEqual({ success: true });
-    expect(softDelete).toHaveBeenCalledWith({ id: 'id' });
+    await expect(service.remove('id', ADMIN_ACTOR)).resolves.toEqual({ success: true });
+    expect(softDelete).toHaveBeenCalledWith({ id: 'id' }, expect.anything());
+  });
+});
+
+describe('BranchService — nhật ký', () => {
+  const BRANCH = {
+    id: 'br-1',
+    code: 'CN001',
+    name: 'Trung tâm',
+    phone: '0900000001',
+    email: null,
+    address: 'Q1',
+    openingHours: null,
+    status: RecordStatus.ACTIVE,
+  };
+  const updateEcho = jest.fn().mockImplementation((_f: unknown, d: object) => Promise.resolve({ ...BRANCH, ...d }));
+
+  it('create ghi BRANCH.CREATED, branchIds [id chi nhánh], SĐT bị che', async () => {
+    const create = jest.fn().mockImplementation((d: object) => Promise.resolve({ ...BRANCH, ...d }));
+    const service = makeService({ create });
+
+    await service.create(
+      { code: 'CN001', name: 'Trung tâm', phone: '0900000001', address: 'Q1' } as never,
+      ADMIN_ACTOR,
+    );
+
+    expect(entriesOf(audit)).toMatchObject([
+      {
+        event: 'BRANCH.CREATED',
+        entityType: 'branches',
+        entityId: 'br-1',
+        entityLabel: 'CN001',
+        branchIds: ['br-1'],
+        searchTerms: ['CN001', 'Trung tâm'],
+        after: { phone: '******0001', name: 'Trung tâm' },
+      },
+    ]);
+  });
+
+  it('update ghi BRANCH.UPDATED với diff, SĐT bị che ở cả before lẫn after', async () => {
+    const service = makeService({ findOne: jest.fn().mockResolvedValue(BRANCH), update: updateEcho });
+
+    await service.update('br-1', { phone: '0900000099', name: 'Mới' } as never, ADMIN_ACTOR);
+
+    expect(entriesOf(audit)).toMatchObject([
+      {
+        event: 'BRANCH.UPDATED',
+        branchIds: ['br-1'],
+        before: { name: 'Trung tâm', phone: '******0001' },
+        after: { name: 'Mới', phone: '******0099' },
+      },
+    ]);
+  });
+
+  it('update đổi status vẫn ghi BRANCH.UPDATED (không có event STATUS_CHANGED riêng cho chi nhánh)', async () => {
+    const service = makeService({ findOne: jest.fn().mockResolvedValue(BRANCH), update: updateEcho });
+
+    await service.update('br-1', { status: RecordStatus.INACTIVE } as never, ADMIN_ACTOR);
+
+    expect(entriesOf(audit)[0]).toMatchObject({ event: 'BRANCH.UPDATED', after: { status: 'INACTIVE' } });
+  });
+
+  it('update không đổi gì thì không ghi entry', async () => {
+    const service = makeService({ findOne: jest.fn().mockResolvedValue(BRANCH), update: updateEcho });
+
+    await service.update('br-1', { name: 'Trung tâm' } as never, ADMIN_ACTOR);
+
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('remove ghi BRANCH.DELETED kèm reason tuỳ chọn', async () => {
+    const service = makeService({
+      findOne: jest.fn().mockResolvedValue(BRANCH),
+      softDelete: jest.fn().mockResolvedValue(true),
+    });
+
+    await service.remove('br-1', ADMIN_ACTOR, 'Đóng cửa hàng');
+
+    expect(entriesOf(audit)).toMatchObject([
+      {
+        event: 'BRANCH.DELETED',
+        branchIds: ['br-1'],
+        reason: 'Đóng cửa hàng',
+        before: { code: 'CN001' },
+      },
+    ]);
+  });
+
+  it('remove không có reason vẫn ghi', async () => {
+    const service = makeService({
+      findOne: jest.fn().mockResolvedValue(BRANCH),
+      softDelete: jest.fn().mockResolvedValue(true),
+    });
+
+    await service.remove('br-1', ADMIN_ACTOR);
+
+    expect(entriesOf(audit)[0]).toMatchObject({ event: 'BRANCH.DELETED', reason: null });
   });
 });

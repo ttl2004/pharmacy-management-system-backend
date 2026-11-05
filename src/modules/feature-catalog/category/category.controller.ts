@@ -1,9 +1,8 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
-import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthzGuard } from '../../feature-auth/authz/guards/auth.guard';
-import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
 import { CategoryService } from './category.service';
@@ -38,8 +37,8 @@ export class CategoryController {
   @RequirePermissions('category:create')
   @Post()
   @ApiOperation({ description: 'Tạo nhóm sản phẩm. Bỏ trống parentId để tạo nhóm gốc.' })
-  create(@Body() dto: CreateCategoryRequest, @CurrentUser() user: JwtUser) {
-    return this.categoryService.create(dto, user.userId);
+  create(@Body() dto: CreateCategoryRequest, @CurrentActor() actor: RequestActor) {
+    return this.categoryService.create(dto, actor);
   }
 
   @RequirePermissions('category:update')
@@ -50,15 +49,15 @@ export class CategoryController {
   update(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: UpdateCategoryRequest,
-    @CurrentUser() user: JwtUser,
+    @CurrentActor() actor: RequestActor,
   ) {
-    return this.categoryService.update(id, dto, user.userId);
+    return this.categoryService.update(id, dto, actor);
   }
 
   @RequirePermissions('category:delete')
   @Delete(':id')
   @ApiOperation({ description: 'Xoá mềm nhóm sản phẩm. Từ chối nếu còn nhóm con hoặc sản phẩm tham chiếu.' })
-  remove(@Param('id', new ParseUUIDPipe()) id: string) {
-    return this.categoryService.remove(id);
+  remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
+    return this.categoryService.remove(id, actor);
   }
 }

@@ -1,17 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import {
-  AdjustmentType,
-  AuditAction,
-  Prisma,
-  ReceiptStatus,
-  RecordStatus,
-  StockMovementType,
-  StockRefType,
-} from '@prisma/client';
+import { AdjustmentType, Prisma, ReceiptStatus, RecordStatus, StockMovementType, StockRefType } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorCode } from 'src/common/types/error-code';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { adjustmentEvent } from 'src/providers/audit-log/audit-events';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { DocumentCodeService } from '../core/document-code.service';
 import {
@@ -35,7 +29,12 @@ import {
 } from './dtos/adjustment.request';
 import { adjustmentListWhere, adjustmentOrderBy } from './adjustment-list-filters';
 import { NO_RETURN_MONEY, PurchaseReturnMoneyService, type ReturnLineInput } from './purchase-return-money.service';
-import { AdjustmentDetail, AdjustmentRepository, type DraftBatch } from './repositories/adjustment.repository';
+import {
+  AdjustmentDetail,
+  AdjustmentHead,
+  AdjustmentRepository,
+  type DraftBatch,
+} from './repositories/adjustment.repository';
 
 /** Loại phiếu → loại bút toán sổ kho (bảng ánh xạ trong thiết kế CSDL). */
 export const ADJUSTMENT_MOVEMENT_TYPE: Record<AdjustmentType, StockMovementType> = {
@@ -80,14 +79,33 @@ function lineMoneyOf(
   return { returnPrice: found?.returnPrice ?? null, goodsReceiptItemId: found?.goodsReceiptItemId ?? null };
 }
 
-/** Một bước đổi trạng thái phiếu, để ghi nhật ký. */
+/**
+ * Một bước đổi trạng thái phiếu, để ghi nhật ký. `reason` luôn có: lý do của phiếu (xác nhận) hoặc của lệnh huỷ —
+ * huỷ hàng / trả NCC bắt buộc lý do (`adjustmentEvent`).
+ */
 interface StatusChange {
-  adjustmentId: string;
-  branchId: string;
+  head: Pick<AdjustmentHead, 'id' | 'code' | 'branchId' | 'type'>;
   from: ReceiptStatus;
   to: ReceiptStatus;
-  reason?: string;
-  lossValue?: number;
+  reason: string;
+  amount?: bigint;
+  severity?: 1;
+}
+
+/** Phần chung của mọi dòng nhật ký phiếu điều chỉnh: nhãn + từ khoá = mã phiếu (D8), phạm vi = chi nhánh phiếu. */
+function adjustmentAudit(doc: { id: string; code: string; branchId: string }) {
+  return {
+    entityType: AUDIT_ENTITY.STOCK_ADJUSTMENT,
+    entityId: doc.id,
+    entityLabel: doc.code,
+    branchIds: [doc.branchId],
+    searchTerms: [doc.code],
+  };
+}
+
+/** Tiền của phiếu cho cột `amount`: trả NCC → tổng tiền NCC cần trả; loại khác → giá trị hàng mất (bigint). */
+function adjustmentAmount(type: AdjustmentType, totalAmount: bigint, lossValue: number): bigint {
+  return type === AdjustmentType.RETURN_TO_SUPPLIER ? totalAmount : BigInt(lossValue);
 }
 
 const errors = documentErrors('Phiếu điều chỉnh');
@@ -210,7 +228,10 @@ export class AdjustmentService {
       if (isStockTake) await this.assertNoPendingStockTake(tx, batchIds);
       const money = isReturn
         ? await this.returnMoney.build(tx, {
-            dto, branchId, supplierId: dto.supplierId as string, lines: this.returnLines(dto.items, draftLines, batchById),
+            dto,
+            branchId,
+            supplierId: dto.supplierId as string,
+            lines: this.returnLines(dto.items, draftLines, batchById),
           })
         : null;
 
@@ -236,16 +257,13 @@ export class AdjustmentService {
         tx,
         items.map((item) => ({ ...item, ...lineMoneyOf(money, item.batchId), adjustmentId: id, createdBy: actorId })),
       );
-      await this.audit.record(tx, [
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId,
-          action: AuditAction.CREATE,
-          entityType: AUDIT_ENTITY.STOCK_ADJUSTMENT,
-          entityId: id,
-          branchId,
+          event: adjustmentEvent(dto.type, 'CREATED'),
+          ...adjustmentAudit({ id, code, branchId }),
+          ...(money ? { amount: money.header.totalAmount } : {}),
           after: { code, type: dto.type, lines: items.length },
           reason: dto.reason,
-          ipAddress: actor.ip,
         },
       ]);
       return this.mustFind(tx, id);
@@ -269,7 +287,10 @@ export class AdjustmentService {
       const head = await this.adjustments.findHead(tx, id, branchWhere(resolveBranchScope(actor.user)));
       if (!head) throw errors.notFound();
       if (head.status !== ReceiptStatus.DRAFT) throw errors.wrongState(head.status);
-      const claimed = await this.adjustments.transition(tx, id, ReceiptStatus.DRAFT, { updatedAt: new Date(), updatedBy: actorId });
+      const claimed = await this.adjustments.transition(tx, id, ReceiptStatus.DRAFT, {
+        updatedAt: new Date(),
+        updatedBy: actorId,
+      });
       if (!claimed) throw errors.wrongState();
 
       const isReturn = head.type === AdjustmentType.RETURN_TO_SUPPLIER;
@@ -307,12 +328,18 @@ export class AdjustmentService {
       if (isStockTake) {
         const pending = await this.adjustments.findPendingStockTake(tx, batchIds, id);
         if (pending) {
-          throw inventoryError(ErrorCode.STOCK_TAKE_PENDING, `lô ${pending.batchNumber} đang nằm trong phiếu ${pending.code}`);
+          throw inventoryError(
+            ErrorCode.STOCK_TAKE_PENDING,
+            `lô ${pending.batchNumber} đang nằm trong phiếu ${pending.code}`,
+          );
         }
       }
       const money = isReturn
         ? await this.returnMoney.build(tx, {
-            dto, branchId: head.branchId, supplierId: dto.supplierId as string, excludeId: id,
+            dto,
+            branchId: head.branchId,
+            supplierId: dto.supplierId as string,
+            excludeId: id,
             lines: this.returnLines(dto.items, draftLines, batchById),
           })
         : null;
@@ -332,17 +359,20 @@ export class AdjustmentService {
         internalUseTypeId: dto.internalUseTypeId ?? null,
         ...(money?.header ?? NO_RETURN_MONEY),
       });
-      await this.adjustments.replaceItems(tx, id, items.map((item) => ({ ...item, ...lineMoneyOf(money, item.batchId) })));
-      await this.audit.record(tx, [
+      await this.adjustments.replaceItems(
+        tx,
+        id,
+        items.map((item) => ({ ...item, ...lineMoneyOf(money, item.batchId) })),
+      );
+      const codeChanged = !!code && code !== head.code;
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId,
-          action: AuditAction.UPDATE,
-          entityType: AUDIT_ENTITY.STOCK_ADJUSTMENT,
-          entityId: id,
-          branchId: head.branchId,
-          after: { lines: items.length },
+          event: adjustmentEvent(head.type, 'UPDATED'),
+          ...adjustmentAudit({ ...head, code: code || head.code }),
+          ...(codeChanged ? { searchTerms: [code, head.code], before: { code: head.code } } : {}),
+          ...(money ? { amount: money.header.totalAmount } : {}),
+          after: { ...(codeChanged ? { code } : {}), lines: items.length },
           reason: dto.reason,
-          ipAddress: actor.ip,
         },
       ]);
       return this.mustFind(tx, id);
@@ -379,6 +409,8 @@ export class AdjustmentService {
       const items = await this.adjustments.findItems(tx, id);
       if (head.type === AdjustmentType.RETURN_TO_SUPPLIER) {
         await this.returnMoney.lockSupplierOf(tx, id);
+        // Dưới khoá NCC: nợ tại chi nhánh sau phiếu này không âm (hai phiếu cùng NCC không cùng lọt).
+        await this.returnMoney.assertDebtStaysNonNegative(tx, id);
         // Trả theo phiếu nhập: kiểm lại trần SL / chi phí hoàn (phiếu trả khác có thể đã xác nhận sau lúc lưu nháp).
         if (head.goodsReceiptId) {
           await this.returnMoney.recheckOnConfirm(tx, id, head.goodsReceiptId, items, head.refundExpenses);
@@ -411,11 +443,13 @@ export class AdjustmentService {
       await this.ledger.apply(ctx, entries, actorId, { preLocked: locked });
 
       await this.recordStatus(tx, actor, {
-        adjustmentId: id,
-        branchId: head.branchId,
+        head,
         from: ReceiptStatus.DRAFT,
         to: ReceiptStatus.CONFIRMED,
-        lossValue: lossValueOf(finalized),
+        reason: head.reason,
+        amount: adjustmentAmount(head.type, head.totalAmount, lossValueOf(finalized)),
+        // Kiểm kê lệch sổ: tồn bị sửa theo số đếm — cảnh báo (WARN) để người duyệt nhật ký để ý.
+        ...(head.type === AdjustmentType.STOCK_TAKE && entries.length ? { severity: 1 as const } : {}),
       });
       return this.mustFind(tx, id);
     });
@@ -445,11 +479,11 @@ export class AdjustmentService {
       });
       if (!claimed) throw errors.wrongState();
       await this.recordStatus(tx, actor, {
-        adjustmentId: id,
-        branchId: head.branchId,
+        head,
         from: ReceiptStatus.DRAFT,
         to: ReceiptStatus.CANCELLED,
         reason: dto.reason,
+        ...(head.type === AdjustmentType.RETURN_TO_SUPPLIER ? { amount: head.totalAmount } : {}),
       });
       return this.mustFind(tx, id);
     });
@@ -496,20 +530,18 @@ export class AdjustmentService {
     }
   }
 
-  /** Nhật ký đổi trạng thái phiếu (cùng dạng với phiếu điều chuyển). */
+  /** Nhật ký đổi trạng thái phiếu: event theo loại phiếu (`DISPOSAL.*`, `PURCHASE_RETURN.*`, `STOCK_ADJUSTMENT.*`). */
   private recordStatus(tx: Prisma.TransactionClient, actor: RequestActor, change: StatusChange) {
-    return this.audit.record(tx, [
+    const suffix = change.to === ReceiptStatus.CONFIRMED ? 'CONFIRMED' : 'CANCELLED';
+    return this.audit.record(tx, auditActorOf(actor), [
       {
-        actorId: actor.user.userId,
-        action: AuditAction.STATUS_CHANGE,
-        entityType: AUDIT_ENTITY.STOCK_ADJUSTMENT,
-        entityId: change.adjustmentId,
-        branchId: change.branchId,
+        event: adjustmentEvent(change.head.type, suffix),
+        ...adjustmentAudit(change.head),
+        ...(change.amount === undefined ? {} : { amount: change.amount }),
+        ...(change.severity ? { severity: change.severity } : {}),
         before: { status: change.from },
-        after:
-          change.lossValue === undefined ? { status: change.to } : { status: change.to, lossValue: change.lossValue },
-        reason: change.reason ?? null,
-        ipAddress: actor.ip,
+        after: { status: change.to },
+        reason: change.reason,
       },
     ]);
   }
@@ -521,7 +553,7 @@ export class AdjustmentService {
    */
   private async cancelConfirmed(
     ctx: InventoryTxContext,
-    head: { id: string; type: AdjustmentType; branchId: string },
+    head: AdjustmentHead,
     reason: string,
     actor: RequestActor,
   ): Promise<AdjustmentDetail> {
@@ -529,8 +561,12 @@ export class AdjustmentService {
     const actorId = actor.user.userId;
     const now = new Date();
     const claimed = await this.adjustments.transition(tx, head.id, ReceiptStatus.CONFIRMED, {
-      status: ReceiptStatus.CANCELLED, cancelledAt: now, cancelledBy: actorId, cancelReason: reason,
-      updatedAt: now, updatedBy: actorId,
+      status: ReceiptStatus.CANCELLED,
+      cancelledAt: now,
+      cancelledBy: actorId,
+      cancelReason: reason,
+      updatedAt: now,
+      updatedBy: actorId,
     });
     if (!claimed) throw errors.wrongState();
     // Huỷ phiếu trả NCC làm công nợ tăng lại → khoá NCC như lúc xác nhận.
@@ -542,21 +578,40 @@ export class AdjustmentService {
     const outflows = items.filter((item) => item.quantity < 0);
     const inflows = items.filter((item) => item.quantity > 0);
     await this.intake.returnToBatches(ctx, {
-      type, refType: StockRefType.STOCK_ADJUSTMENT, refId: head.id, actorId, note,
-      lines: outflows.map((item) => ({ batchId: item.batchId, quantity: -item.quantity, unitCost: item.unitCost, refItemId: item.id })),
+      type,
+      refType: StockRefType.STOCK_ADJUSTMENT,
+      refId: head.id,
+      actorId,
+      note,
+      lines: outflows.map((item) => ({
+        batchId: item.batchId,
+        quantity: -item.quantity,
+        unitCost: item.unitCost,
+        refItemId: item.id,
+      })),
     });
     if (inflows.length) {
       await this.ledger.apply(
         ctx,
         inflows.map((item) => ({
-          batchId: item.batchId, type, quantity: -item.quantity, unitCost: item.unitCost,
-          refType: StockRefType.STOCK_ADJUSTMENT, refId: head.id, refItemId: item.id, note,
+          batchId: item.batchId,
+          type,
+          quantity: -item.quantity,
+          unitCost: item.unitCost,
+          refType: StockRefType.STOCK_ADJUSTMENT,
+          refId: head.id,
+          refItemId: item.id,
+          note,
         })),
         actorId,
       );
     }
     await this.recordStatus(tx, actor, {
-      adjustmentId: head.id, branchId: head.branchId, from: ReceiptStatus.CONFIRMED, to: ReceiptStatus.CANCELLED, reason,
+      head,
+      from: ReceiptStatus.CONFIRMED,
+      to: ReceiptStatus.CANCELLED,
+      reason,
+      amount: adjustmentAmount(head.type, head.totalAmount, lossValueOf(items)),
     });
     return this.mustFind(tx, head.id);
   }
@@ -567,7 +622,10 @@ export class AdjustmentService {
     dto: { handlerId?: string; receiverId?: string; internalUseTypeId?: string },
     branchId: string,
   ): Promise<void> {
-    for (const [userId, label] of [[dto.handlerId, 'người xuất/trả'], [dto.receiverId, 'người nhận']] as const) {
+    for (const [userId, label] of [
+      [dto.handlerId, 'người xuất/trả'],
+      [dto.receiverId, 'người nhận'],
+    ] as const) {
       if (userId && !(await this.adjustments.isValidStaff(tx, userId, branchId))) {
         throw invalidReference(`${label} không thuộc chi nhánh hoặc đã ngừng hoạt động`);
       }

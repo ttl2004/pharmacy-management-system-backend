@@ -14,6 +14,7 @@ const product: PosProductRow = {
   name: 'Paracetamol',
   imageUrls: ['https://cdn/p1.jpg'],
   requiresPrescription: false,
+  isControlled: false,
   units: [
     { id: 'vien', conversionRate: 1, salePrice: 500, barcode: null, isBaseUnit: true, unit: { name: 'Viên' } },
     {
@@ -33,7 +34,7 @@ describe('PosProductService', () => {
     findByBarcode: jest.fn(),
     sellableQuantities: jest.fn().mockResolvedValue(new Map([['p1', 25]])),
   };
-  const service = new PosProductService(products as unknown as PosProductRepository);
+  const service = new PosProductService(products as unknown as PosProductRepository, {} as never);
 
   beforeEach(() => jest.clearAllMocks());
 

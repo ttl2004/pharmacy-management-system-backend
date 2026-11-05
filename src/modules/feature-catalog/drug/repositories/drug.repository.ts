@@ -10,6 +10,14 @@ import type { DrugSourceRecord } from '../drug-source.client';
 /** 500 dòng × 25 tham số = 12.500 — xa giới hạn 65.535 tham số của một câu lệnh Postgres. */
 export const UPSERT_BATCH_SIZE = 500;
 
+/** Hàng hoá bị đồng bộ sửa cờ kê đơn. */
+export interface PrescriptionChange {
+  id: string;
+  code: string;
+  before: boolean;
+  after: boolean;
+}
+
 /** Cả lần đồng bộ (tải nguồn + ghi) nằm trong một transaction để giữ khoá — mỗi lượt DB ~100 ms qua pooler. */
 const SYNC_TX_TIMEOUT_MS = 120_000;
 const SYNC_LOCK_KEY = 'drug-catalog-sync';
@@ -76,14 +84,20 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
 
   /**
    * Cờ kê đơn của hàng hoá luôn theo danh mục: nguồn đổi phân loại thì mọi hàng đang trỏ tới thuốc đó đổi theo.
-   * Trả số hàng hoá đã sửa.
+   * Một câu `UPDATE … RETURNING` — trả từng hàng đã sửa (cờ cũ luôn là phủ định cờ mới vì chỉ sửa hàng lệch) để
+   * ghi nhật ký mà không phải đọc lại.
    */
-  syncProductPrescription(tx: Prisma.TransactionClient, syncedAt: Date, actorId: string): Promise<number> {
-    return tx.$executeRaw`
+  syncProductPrescription(
+    tx: Prisma.TransactionClient,
+    syncedAt: Date,
+    actorId: string,
+  ): Promise<PrescriptionChange[]> {
+    return tx.$queryRaw<PrescriptionChange[]>`
       UPDATE "products" p
       SET "requiresPrescription" = d."isPrescription", "updatedAt" = ${syncedAt}, "updatedBy" = ${actorId}::uuid
       FROM "drugs" d
-      WHERE p."drugId" = d."id" AND p."requiresPrescription" <> d."isPrescription"`;
+      WHERE p."drugId" = d."id" AND p."requiresPrescription" <> d."isPrescription"
+      RETURNING p."id" AS "id", p."code" AS "code", NOT d."isPrescription" AS "before", d."isPrescription" AS "after"`;
   }
 
   private staleWhere(syncedAt: Date): Prisma.DrugWhereInput {

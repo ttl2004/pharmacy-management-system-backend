@@ -38,6 +38,7 @@ describe('buildOrderLines', () => {
         unitPrice: 9000,
         totalPrice: 27000n,
         requiresPrescription: false,
+        isControlled: false,
       },
     ]);
   });
@@ -97,6 +98,10 @@ describe('buildOrderLines', () => {
 describe('orderTotals', () => {
   it('tổng = tạm tính + phí ship, tính bằng bigint', () => {
     const lines = buildOrderLines([{ productUnitId: 'a', quantity: 1_000 }], [unit({ id: 'a', salePrice: 5_000_000 })]);
-    expect(orderTotals(lines, 30_000)).toEqual({ subtotalAmount: 5_000_000_000n, totalAmount: 5_000_030_000n });
+    expect(orderTotals(lines, 30_000)).toEqual({
+      subtotalAmount: 5_000_000_000n,
+      discountAmount: 0n,
+      totalAmount: 5_000_030_000n,
+    });
   });
 });

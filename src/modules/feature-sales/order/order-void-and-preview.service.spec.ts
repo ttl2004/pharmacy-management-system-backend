@@ -44,6 +44,7 @@ describe('OrderVoidAndPreviewService', () => {
   const transactions = { run: jest.fn((work: (c: typeof ctx) => unknown) => work(ctx)) };
   const stock = { restock: jest.fn() };
   const audit = { record: jest.fn() };
+  const rollup = { applyOrder: jest.fn() };
   const service = new OrderVoidAndPreviewService(
     orders as unknown as OrderRepository,
     transactions as never,
@@ -51,6 +52,7 @@ describe('OrderVoidAndPreviewService', () => {
     {} as never,
     audit as never,
     {} as never,
+    rollup as never,
   );
   const recorded = () => {
     const [, actor, entries] = audit.record.mock.calls[0] as [unknown, AuditActor, AuditEntry[]];
@@ -123,6 +125,25 @@ describe('OrderVoidAndPreviewService', () => {
       severity: 2,
       metadata: { totalAmount: '100000', refundAmount: '60000', partialRefund: true },
     });
+  });
+
+  it.each([
+    [100000, 100000n],
+    [60000, 60000n],
+  ])('voidPaid đơn 100k hoàn %i → applyOrder(tx, id, -1, -%sn)', async (refundAmount, refund) => {
+    orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));
+    await service.voidPaid('o1', { reason: 'Khách trả', refundAmount, refundMethod: PaymentMethod.CASH }, ss);
+    expect(rollup.applyOrder).toHaveBeenCalledTimes(1);
+    expect(rollup.applyOrder).toHaveBeenCalledWith(tx, 'o1', -1, -refund);
+    expect(orders.createPayment.mock.invocationCallOrder[0]).toBeLessThan(
+      rollup.applyOrder.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('voidPaid đơn 0đ → applyOrder(tx, id, -1, 0n)', async () => {
+    orders.findHead.mockResolvedValue(head({ totalAmount: 0n }));
+    await service.voidPaid('o1', { reason: 'Nhập nhầm' }, ss);
+    expect(rollup.applyOrder).toHaveBeenCalledWith(tx, 'o1', -1, 0n);
   });
 
   it.each([

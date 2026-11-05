@@ -1,4 +1,11 @@
-import { PrismaClient } from '@prisma/client';
+import { PaymentMethod, PrismaClient } from '@prisma/client';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
+import { PrismaService } from 'src/common/databases/prisma.service';
+import { AuthRole } from 'src/common/types/common.enum';
+import { InventoryTransactions } from 'src/modules/feature-inventory/core/inventory-transactions';
+import { OrderVoidAndPreviewService } from 'src/modules/feature-sales/order/order-void-and-preview.service';
+import { OrderService } from 'src/modules/feature-sales/order/order.service';
+import { OrderRepository } from 'src/modules/feature-sales/order/repositories/order.repository';
 import { createTestPrisma, resetSchema } from 'src/test-support/db-test';
 import { ReportBase, seedPaidOrder, seedReportBase } from './report-db-seed';
 import { SalesRollupRepository } from './sales-rollup.repository';
@@ -152,5 +159,114 @@ describe('bảng tổng hợp doanh thu (db)', () => {
     expect(result.days).toBe(5);
     expect(await daily()).toEqual(dailyBefore);
     expect(await products()).toEqual(productsBefore);
+  });
+});
+
+/** Luồng thật qua OrderService / OrderVoidAndPreviewService trên DB thật (kho và nhật ký được thay bằng bản giả). */
+describe('cập nhật tổng hợp trong thu tiền / huỷ hoá đơn (db)', () => {
+  let prisma: PrismaClient;
+  let base: ReportBase;
+  let orders: OrderService;
+  let voids: OrderVoidAndPreviewService;
+  const stock = { consume: jest.fn(), restock: jest.fn() };
+  const audit = { record: jest.fn() };
+  let actor: RequestActor;
+
+  beforeAll(async () => {
+    prisma = await createTestPrisma();
+    const repo = new OrderRepository(prisma as unknown as PrismaService);
+    const transactions = new InventoryTransactions(prisma as unknown as PrismaService);
+    const rollup = new SalesRollupRepository();
+    orders = new OrderService(repo, transactions, stock as never, {} as never, audit as never, {} as never, rollup);
+    voids = new OrderVoidAndPreviewService(
+      repo,
+      transactions,
+      stock as never,
+      {} as never,
+      audit as never,
+      {} as never,
+      rollup,
+    );
+  });
+  afterAll(async () => {
+    jest.useRealTimers();
+    await prisma.$disconnect();
+  });
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    await resetSchema(prisma);
+    base = await seedReportBase(prisma);
+    const role = await prisma.role.create({ data: { code: 'ADMIN', name: 'Quản trị', level: 90 } });
+    const user = await prisma.user.create({ data: { fullName: 'Thu ngân', roleId: role.id } });
+    actor = {
+      user: { userId: user.id, role: AuthRole.ADMIN, branchId: null, roleLevel: 90 },
+      ip: null,
+      userAgent: null,
+      requestId: null,
+    } as unknown as RequestActor;
+  });
+
+  /** Chỉ giả `Date`, giữ nguyên timer thật để driver DB không bị treo. */
+  const setNow = (iso: string) =>
+    jest.useFakeTimers({
+      now: vn(iso).getTime(),
+      doNotFake: [
+        'nextTick',
+        'setImmediate',
+        'clearImmediate',
+        'setInterval',
+        'clearInterval',
+        'setTimeout',
+        'clearTimeout',
+        'queueMicrotask',
+        'performance',
+        'hrtime',
+      ],
+    });
+  const salesDaily = () =>
+    prisma.$queryRaw<{ date: string; orderCount: number; revenue: bigint }[]>`
+      SELECT to_char("date", 'YYYY-MM-DD') AS "date", "orderCount", "revenue" FROM sales_daily ORDER BY "date"`;
+
+  it('luồng thật: thu đơn 100k ngày 1, huỷ hoàn 60k ngày 3 → sales_daily ngày 1: orderCount 0, revenue 40000', async () => {
+    const order = await seedPaidOrder(prisma, base, {
+      branch: 0,
+      completedAt: vn('2026-11-01T00:00:00'),
+      pending: true,
+      lines: [{ product: 0, qty: 10, unitPrice: 10000, unitCost: 4000 }],
+    });
+    setNow('2026-11-01T09:00:00');
+    await orders.payPos(order.id, { method: PaymentMethod.CASH }, actor);
+    expect(await salesDaily()).toEqual([{ date: '2026-11-01', orderCount: 1, revenue: 100000n }]);
+
+    setNow('2026-11-03T14:00:00');
+    await voids.voidPaid(
+      order.id,
+      { reason: 'Khách trả', refundAmount: 60000, refundMethod: PaymentMethod.CASH },
+      actor,
+    );
+    expect(await salesDaily()).toEqual([{ date: '2026-11-01', orderCount: 0, revenue: 40000n }]);
+    const prod = await prisma.salesDailyProduct.findMany();
+    expect(prod).toHaveLength(1);
+    expect(prod[0]).toMatchObject({ qtyBase: 0, revenue: 0n, cogsAmount: 0n });
+
+    // Dựng lại từ dữ liệu gốc ra đúng như cộng dồn từng bước.
+    await prisma.$transaction((tx) => new SalesRollupRepository().rebuild(tx, '2026-11-01', '2026-11-03'));
+    expect(await salesDaily()).toEqual([{ date: '2026-11-01', orderCount: 0, revenue: 40000n }]);
+  });
+
+  it('rollback: thu tiền lỗi sau khi đã cộng tổng hợp → tổng hợp không đổi, đơn vẫn PENDING', async () => {
+    const order = await seedPaidOrder(prisma, base, {
+      branch: 0,
+      completedAt: vn('2026-11-01T00:00:00'),
+      pending: true,
+      lines: [{ product: 0, qty: 1, unitPrice: 10000, unitCost: 4000 }],
+    });
+    // `applyOrder` chạy cuối `payPos`; để lỗi xảy ra SAU nó, thay audit.record (bước kế tiếp) bằng lỗi.
+    audit.record.mockRejectedValueOnce(new Error('ghi nhật ký lỗi'));
+    setNow('2026-11-01T09:00:00');
+    await expect(orders.payPos(order.id, { method: PaymentMethod.CASH }, actor)).rejects.toThrow('ghi nhật ký lỗi');
+    expect(await salesDaily()).toEqual([]);
+    expect(await prisma.salesDailyProduct.count()).toBe(0);
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('PENDING');
   });
 });

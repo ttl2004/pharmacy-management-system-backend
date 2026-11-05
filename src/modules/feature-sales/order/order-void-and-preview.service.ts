@@ -23,6 +23,7 @@ import { OrderStockService } from '../core/order-stock.service';
 import { SALES_AUDIT_ENTITY } from '../core/sales.constants';
 import { orderErrors } from '../core/sales.error';
 import { PreviewAllocationRequest, VoidPaidOrderRequest } from './dtos/order.request';
+import { SalesRollupRepository } from '../../feature-report/sales-rollup.repository';
 import { OrderDetail, OrderRepository } from './repositories/order.repository';
 
 /**
@@ -39,6 +40,7 @@ export class OrderVoidAndPreviewService {
     private readonly allocator: StockAllocationService,
     private readonly audit: AuditLogService,
     private readonly priceBooks: PriceBookService,
+    private readonly rollup: SalesRollupRepository,
   ) {}
 
   /** Chiếm đơn bằng cập nhật có điều kiện COMPLETED trước khi đụng kho — bấm đúp → 1701. */
@@ -84,6 +86,8 @@ export class OrderVoidAndPreviewService {
           createdBy: actorId,
         });
       }
+      // Doanh thu còn lại = tổng − tiền hoàn; số đơn −1; dòng sản phẩm trừ trọn đơn — tất cả vào NGÀY THU GỐC của đơn.
+      await this.rollup.applyOrder(tx, id, -1, -(refund?.amount ?? 0n));
 
       // Cả hai dòng mang lý do huỷ của người thao tác (bắt buộc) và cùng nhãn/từ khoá = mã đơn (D8).
       const common = {

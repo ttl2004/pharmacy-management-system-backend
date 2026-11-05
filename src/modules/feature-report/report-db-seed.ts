@@ -65,6 +65,8 @@ export interface SeedOrderLine {
 export interface SeedOrderInput {
   branch: number;
   completedAt: Date;
+  /** Đơn mới lập, chưa thu: PENDING, không `completedAt`, không thanh toán. */
+  pending?: boolean;
   lines: SeedOrderLine[];
   channel?: OrderChannel;
   /** Có = đơn đã huỷ sau khi thu, với số tiền hoàn tương ứng (0n = đơn 0đ / không hoàn). */
@@ -79,16 +81,17 @@ export async function seedPaidOrder(prisma: PrismaClient, base: ReportBase, inpu
   const branch = base.branches[input.branch];
   const total = input.lines.reduce((s, l) => s + BigInt(l.qty * l.unitPrice), 0n);
   const voided = input.voidedRefund !== undefined;
+  const pending = input.pending === true;
   const order = await prisma.order.create({
     data: {
       code: `DH${String(orderSeq).padStart(6, '0')}`,
       branchId: branch.id,
       channel: input.channel ?? OrderChannel.POS,
-      status: voided ? OrderStatus.CANCELLED : OrderStatus.COMPLETED,
-      paymentStatus: voided ? PaymentStatus.REFUNDED : PaymentStatus.PAID,
+      status: pending ? OrderStatus.PENDING : voided ? OrderStatus.CANCELLED : OrderStatus.COMPLETED,
+      paymentStatus: pending ? PaymentStatus.UNPAID : voided ? PaymentStatus.REFUNDED : PaymentStatus.PAID,
       subtotalAmount: total,
       totalAmount: total,
-      completedAt: input.completedAt,
+      completedAt: pending ? null : input.completedAt,
       cancelledAt: voided ? input.completedAt : null,
       cancelReason: voided ? 'Khách đổi ý' : null,
     },
@@ -118,7 +121,7 @@ export async function seedPaidOrder(prisma: PrismaClient, base: ReportBase, inpu
       },
     });
   }
-  if (total > 0n) {
+  if (total > 0n && !pending) {
     await prisma.payment.create({
       data: {
         orderId: order.id,

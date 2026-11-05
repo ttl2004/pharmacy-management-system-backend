@@ -58,4 +58,12 @@ describe('validateEnv', () => {
       expect(() => validateEnv({ ...base, TRUST_PROXY: '9' })).toThrow(/TRUST_PROXY/);
     });
   });
+
+  it('đối soát doanh thu: mặc định bật, cron 00:15; cron sai bị từ chối; false được hiểu là tắt', () => {
+    const env = validateEnv({ ...base });
+    expect(env.REPORT_RECONCILE_ENABLED).toBe('true');
+    expect(env.REPORT_RECONCILE_CRON).toBe('15 0 * * *');
+    expect(validateEnv({ ...base, REPORT_RECONCILE_ENABLED: 'false' }).REPORT_RECONCILE_ENABLED).toBe('false');
+    expect(() => validateEnv({ ...base, REPORT_RECONCILE_CRON: 'không phải cron' })).toThrow(/REPORT_RECONCILE_CRON/);
+  });
 });

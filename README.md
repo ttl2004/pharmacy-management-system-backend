@@ -91,6 +91,8 @@ src/
 | `PORT` | Port HTTP server | `3790` |
 | `CORS_ORIGINS` | Origin frontend được gọi API kèm cookie, ngăn cách bằng dấu phẩy (vd. `http://localhost:5790`). Để trống: chặn mọi lời gọi chéo origin | (trống) |
 | `TRUST_PROXY` | Số proxy tin cậy phía trước app (0–5), dùng để xác định IP client từ `X-Forwarded-For` | `0` |
+| `REPORT_RECONCILE_ENABLED` | Bật job đối soát doanh thu hằng đêm (`true`/`false`); tắt thì không đăng ký cron, ADMIN vẫn chạy tay được | `true` |
+| `REPORT_RECONCILE_CRON` | Lịch chạy job đối soát (cron, giờ Asia/Ho_Chi_Minh) | `15 0 * * *` |
 | `DATABASE_URL` | Chuỗi kết nối PostgreSQL, dạng `postgresql://user:password@host:5432/dbname?connection_limit=10&pool_timeout=20`. Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`). Luôn đặt `connection_limit` — DB chỉ có 60 kết nối dùng chung | (bắt buộc) |
 | `DB_LOGGING` | In câu SQL ra log | `false` |
 | `JWT_ACCESS_SECRET` | Secret ký access JWT, tối thiểu 32 ký tự | (bắt buộc) |

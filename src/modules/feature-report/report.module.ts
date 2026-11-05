@@ -1,7 +1,11 @@
 import { Module } from '@nestjs/common';
 import { AuthzModule } from '../feature-auth/authz/authz.module';
 import { PermissionModule } from '../feature-auth/permission/permission.module';
+import { AuditLogModule } from 'src/providers/audit-log/audit-log.module';
 import { InMemoryReportCache, REPORT_CACHE } from './report-cache';
+import { ReconcileRunsController } from './reconcile-runs.controller';
+import { ReconcileRunsService } from './reconcile-runs.service';
+import { ReconcileService } from './reconcile.service';
 import { SalesReportController } from './sales-report.controller';
 import { SalesReportRepository } from './sales-report.repository';
 import { SalesReportService } from './sales-report.service';
@@ -13,10 +17,12 @@ import { SalesRollupRepository } from './sales-rollup.repository';
  * bảng đó. Cache là provider `REPORT_CACHE` — đổi sang Redis bằng một provider khác.
  */
 @Module({
-  imports: [PermissionModule, AuthzModule],
-  controllers: [SalesReportController],
+  imports: [PermissionModule, AuthzModule, AuditLogModule],
+  controllers: [SalesReportController, ReconcileRunsController],
   providers: [
     SalesRollupRepository,
+    ReconcileService,
+    ReconcileRunsService,
     SalesRollupReconcileJob,
     SalesReportRepository,
     SalesReportService,

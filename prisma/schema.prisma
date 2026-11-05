@@ -1439,3 +1439,24 @@ model SalesDailyProductChain {
   @@index([date])
   @@map("sales_daily_product_chain")
 }
+
+/// Nhật ký mỗi lần đối soát bảng tổng hợp doanh thu (cron hoặc ADMIN bấm tay). `mismatches` tối đa 100 phần tử, `mismatchCount` là tổng thật.
+model SalesReconcileRun {
+  id            String    @id @default(uuid(7)) @db.Uuid
+  startedAt     DateTime  @default(now()) @db.Timestamptz(3)
+  finishedAt    DateTime? @db.Timestamptz(3)
+  /// 'CRON' | 'MANUAL'
+  trigger       String    @db.VarChar(10)
+  /// Người bấm tay; null khi cron.
+  actorId       String?   @db.Uuid
+  fromDate      DateTime  @db.Date
+  toDate        DateTime  @db.Date
+  /// 'RUNNING' | 'SUCCESS' | 'FAILED'
+  status        String    @db.VarChar(10)
+  mismatchCount Int       @default(0)
+  mismatches    Json      @default("[]")
+  errorMessage  String?
+
+  @@index([startedAt(sort: Desc)])
+  @@map("sales_reconcile_runs")
+}

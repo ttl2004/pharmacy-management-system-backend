@@ -106,6 +106,8 @@ export const AUDIT_EVENTS = {
   'ROLE.CREATED': { action: 'CREATE', severity: 2, reasonRequired: false },
   'ROLE.DELETED': { action: 'DELETE', severity: 2, reasonRequired: false },
   'ROLE.PERMISSIONS_CHANGED': { action: 'UPDATE', severity: 2, reasonRequired: true },
+  'REPORT.RECONCILE_MISMATCH': { action: 'UPDATE', severity: 2, reasonRequired: false },
+  'REPORT.RECONCILE_TRIGGERED': { action: 'UPDATE', severity: 1, reasonRequired: false },
   'DRUG.SYNCED': { action: 'UPDATE', severity: 1, reasonRequired: false },
 } as const satisfies Record<string, AuditEventDef>;
 

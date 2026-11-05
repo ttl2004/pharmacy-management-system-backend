@@ -1,39 +1,56 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
-import { PrismaService } from 'src/common/databases/prisma.service';
+import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { SchedulerRegistry } from '@nestjs/schedule';
+import { CronJob } from 'cron';
 import { addDaysToDateOnly, todayInVietnam } from 'src/common/utils/date-only.util';
-import { SalesRollupRepository } from './sales-rollup.repository';
+import { ReconcileService } from './reconcile.service';
 
-/** `rebuild` chờ khoá ngày của đơn đang thu dở; chừa thời gian rộng cho transaction. */
-const RECONCILE_TX_TIMEOUT_MS = 5 * 60_000;
+export const RECONCILE_CRON_NAME = 'sales-rollup-reconcile';
+const DEFAULT_CRON = '15 0 * * *';
 
 /**
  * Hằng đêm dựng lại tổng hợp doanh thu của hôm qua và hôm nay (giờ VN) từ dữ liệu gốc, sửa mọi sai lệch tích luỹ.
- * Chạy 00:15: đã sang ngày mới nên "hôm qua" đã chốt, còn "hôm nay" gần như trống. An toàn khi đang có đơn thu:
- * `rebuild` khoá độc quyền từng ngày, đơn đang thu dở giữ khoá chia sẻ nên được chờ rồi mới đọc.
+ * Mặc định 00:15 (`REPORT_RECONCILE_CRON`): đã sang ngày mới nên "hôm qua" đã chốt, còn "hôm nay" gần như trống.
+ * `REPORT_RECONCILE_ENABLED=false` → không đăng ký. Việc chạy, ghi nhật ký và báo lệch do `ReconcileService` làm.
  */
 @Injectable()
-export class SalesRollupReconcileJob {
+export class SalesRollupReconcileJob implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(SalesRollupReconcileJob.name);
 
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly rollup: SalesRollupRepository,
+    private readonly reconcile: ReconcileService,
+    private readonly registry: SchedulerRegistry,
+    private readonly config: ConfigService,
   ) {}
 
-  @Cron('15 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  onApplicationBootstrap(): void {
+    if (this.config.get<string>('REPORT_RECONCILE_ENABLED') === 'false') {
+      this.logger.log('Đối soát doanh thu hằng đêm đang TẮT (REPORT_RECONCILE_ENABLED=false)');
+      return;
+    }
+    const expression = this.config.get<string>('REPORT_RECONCILE_CRON') ?? DEFAULT_CRON;
+    const job = CronJob.from({
+      cronTime: expression,
+      onTick: () => void this.run(),
+      start: true,
+      timeZone: 'Asia/Ho_Chi_Minh',
+    });
+    this.registry.addCronJob(RECONCILE_CRON_NAME, job);
+    this.logger.log(`Đã đăng ký đối soát doanh thu hằng đêm: "${expression}" (giờ Asia/Ho_Chi_Minh)`);
+  }
+
+  onModuleDestroy(): void {
+    if (this.registry.doesExist?.('cron', RECONCILE_CRON_NAME)) this.registry.deleteCronJob(RECONCILE_CRON_NAME);
+  }
+
   async run(now: Date = new Date()): Promise<void> {
     const to = todayInVietnam(now);
     const from = addDaysToDateOnly(to, -1);
     try {
-      const result = await this.prisma.$transaction((tx) => this.rollup.rebuild(tx, from, to), {
-        timeout: RECONCILE_TX_TIMEOUT_MS,
-        maxWait: 30_000,
-      });
-      this.logger.log(`Đối soát doanh thu ${from} → ${to}: ${result.days} ngày, ${result.rows} dòng`);
+      await this.reconcile.run('CRON', null, from, to);
     } catch (error) {
-      // Chỉ log: lần chạy sau (hoặc `npm run report:rebuild`) sẽ sửa; không được làm sập app.
-      this.logger.error(`Đối soát doanh thu ${from} → ${to} lỗi`, error as Error);
+      // Cron không được làm sập app: "đang chạy" hoặc lỗi bất ngờ chỉ log; lần sau (hoặc nút chạy tay) sẽ sửa.
+      this.logger.warn(`Đối soát doanh thu ${from} → ${to} không chạy: ${(error as Error).message}`);
     }
   }
 }

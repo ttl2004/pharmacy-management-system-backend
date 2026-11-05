@@ -115,6 +115,7 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'supplier-debt:write',
     'price-book:update',
     'report:read',
+    'report:reconcile',
     'dqg:read',
     'dqg:write',
     'dqg:connect',

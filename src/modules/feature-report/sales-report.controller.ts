@@ -5,6 +5,8 @@ import { CurrentActor, type RequestActor } from 'src/common/decorators/current-a
 import { AuthzGuard } from '../feature-auth/authz/guards/auth.guard';
 import { RequirePermissions } from '../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../feature-auth/permission/guards/permission.guard';
+import { InventoryReportQuery } from './dtos/inventory-report.query';
+import { InventoryReportService } from './inventory-report.service';
 import { SalesReportQuery } from './dtos/sales-report.query';
 import { SalesReportService } from './sales-report.service';
 
@@ -15,7 +17,10 @@ import { SalesReportService } from './sales-report.service';
 @ApiResponse({ status: 403, description: '1500 thiếu quyền · 1506 chi nhánh ngoài phạm vi' })
 @UseGuards(AuthzGuard, PermissionGuard)
 export class SalesReportController {
-  constructor(private readonly service: SalesReportService) {}
+  constructor(
+    private readonly service: SalesReportService,
+    private readonly inventory: InventoryReportService,
+  ) {}
 
   @RequirePermissions('report:read')
   @Get('sales')
@@ -30,5 +35,19 @@ export class SalesReportController {
   })
   sales(@Query() query: SalesReportQuery, @CurrentActor() actor: RequestActor) {
     return this.service.salesReport(query, actor);
+  }
+
+  @RequirePermissions('report:read')
+  @Get('inventory')
+  @ApiOperation({
+    summary: 'Báo cáo tồn kho (ảnh chụp tại thời điểm gọi)',
+    description:
+      'Lô tính vào: còn tồn (> 0), chưa xoá, kể cả lô cách ly/thu hồi. Giá trị = Σ tồn × giá nhập của lô. Hạn dùng theo ngày giờ VN: ' +
+      '≤ 0 ngày expired, 1–30 critical, 31–60 warning, 61–90 info, > 90 ok. `inTransitQty` = Σ số lượng (đơn vị gốc) phiếu đang ' +
+      'chuyển có chi nhánh gửi HOẶC nhận trong phạm vi, mỗi dòng đếm một lần. `byBranch` gồm mọi chi nhánh trong phạm vi, kể cả 0 tồn, ' +
+      'giảm dần theo giá trị. Cache tối đa 60 giây.',
+  })
+  inventoryReport(@Query() query: InventoryReportQuery, @CurrentActor() actor: RequestActor) {
+    return this.inventory.inventoryReport(query, actor);
   }
 }

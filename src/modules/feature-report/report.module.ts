@@ -3,6 +3,8 @@ import { AuthzModule } from '../feature-auth/authz/authz.module';
 import { PermissionModule } from '../feature-auth/permission/permission.module';
 import { AuditLogModule } from 'src/providers/audit-log/audit-log.module';
 import { InMemoryReportCache, REPORT_CACHE } from './report-cache';
+import { InventoryReportRepository } from './inventory-report.repository';
+import { InventoryReportService } from './inventory-report.service';
 import { ReconcileRunsController } from './reconcile-runs.controller';
 import { ReconcileRunsService } from './reconcile-runs.service';
 import { ReconcileService } from './reconcile.service';
@@ -26,6 +28,8 @@ import { SalesRollupRepository } from './sales-rollup.repository';
     SalesRollupReconcileJob,
     SalesReportRepository,
     SalesReportService,
+    InventoryReportRepository,
+    InventoryReportService,
     { provide: REPORT_CACHE, useFactory: () => new InMemoryReportCache() },
   ],
   exports: [SalesRollupRepository],

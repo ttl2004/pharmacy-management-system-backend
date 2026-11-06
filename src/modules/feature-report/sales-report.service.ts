@@ -3,9 +3,9 @@ import type { RequestActor } from 'src/common/decorators/current-actor.decorator
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { addDaysToDateOnly, daysBetweenDateOnly } from 'src/common/utils/date-only.util';
-import { assertBranchInScope, resolveBranchScope } from '../feature-auth/permission/branch-scope';
 import { SalesReportQuery } from './dtos/sales-report.query';
 import { REPORT_CACHE, ReportCache } from './report-cache';
+import { resolveReportScope } from './report-scope';
 import { SalesReportRepository } from './sales-report.repository';
 
 export const SALES_REPORT_MAX_DAYS = 366;
@@ -31,13 +31,7 @@ export class SalesReportService {
 
   async salesReport(query: SalesReportQuery, actor: RequestActor): Promise<SalesReportResponse> {
     this.assertRange(query.from, query.to);
-    const scope = resolveBranchScope(actor.user);
-    const requested = [...new Set(query.branchIds ?? [])].sort();
-    // Kiểm quyền TRƯỚC khi nhìn cache: PM xin chi nhánh khác luôn bị 1506, dù có ai đó đã làm nóng khoá.
-    for (const branchId of requested) assertBranchInScope(scope, branchId);
-    const branchIds = requested.length ? requested : scope.kind === 'BRANCH' ? [scope.branchId] : undefined;
-
-    const scopeKey = scope.kind === 'ALL' ? 'ALL' : `BRANCH:${scope.branchId}`;
+    const { branchIds, scopeKey } = resolveReportScope(actor, query.branchIds);
     const key = `${query.from}|${query.to}|${(branchIds ?? []).join(',')}|${scopeKey}`;
     const cached = this.cache.get<SalesReportResponse>(key);
     if (cached) return cached;

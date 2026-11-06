@@ -67,6 +67,7 @@ describe('OrderService', () => {
   const codes = { next: jest.fn().mockResolvedValue('HD000001') };
   const audit = { record: jest.fn() };
   const priceBooks = { getUsableBook: jest.fn() };
+  const rollup = { applyOrder: jest.fn() };
   const service = new OrderService(
     orders as unknown as OrderRepository,
     transactions as never,
@@ -74,6 +75,7 @@ describe('OrderService', () => {
     codes as never,
     audit as never,
     priceBooks as never,
+    rollup as never,
   );
   /** Lần gọi `record` đầu tiên: actor + các entry. */
   const recorded = () => ({ actor: argOf<AuditActor>(audit.record, 1), entries: argOf<AuditEntry[]>(audit.record, 2) });
@@ -274,6 +276,24 @@ describe('OrderService', () => {
       errorCode: ErrorCode.PRESCRIPTION_REQUIRED,
     });
     expect(orders.createPayment).not.toHaveBeenCalled();
+    expect(rollup.applyOrder).not.toHaveBeenCalled();
+  });
+
+  it('payPos gọi applyOrder(tx, id, 1, totalAmount) trong cùng transaction, sau ghi thanh toán', async () => {
+    orders.findHead.mockResolvedValue(head({ totalAmount: 8000n }));
+    await service.payPos('o1', { method: PaymentMethod.CASH }, ss);
+    expect(rollup.applyOrder).toHaveBeenCalledTimes(1);
+    expect(rollup.applyOrder).toHaveBeenCalledWith(tx, 'o1', 1, 8000n);
+    expect(orders.createPayment.mock.invocationCallOrder[0]).toBeLessThan(
+      rollup.applyOrder.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('payPos: kho báo lỗi sau khi ghi thanh toán → không để lại lệnh cộng tổng hợp ngoài transaction lỗi', async () => {
+    orders.findHead.mockResolvedValue(head());
+    stock.consume.mockRejectedValueOnce(new Error('thiếu hàng'));
+    await expect(service.payPos('o1', { method: PaymentMethod.CASH }, ss)).rejects.toThrow('thiếu hàng');
+    expect(rollup.applyOrder).not.toHaveBeenCalled();
   });
 
   it('cancel: đơn tại quầy đã COMPLETED → 1701', async () => {

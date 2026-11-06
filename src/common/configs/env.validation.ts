@@ -1,4 +1,14 @@
+import { CronTime } from 'cron';
 import { z } from 'zod';
+
+function isValidCron(value: string): boolean {
+  try {
+    new CronTime(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const units = { s: 1, m: 60, h: 3600, d: 86400 } as const;
 
@@ -93,6 +103,14 @@ export const envSchema = z
     SUPER_ADMIN_GENDER: z
       .enum(['MALE', 'FEMALE', 'OTHER'], { error: 'SUPER_ADMIN_GENDER chỉ nhận MALE, FEMALE hoặc OTHER' })
       .optional(),
+
+    //- Đối soát doanh thu hằng đêm
+    REPORT_RECONCILE_ENABLED: boolStr('true'),
+    // Biểu thức cron (giờ Asia/Ho_Chi_Minh); sai cú pháp thì app không khởi động chứ không lặng lẽ không chạy.
+    REPORT_RECONCILE_CRON: z
+      .string({ error: 'REPORT_RECONCILE_CRON phải là chuỗi ký tự' })
+      .refine(isValidCron, 'REPORT_RECONCILE_CRON không phải biểu thức cron hợp lệ')
+      .default('15 0 * * *'),
 
     //- Mailer
     MAIL_GMAIL_USER: z.string().optional(),

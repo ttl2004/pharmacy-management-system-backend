@@ -38,6 +38,7 @@ import {
   PrescriptionRequest,
   ReplaceOrderItemsRequest,
 } from './dtos/order.request';
+import { SalesRollupRepository } from '../../feature-report/sales-rollup.repository';
 import { OrderDetail, OrderHead, OrderRepository, WalkInCustomer } from './repositories/order.repository';
 
 /** Trạng thái huỷ được theo kênh. Online để tương lai (huỷ trước SHIPPING) — hiện chưa có đơn online nào. */
@@ -115,6 +116,7 @@ export class OrderService {
     private readonly codes: DocumentCodeService,
     private readonly audit: AuditLogService,
     private readonly priceBooks: PriceBookService,
+    private readonly rollup: SalesRollupRepository,
   ) {}
 
   list(query: OrderQuery, actor: RequestActor) {
@@ -335,6 +337,8 @@ export class OrderService {
           });
         }
         await this.stock.consume(ctx, id, actorId);
+        // Cuối cùng, để dòng tổng hợp theo (chi nhánh, ngày) bị khoá càng ngắn càng tốt tới lúc commit.
+        await this.rollup.applyOrder(tx, id, 1, head.totalAmount);
 
         await this.audit.record(tx, auditActorOf(actor), [
           {

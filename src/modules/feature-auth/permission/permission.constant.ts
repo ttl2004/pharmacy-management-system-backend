@@ -98,6 +98,7 @@ export const PERMISSION_CATALOG = [
   },
   { code: 'price-book:update', name: 'Sửa giá bán, tạo / sửa / xoá bảng giá', module: 'price-book', sortOrder: 1 },
   { code: 'report:read', name: 'Xem báo cáo', module: 'report', sortOrder: 1 },
+  { code: 'report:reconcile', name: 'Xem nhật ký và chạy đối soát doanh thu', module: 'report', sortOrder: 2 },
   { code: 'dqg:read', name: 'Xem ghép mã và nhật ký liên thông Dược Quốc gia', module: 'dqg', sortOrder: 1 },
   { code: 'dqg:write', name: 'Ghép mã, gửi liên thông Dược Quốc gia', module: 'dqg', sortOrder: 2 },
   { code: 'dqg:connect', name: 'Kết nối / huỷ kết nối tài khoản CSDL Dược', module: 'dqg', sortOrder: 3 },

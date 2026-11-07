@@ -1,11 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import { AuditAction, PaymentMethod, Prisma, ReceiptStatus, SupplierPaymentSource } from '@prisma/client';
+import { PaymentMethod, Prisma, ReceiptStatus, SupplierPaymentSource } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import { resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
 import { permissionError } from 'src/modules/feature-auth/permission/permission.error';
 import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { badRequest, documentErrors } from '../core/inventory.error';
 import { branchWhere } from '../core/inventory-scope';
@@ -58,7 +59,7 @@ export class GoodsReceiptPaymentService {
           await this.assertCanWriteDebt(actor);
           const delta = paidAmount - head.paidAmount;
           await assertPaymentWithinDebt(this.debts, tx, scope, head.supplierId, delta);
-          await this.supplierPayments.createForReceipt(
+          const payment = await this.supplierPayments.createForReceipt(
             tx,
             head,
             delta,
@@ -68,8 +69,9 @@ export class GoodsReceiptPaymentService {
               source: SupplierPaymentSource.RECEIPT,
               note: `Bổ sung thanh toán phiếu nhập ${head.code}`,
             },
-            { actorId, ip: actor.ip },
+            { actorId },
           );
+          await this.audit.record(tx, auditActorOf(actor), payment.auditEntries);
         }
         return this.mustFind(tx, id);
       }
@@ -84,16 +86,17 @@ export class GoodsReceiptPaymentService {
       if (!changed) throw errors.wrongState();
 
       if (paidAmount !== head.paidAmount) {
-        await this.audit.record(tx, [
+        await this.audit.record(tx, auditActorOf(actor), [
           {
-            actorId,
-            action: AuditAction.UPDATE,
+            event: 'GOODS_RECEIPT.PAYMENT_UPDATED',
             entityType: AUDIT_ENTITY.GOODS_RECEIPT,
             entityId: id,
-            branchId: head.branchId,
+            entityLabel: head.code,
+            branchIds: [head.branchId],
+            amount: paidAmount,
+            searchTerms: [head.code],
             before: { paidAmount: head.paidAmount.toString() },
             after: { paidAmount: paidAmount.toString(), paymentStatus },
-            ipAddress: actor.ip,
           },
         ]);
       }

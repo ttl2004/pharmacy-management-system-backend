@@ -1,9 +1,8 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
-import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthzGuard } from '../../feature-auth/authz/guards/auth.guard';
-import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
 import { CreateProductRequest, UpdateProductRequest } from './dtos/product.request';
@@ -44,8 +43,8 @@ export class ProductController {
     description:
       'Tạo sản phẩm kèm cấu hình đơn vị bán trong một transaction. Phải có đúng một dòng isBaseUnit = true khớp baseUnitId và có conversionRate = 1.',
   })
-  create(@Body() dto: CreateProductRequest, @CurrentUser() user: JwtUser) {
-    return this.productService.create(dto, user.userId);
+  create(@Body() dto: CreateProductRequest, @CurrentActor() actor: RequestActor) {
+    return this.productService.create(dto, actor);
   }
 
   @RequirePermissions('product:update')
@@ -57,15 +56,15 @@ export class ProductController {
   update(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: UpdateProductRequest,
-    @CurrentUser() user: JwtUser,
+    @CurrentActor() actor: RequestActor,
   ) {
-    return this.productService.update(id, dto, user.userId);
+    return this.productService.update(id, dto, actor);
   }
 
   @RequirePermissions('product:delete')
   @Delete(':id')
   @ApiOperation({ description: 'Xoá mềm sản phẩm và toàn bộ đơn vị bán đang hoạt động trong một transaction.' })
-  remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentUser() user: JwtUser) {
-    return this.productService.remove(id, user.userId);
+  remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
+    return this.productService.remove(id, actor);
   }
 }

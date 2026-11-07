@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Branch, Role, User, UserStatus } from '@prisma/client';
+import { Branch, Prisma, Role, User, UserStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { APP_CONSTANTS } from 'src/common/constants/app.constant';
 import { ErrorException } from 'src/common/exceptions/error.exception';
@@ -8,9 +8,16 @@ import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import { normalizePhoneSearch } from 'src/common/utils/phone.util';
 import { PrismaService } from 'src/common/databases/prisma.service';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { diffFields, pickAuditFields } from 'src/providers/audit-log/audit-diff';
+import { SecurityEventService } from 'src/providers/security-event/security-event.service';
+import { isStaffRole } from '../permission/staff-role';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import type { AuditEntry, AuditJson } from 'src/providers/audit-log/audit-log.types';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
-import { SessionStore } from '../authz/session.store';
+import { SessionTransactions } from '../authz/session.store';
 import type { JwtUser } from '../authz/types/authz.types';
 import {
   assertBranchInScope,
@@ -25,6 +32,14 @@ import { assertRoleWithinCallerGrants } from '../permission/role-grant-guard';
 import { CreateUserRequest, UpdateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserRepository } from './repositories/user.repository';
+import {
+  maskUserSnapshot,
+  USER_AUDIT_FIELDS,
+  userAuditBase,
+  userSnapshot,
+  usernameOf,
+  type UserAuditSnapshot,
+} from './user-audit';
 
 export type UserDetail = User & { role: Role; branch: Branch | null; auth: { username: string } | null };
 
@@ -33,12 +48,40 @@ const USER_RELATIONS = { role: true, branch: true, auth: { select: { username: t
 
 const SUPER_ADMIN_ROLE = 'SUPER_ADMIN';
 
+/** Snapshot → dạng JSON ghi được (Date/bigint đã chuẩn hoá); dùng cho CREATE/DELETE. */
+function plainSnapshot(snapshot: UserAuditSnapshot): Record<string, AuditJson> {
+  return pickAuditFields(snapshot, USER_AUDIT_FIELDS);
+}
+
+/** Phần trường trong danh sách trắng mà lần sửa này thực sự gửi lên. */
+function userSnapshotChanges(data: Partial<User>): Partial<UserAuditSnapshot> {
+  const changes: Partial<UserAuditSnapshot> = {};
+  for (const field of ['fullName', 'status', 'branchId', 'email', 'phoneNumber'] as const) {
+    if (field in data) changes[field] = data[field];
+  }
+  return changes;
+}
+
+/** Tên các trường đổi thật sự nhưng không ghi giá trị vào nhật ký: địa chỉ, ngày sinh, giới tính, email. */
+function hiddenChangedFields(current: User, data: Partial<User>): string[] {
+  const names: string[] = [];
+  if ('email' in data && (data.email ?? null) !== (current.email ?? null)) names.push('email');
+  if ('address' in data && (data.address ?? null) !== (current.address ?? null)) names.push('address');
+  if ('gender' in data && (data.gender ?? null) !== (current.gender ?? null)) names.push('gender');
+  if ('dateOfBirth' in data && (data.dateOfBirth?.getTime() ?? null) !== (current.dateOfBirth?.getTime() ?? null)) {
+    names.push('dateOfBirth');
+  }
+  return names;
+}
+
 @Injectable()
 export class UserService extends AbstractBaseService<User> {
   constructor(
     private readonly userRepository: UserRepository,
     private readonly prisma: PrismaService,
-    private readonly sessions: SessionStore,
+    private readonly transactions: SessionTransactions,
+    private readonly audit: AuditLogService,
+    private readonly security: SecurityEventService,
   ) {
     super(userRepository);
   }
@@ -92,7 +135,8 @@ export class UserService extends AbstractBaseService<User> {
     return user;
   }
 
-  async create(dto: CreateUserRequest, caller: JwtUser): Promise<UserDetail> {
+  async create(dto: CreateUserRequest, actor: RequestActor): Promise<UserDetail> {
+    const caller = actor.user;
     const scope = resolveBranchScope(caller);
     const hasUsername = Boolean(dto.username);
     const hasPassword = Boolean(dto.password);
@@ -143,6 +187,16 @@ export class UserService extends AbstractBaseService<User> {
             },
           });
         }
+
+        const username = hasUsername ? (dto.username ?? null) : null;
+        await this.audit.record(tx, auditActorOf(actor), [
+          {
+            event: 'USER.CREATED',
+            ...userAuditBase(user, username, [user.branchId]),
+            after: maskUserSnapshot(plainSnapshot(userSnapshot(user))),
+            ...(username ? { metadata: { hasCredentials: true } } : {}),
+          },
+        ]);
 
         return { ...user, auth: dto.username ? { username: dto.username } : null };
       });
@@ -204,7 +258,8 @@ export class UserService extends AbstractBaseService<User> {
    * Luật 14 + 15 + ràng buộc `branchId` theo vai trò + phạm vi chi nhánh + rào cấp bậc. KHÔNG đổi vai trò — việc đó đi qua
    * `PATCH /permission/users/:userId/role` với quyền `user:role:update`.
    */
-  async update(id: string, dto: UpdateUserRequest, caller: JwtUser): Promise<UserDetail> {
+  async update(id: string, dto: UpdateUserRequest, actor: RequestActor): Promise<UserDetail> {
+    const caller = actor.user;
     const scope = resolveBranchScope(caller);
     // Phạm vi đứng TRƯỚC luật 14 (BS-05): nhân viên chi nhánh nhắm vào tài khoản ngoài chi nhánh — kể cả
     // SUPER_ADMIN — phải nhận 1200 như không tồn tại, không được nhận 1604 làm lộ tài khoản đó.
@@ -239,19 +294,76 @@ export class UserService extends AbstractBaseService<User> {
     if (dto.status !== undefined) data.status = dto.status;
     if (dto.branchId !== undefined) data.branchId = dto.branchId ?? null;
 
+    // Khoá/ngừng tài khoản thì phiên đang sống phải chết ngay, không đợi access token hết hạn (báo cáo bảo mật #7).
+    // Thu hồi idempotent nên không cần so với trạng thái cũ (đọc cũ có thể lệch).
+    const revokeSessions = dto.status !== undefined && dto.status !== UserStatus.ACTIVE;
+
     try {
-      const updated = await this.userRepository.update({ id }, data, { relations: USER_RELATIONS });
-      if (!updated) {
-        throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
-      }
-      return updated as UserDetail;
+      // `forUser` giữ khoá phiên của người này, chạy nối tiếp với đăng nhập, và bỏ cache phiên (`changed()`) sau commit.
+      return await this.transactions.forUser(id, async (tx) => {
+        // Đọc lại trong tx đã giữ khoá phiên: `current` ở trên đọc trước tx nên có thể đã cũ nếu có ai vừa đổi trạng thái.
+        // Diff và STATUS_CHANGED lấy từ lần đọc này.
+        const fresh = await this.userRepository.findByIdWithRole(id, tx);
+        if (!fresh) {
+          throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+        }
+        const updated = await this.userRepository.update({ id }, data, { relations: USER_RELATIONS }, tx);
+        if (!updated) {
+          throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+        }
+        const changes = userSnapshotChanges(data);
+        const diff = diffFields(userSnapshot(fresh), changes, USER_AUDIT_FIELDS);
+        // Trường không nằm trong danh sách trắng (địa chỉ, ngày sinh, giới tính) và email: chỉ ghi TÊN trường đã đổi.
+        const changedFields = hiddenChangedFields(fresh, data);
+        const statusChanged = !!diff && 'status' in diff.after;
+        if (diff || changedFields.length) {
+          const username = await usernameOf(tx, id);
+          const base = userAuditBase(fresh, username, [fresh.branchId, updated.branchId]);
+          const entries: AuditEntry[] = [];
+          if (diff && 'status' in diff.after) {
+            entries.push({
+              event: 'USER.STATUS_CHANGED',
+              ...base,
+              before: { status: diff.before.status },
+              after: { status: diff.after.status },
+              reason: dto.reason?.trim() || null,
+            });
+            delete diff.before.status;
+            delete diff.after.status;
+          }
+          if ((diff && Object.keys(diff.after).length) || changedFields.length) {
+            entries.push({
+              event: 'USER.UPDATED',
+              ...base,
+              ...(diff && Object.keys(diff.after).length
+                ? { before: maskUserSnapshot(diff.before), after: maskUserSnapshot(diff.after) }
+                : {}),
+              ...(changedFields.length ? { metadata: { changedFields } } : {}),
+            });
+          }
+          await this.audit.record(tx, auditActorOf(actor), entries);
+        }
+        if (revokeSessions) {
+          await this.revokeRefreshTokens(tx, id);
+          // Token luôn thu hồi (idempotent); sự kiện bảo mật chỉ ghi khi trạng thái thực sự đổi.
+          if (statusChanged) {
+            await this.recordSessionsRevoked(tx, fresh.id, fresh.role.code, actor, {
+              trigger: 'STATUS_CHANGE',
+              status: String(dto.status),
+            });
+          }
+        }
+        return updated as UserDetail;
+      });
     } catch (error) {
       rethrowDuplicate(error);
     }
   }
 
   /** Luật 13: xoá mềm + thu hồi mọi refresh token còn hiệu lực. */
-  async remove(id: string, caller: JwtUser): Promise<{ success: true }> {
+  /** `reason` tuỳ chọn (DELETE không có body nên đi qua `?reason=`). */
+  async remove(id: string, actor: RequestActor, reason?: string): Promise<{ success: true }> {
+    const caller = actor.user;
     const scope = resolveBranchScope(caller);
     await this.assertTargetInScope(id, scope);
     await this.assertNotSuperAdminTarget(id);
@@ -264,16 +376,58 @@ export class UserService extends AbstractBaseService<User> {
     // Rào cấp bậc: không xoá được người cùng cấp hoặc cao hơn (1508).
     assertOutranks(caller.roleLevel, target.role.level);
 
-    const deleted = await this.userRepository.softDelete({ id });
-    if (!deleted) {
-      throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
-    }
-
-    // Thu hồi sau khi xoá: nếu bước này lỗi thì bản ghi đã xoá mềm rồi, phiên sẽ chết ở lần
-    // refresh kế tiếp vì token trỏ tới user đã isDeleted.
-    await this.sessions.revokeAllByUser(id);
+    // Xoá mềm và thu hồi phiên cùng một transaction: không có khe hở user đã xoá mà phiên còn sống.
+    await this.transactions.forUser(id, async (tx) => {
+      const deleted = await this.userRepository.softDelete({ id }, tx);
+      if (!deleted) {
+        throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+      }
+      await this.revokeRefreshTokens(tx, id);
+      await this.recordSessionsRevoked(tx, id, target.role.code, actor, { trigger: 'DELETE' });
+      await this.audit.record(tx, auditActorOf(actor), [
+        {
+          event: 'USER.DELETED',
+          ...userAuditBase(target, await usernameOf(tx, id), [target.branchId]),
+          before: maskUserSnapshot(plainSnapshot(userSnapshot(target))),
+          reason: reason?.trim() || null,
+        },
+      ]);
+    });
 
     return { success: true };
+  }
+
+  /** Thu hồi mọi refresh token còn hiệu lực của user — phiên (`sid`) của họ chết ở lần kiểm kế tiếp. */
+  /**
+   * D11: ghi `AUTH.SESSIONS_REVOKED_BY_ADMIN` cùng transaction với việc thu hồi. `actorId` là người bị thu hồi phiên
+   * (để tra "lịch sử bảo mật của X"); người thực hiện nằm trong `metadata.revokedBy`. Chỉ ghi cho nhân viên.
+   */
+  private async recordSessionsRevoked(
+    tx: Prisma.TransactionClient,
+    targetId: string,
+    targetRoleCode: string,
+    actor: RequestActor,
+    detail: Record<string, string>,
+  ): Promise<void> {
+    if (!isStaffRole(targetRoleCode)) return;
+    await this.security.record(
+      [
+        {
+          type: 'AUTH.SESSIONS_REVOKED_BY_ADMIN',
+          actorId: targetId,
+          actorRoleCode: targetRoleCode,
+          context: actor,
+          // SUPER_ADMIN không lộ danh tính ra ngoài ADMIN: bỏ `revokedBy` khi người thực hiện là SUPER_ADMIN.
+          metadata:
+            actor.user.role === AuthRole.SUPER_ADMIN ? { ...detail } : { revokedBy: actor.user.userId, ...detail },
+        },
+      ],
+      tx,
+    );
+  }
+
+  private async revokeRefreshTokens(tx: Prisma.TransactionClient, userId: string): Promise<void> {
+    await tx.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
   }
 
   /** Luật 14: không ai sửa/xoá được tài khoản SUPER_ADMIN. */

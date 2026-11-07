@@ -1,13 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import {
-  AuditAction,
-  BatchStatus,
-  Prisma,
-  RecordStatus,
-  StockMovementType,
-  StockRefType,
-  TransferStatus,
-} from '@prisma/client';
+import { BatchStatus, Prisma, RecordStatus, StockMovementType, StockRefType, TransferStatus } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorCode } from 'src/common/types/error-code';
 import { escapeLike } from 'src/common/utils/like-pattern.util';
@@ -20,7 +12,9 @@ import {
 } from 'src/common/utils/date-only.util';
 import { permissionError } from 'src/modules/feature-auth/permission/permission.error';
 import { BranchScope, isInBranchScope, resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { DocumentCodeService } from '../core/document-code.service';
 import {
   assertNoDuplicateBatches, badRequest, documentErrors, invalidReference, inventoryError,
@@ -36,12 +30,33 @@ import {
 } from './dtos/transfer.request';
 import { TransferDetail, TransferHead, TransferRepository } from './repositories/transfer.repository';
 
-interface StatusChange {
-  transferId: string;
-  branchId: string;
-  from: TransferStatus;
-  to: TransferStatus;
-  reason?: string;
+/**
+ * Phần chung của mọi dòng nhật ký phiếu điều chuyển: nhãn + từ khoá = mã phiếu (D8), phạm vi = [gửi, nhận] — cả hai
+ * chi nhánh đều thấy phiếu. `extraBranches`: chi nhánh nhận cũ khi sửa phiếu đổi nơi nhận.
+ */
+function transferAudit(
+  head: Pick<TransferHead, 'id' | 'code' | 'fromBranchId' | 'toBranchId'>,
+  extraBranches: readonly string[] = [],
+) {
+  return {
+    entityType: AUDIT_ENTITY.STOCK_TRANSFER,
+    entityId: head.id,
+    entityLabel: head.code,
+    branchIds: [...new Set([head.fromBranchId, head.toBranchId, ...extraBranches])],
+    searchTerms: [head.code],
+  };
+}
+
+/** Dòng nhật ký đổi trạng thái (thiếu `event`/`reason`: caller chọn theo bước — xuất/nhận thiếu bắt buộc lý do). */
+function statusAudit(head: TransferHead, from: TransferStatus, to: TransferStatus) {
+  return { ...transferAudit(head), before: { status: from }, after: { status: to } };
+}
+
+/** `note` là lý do chuyển (bắt buộc): chuỗi toàn khoảng trắng qua được `@IsNotEmpty` nên kiểm lại sau khi cắt. */
+function transferReason(note: string): string {
+  const reason = note.trim();
+  if (!reason) throw badRequest('Cần nhập lý do chuyển (note)');
+  return reason;
 }
 
 /**
@@ -154,6 +169,7 @@ export class TransferService {
     }
     const batchIds = dto.items.map((item) => item.batchId);
     assertNoDuplicateBatches(batchIds);
+    const note = transferReason(dto.note);
 
     return this.transactions.run(async ({ tx }) => {
       await this.assertBranchesActive(tx, [fromBranchId, dto.toBranchId]);
@@ -179,22 +195,19 @@ export class TransferService {
         code,
         fromBranchId,
         toBranchId: dto.toBranchId,
-        note: dto.note ?? null,
+        note,
         createdBy: actorId,
       });
       await this.transfers.createItems(
         tx,
         items.map((item) => ({ ...item, transferId: id, createdBy: actorId })),
       );
-      await this.audit.record(tx, [
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId,
-          action: AuditAction.CREATE,
-          entityType: AUDIT_ENTITY.STOCK_TRANSFER,
-          entityId: id,
-          branchId: fromBranchId,
-          after: { code, toBranchId: dto.toBranchId, lines: items.length },
-          ipAddress: actor.ip,
+          event: 'TRANSFER.CREATED',
+          ...transferAudit({ id, code, fromBranchId, toBranchId: dto.toBranchId }),
+          after: { code, fromBranchId, toBranchId: dto.toBranchId, lines: items.length },
+          reason: note,
         },
       ]);
       return this.mustFind(tx, id);
@@ -213,6 +226,7 @@ export class TransferService {
     }
     const batchIds = dto.items.map((item) => item.batchId);
     assertNoDuplicateBatches(batchIds);
+    const note = transferReason(dto.note);
 
     return this.transactions.run(async ({ tx }) => {
       const head = await this.loadForSide(tx, id, scope, 'from');
@@ -221,7 +235,7 @@ export class TransferService {
       await this.assertBranchesActive(tx, [head.fromBranchId, dto.toBranchId]);
       const claimed = await this.transfers.transition(tx, id, TransferStatus.PENDING, {
         toBranchId: dto.toBranchId,
-        note: dto.note ?? null,
+        note,
         updatedAt: new Date(),
         updatedBy: actorId,
       });
@@ -245,15 +259,14 @@ export class TransferService {
         };
       });
       await this.transfers.replaceItems(tx, id, items);
-      await this.audit.record(tx, [
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId,
-          action: AuditAction.UPDATE,
-          entityType: AUDIT_ENTITY.STOCK_TRANSFER,
-          entityId: id,
-          branchId: head.fromBranchId,
-          after: { toBranchId: dto.toBranchId, lines: items.length },
-          ipAddress: actor.ip,
+          event: 'TRANSFER.UPDATED',
+          // Đổi nơi nhận: chi nhánh nhận cũ vẫn phải thấy dòng này (phiếu vừa rời khỏi phạm vi của họ).
+          ...transferAudit({ ...head, toBranchId: dto.toBranchId }, [head.toBranchId]),
+          before: { toBranchId: head.toBranchId, note: head.note },
+          after: { toBranchId: dto.toBranchId, note, lines: items.length },
+          reason: note,
         },
       ]);
       return this.mustFind(tx, id);
@@ -270,6 +283,10 @@ export class TransferService {
       const { tx } = ctx;
       const head = await this.loadForSide(tx, id, scope, 'from');
       if (head.status !== TransferStatus.PENDING) throw errors.wrongState(head.status);
+      // Lý do chuyển (note) là lý do bắt buộc của TRANSFER.SHIPPED. Phiếu lập trước khi note thành bắt buộc có thể
+      // trống: phải sửa phiếu bổ sung lý do rồi mới xuất được.
+      const reason = head.note?.trim();
+      if (!reason) throw badRequest('Phiếu chưa có lý do chuyển — sửa phiếu, nhập lý do (note) rồi xuất hàng');
       // Xuất cần cả hai chi nhánh còn hoạt động: không gửi hàng tới nơi đã ngừng nhận.
       await this.assertBranchesActive(tx, [head.fromBranchId, head.toBranchId]);
 
@@ -305,12 +322,13 @@ export class TransferService {
       });
       await this.ledger.apply(ctx, entries, actorId, { preLocked: locked });
 
-      await this.recordStatus(tx, actor, {
-        transferId: id,
-        branchId: head.fromBranchId,
-        from: TransferStatus.PENDING,
-        to: TransferStatus.IN_TRANSIT,
-      });
+      await this.audit.record(tx, auditActorOf(actor), [
+        {
+          event: 'TRANSFER.SHIPPED',
+          ...statusAudit(head, TransferStatus.PENDING, TransferStatus.IN_TRANSIT),
+          reason,
+        },
+      ]);
       return this.mustFind(tx, id);
     });
   }
@@ -350,7 +368,7 @@ export class TransferService {
       const costs = await this.transfers.findShipCosts(tx, id);
       // `intake` cần mỗi (sản phẩm, số lô) xuất hiện một lần: lúc lập phiếu đã cấm trùng lô, và mỗi lô gửi là duy nhất
       // theo (chi nhánh, sản phẩm, số lô).
-      const { batchIdByRefItem } = await this.intake.intake(ctx, {
+      const { batchIdByRefItem, auditEntries } = await this.intake.intake(ctx, {
         branchId: head.toBranchId,
         type: StockMovementType.TRANSFER_IN,
         refType: StockRefType.STOCK_TRANSFER,
@@ -375,12 +393,14 @@ export class TransferService {
         actorId,
       );
 
-      await this.recordStatus(tx, actor, {
-        transferId: id,
-        branchId: head.toBranchId,
-        from: TransferStatus.IN_TRANSIT,
-        to: TransferStatus.RECEIVED,
-      });
+      // Nhận thiếu: lý do bắt buộc = lý do lệch từng dòng (receivedLines đã bắt có lý do khi thiếu).
+      const shortReasons = received.flatMap((line) => (line.varianceReason ? [line.varianceReason] : []));
+      const base = statusAudit(head, TransferStatus.IN_TRANSIT, TransferStatus.RECEIVED);
+      const receivedEntry: AuditEntry = shortReasons.length
+        ? { event: 'TRANSFER.RECEIVED_SHORT', ...base, reason: shortReasons.join('; ') }
+        : { event: 'TRANSFER.RECEIVED', ...base };
+      // Lô vừa tạo ở chi nhánh nhận có thể thừa hưởng thu hồi: ghi chung một lần với dòng của phiếu.
+      await this.audit.record(tx, auditActorOf(actor), [...auditEntries, receivedEntry]);
       return this.mustFind(tx, id);
     });
   }
@@ -427,13 +447,13 @@ export class TransferService {
         });
       }
 
-      await this.recordStatus(tx, actor, {
-        transferId: id,
-        branchId: head.fromBranchId,
-        from: head.status,
-        to: TransferStatus.CANCELLED,
-        reason: dto.reason,
-      });
+      await this.audit.record(tx, auditActorOf(actor), [
+        {
+          event: 'TRANSFER.CANCELLED',
+          ...statusAudit(head, head.status, TransferStatus.CANCELLED),
+          reason: dto.reason,
+        },
+      ]);
       return this.mustFind(tx, id);
     });
   }
@@ -471,23 +491,6 @@ export class TransferService {
     if (branches.some((branch) => branch.status !== RecordStatus.ACTIVE)) {
       throw inventoryError(ErrorCode.BRANCH_INACTIVE);
     }
-  }
-
-  /** Nhật ký đổi trạng thái, gắn với chi nhánh thực hiện bước đó (gửi: xuất/huỷ, nhận: nhận). */
-  private recordStatus(tx: Prisma.TransactionClient, actor: RequestActor, change: StatusChange) {
-    return this.audit.record(tx, [
-      {
-        actorId: actor.user.userId,
-        action: AuditAction.STATUS_CHANGE,
-        entityType: AUDIT_ENTITY.STOCK_TRANSFER,
-        entityId: change.transferId,
-        branchId: change.branchId,
-        before: { status: change.from },
-        after: { status: change.to },
-        reason: change.reason ?? null,
-        ipAddress: actor.ip,
-      },
-    ]);
   }
 
   private async mustFind(tx: Prisma.TransactionClient, id: string): Promise<TransferDetail> {

@@ -22,11 +22,18 @@ const RETURN_RECEIPT_SELECT = {
       batchNumber: true,
       expiryDate: true,
       baseQuantity: true,
+      importPrice: true,
+      unitDiscount: true,
+      conversionRate: true,
       product: {
         select: {
           code: true,
           name: true,
-          units: { where: { isDeleted: false, isBaseUnit: true }, select: { unit: { select: { name: true } } }, take: 1 },
+          units: {
+            where: { isDeleted: false, isBaseUnit: true },
+            select: { unit: { select: { name: true } } },
+            take: 1,
+          },
         },
       },
     },
@@ -106,8 +113,19 @@ export class PurchaseReturnRepository {
   findReceiptBatches(branchId: string, keys: readonly { productId: string; batchNumber: string }[]) {
     // Không trả sớm `Promise.resolve([])` — kiểu suy ra thành `never[]` làm hỏng kiểu của nơi gọi; `OR: []` của Prisma đã ra rỗng.
     return this.prisma.stockBatch.findMany({
-      where: { branchId, isDeleted: false, OR: keys.map((k) => ({ productId: k.productId, batchNumber: k.batchNumber })) },
-      select: { id: true, productId: true, batchNumber: true, quantityOnHand: true, reservedQuantity: true, importPrice: true },
+      where: {
+        branchId,
+        isDeleted: false,
+        OR: keys.map((k) => ({ productId: k.productId, batchNumber: k.batchNumber })),
+      },
+      select: {
+        id: true,
+        productId: true,
+        batchNumber: true,
+        quantityOnHand: true,
+        reservedQuantity: true,
+        importPrice: true,
+      },
     });
   }
 
@@ -117,6 +135,8 @@ export class PurchaseReturnRepository {
       where: { refType: StockRefType.GOODS_RECEIPT, refId: receiptId, quantity: { gt: 0 } },
       select: { refItemId: true, unitCost: true },
     });
-    return new Map(rows.filter((r) => r.refItemId && r.unitCost !== null).map((r) => [r.refItemId as string, r.unitCost as number]));
+    return new Map(
+      rows.filter((r) => r.refItemId && r.unitCost !== null).map((r) => [r.refItemId as string, r.unitCost as number]),
+    );
   }
 }

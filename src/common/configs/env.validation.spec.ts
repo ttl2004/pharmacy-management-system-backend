@@ -44,4 +44,26 @@ describe('validateEnv', () => {
     const env = validateEnv({ ...base, SUPER_ADMIN_FULL_NAME: '' });
     expect(env.SUPER_ADMIN_FULL_NAME).toBe('Super Admin');
   });
+
+  describe('TRUST_PROXY', () => {
+    it('mặc định 0', () => {
+      expect(validateEnv(base).TRUST_PROXY).toBe(0);
+    });
+
+    it("nhận '1' thành số 1", () => {
+      expect(validateEnv({ ...base, TRUST_PROXY: '1' }).TRUST_PROXY).toBe(1);
+    });
+
+    it("'9' bị từ chối (tối đa 5)", () => {
+      expect(() => validateEnv({ ...base, TRUST_PROXY: '9' })).toThrow(/TRUST_PROXY/);
+    });
+  });
+
+  it('đối soát doanh thu: mặc định bật, cron 00:15; cron sai bị từ chối; false được hiểu là tắt', () => {
+    const env = validateEnv({ ...base });
+    expect(env.REPORT_RECONCILE_ENABLED).toBe('true');
+    expect(env.REPORT_RECONCILE_CRON).toBe('15 0 * * *');
+    expect(validateEnv({ ...base, REPORT_RECONCILE_ENABLED: 'false' }).REPORT_RECONCILE_ENABLED).toBe('false');
+    expect(() => validateEnv({ ...base, REPORT_RECONCILE_CRON: 'không phải cron' })).toThrow(/REPORT_RECONCILE_CRON/);
+  });
 });

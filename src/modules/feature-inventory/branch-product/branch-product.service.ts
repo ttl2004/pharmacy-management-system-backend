@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { AuditAction, Prisma, RecordStatus } from '@prisma/client';
+import { Prisma, RecordStatus } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { AUDIT_ENTITY } from '../core/inventory.constants';
 import { resolveWriteBranch } from '../core/inventory-scope';
@@ -72,16 +73,17 @@ export class BranchProductService {
       const row = await tx.branchProduct.findUniqueOrThrow({ where: { id }, select: ROW_SELECT });
       const before = existing && !existing.isDeleted ? existing.minStockLevel : null;
       if (before !== dto.minStockLevel) {
-        await this.audit.record(tx, [
+        // Lần đầu và sửa đều là UPSERTED (R16): `before` null phân biệt lần đặt đầu tiên.
+        await this.audit.record(tx, auditActorOf(actor), [
           {
-            actorId,
-            action: existing ? AuditAction.UPDATE : AuditAction.CREATE,
+            event: 'BRANCH_PRODUCT.UPSERTED',
             entityType: AUDIT_ENTITY.BRANCH_PRODUCT,
             entityId: row.id,
-            branchId,
+            entityLabel: row.product.code,
+            branchIds: [branchId],
             before: existing ? { minStockLevel: before } : null,
             after: { minStockLevel: dto.minStockLevel, productId: dto.productId },
-            ipAddress: actor.ip,
+            searchTerms: [row.product.code, row.product.name],
           },
         ]);
       }
@@ -95,21 +97,24 @@ export class BranchProductService {
     const actorId = actor.user.userId;
 
     await this.transactions.run(async ({ tx }) => {
-      const existing = await tx.branchProduct.findFirst({ where: { branchId, productId, isDeleted: false } });
+      const existing = await tx.branchProduct.findFirst({
+        where: { branchId, productId, isDeleted: false },
+        include: { product: { select: { code: true, name: true } } },
+      });
       if (!existing) throw new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Chưa đặt ngưỡng riêng' });
       await tx.branchProduct.update({
         where: { id: existing.id },
         data: { isDeleted: true, updatedAt: new Date(), updatedBy: actorId },
       });
-      await this.audit.record(tx, [
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId,
-          action: AuditAction.DELETE,
+          event: 'BRANCH_PRODUCT.DELETED',
           entityType: AUDIT_ENTITY.BRANCH_PRODUCT,
           entityId: existing.id,
-          branchId,
+          entityLabel: existing.product.code,
+          branchIds: [branchId],
           before: { minStockLevel: existing.minStockLevel, productId },
-          ipAddress: actor.ip,
+          searchTerms: [existing.product.code, existing.product.name],
         },
       ]);
     });

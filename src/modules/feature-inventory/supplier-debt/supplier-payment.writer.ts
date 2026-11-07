@@ -1,16 +1,15 @@
 import { Injectable } from '@nestjs/common';
-import { AuditAction, PaymentMethod, Prisma, SupplierPaymentSource } from '@prisma/client';
+import { PaymentMethod, Prisma, SupplierPaymentSource } from '@prisma/client';
 import { ErrorCode } from 'src/common/types/error-code';
-import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { DocumentCodeService } from '../core/document-code.service';
 import { inventoryError } from '../core/inventory.error';
 import { AUDIT_ENTITY } from '../core/inventory.constants';
 import { PaidDelta, PaymentRow, SupplierPaymentRepository } from './repositories/supplier-payment.repository';
 
-/** Ai làm + từ đâu — ghi vào nhật ký của mọi bản ghi mà writer động tới. */
+/** Ai làm — ghi vào `createdBy`/`cancelledBy` của mọi bản ghi mà writer động tới. */
 export interface WriterActor {
   actorId: string;
-  ip?: string | null;
 }
 
 export interface CreatePaymentInput {
@@ -27,13 +26,15 @@ export interface CreatePaymentInput {
  * Chỗ DUY NHẤT ghi phiếu chi + đổi `GoodsReceipt.paidAmount`. Mọi hàm nhận `tx` của người gọi để phiếu chi, phân bổ,
  * bộ đệm `paidAmount` và nhật ký cùng commit hoặc cùng rollback. Bất biến: phiếu CONFIRMED có
  * `paidAmount = Σ phân bổ của phiếu chi chưa huỷ`.
+ *
+ * Writer KHÔNG tự ghi nhật ký: trả entry để caller gom vào lần `audit.record` duy nhất của transaction (xác nhận phiếu
+ * nhập lập phiếu chi tự sinh rồi còn ghi dòng của chính phiếu nhập).
  */
 @Injectable()
 export class SupplierPaymentWriter {
   constructor(
     private readonly payments: SupplierPaymentRepository,
     private readonly codes: DocumentCodeService,
-    private readonly audit: AuditLogService,
   ) {}
 
   /** Lập phiếu chi + phân bổ, cộng `paidAmount` các phiếu nhập (có điều kiện). Tổng tiền > còn nợ → 1714. */
@@ -41,22 +42,25 @@ export class SupplierPaymentWriter {
     tx: Prisma.TransactionClient,
     input: CreatePaymentInput,
     actor: WriterActor,
-  ): Promise<{ id: string; code: string; amount: bigint }> {
+  ): Promise<{ id: string; code: string; amount: bigint; auditEntries: AuditEntry[] }> {
     const code = await this.codes.next(tx, 'SUPPLIER_PAYMENT');
     const { id, amount } = await this.payments.create(tx, { ...input, code, createdBy: actor.actorId });
-    await this.applyDeltas(
+    const receiptEntries = await this.applyDeltas(
       tx,
       input.allocations.map((row) => ({ receiptId: row.receiptId, delta: row.amount })),
       true,
-      actor,
+      code,
     );
-    await this.audit.record(tx, [
+    const auditEntries: AuditEntry[] = [
+      ...receiptEntries,
       {
-        actorId: actor.actorId,
-        action: AuditAction.CREATE,
+        event: 'SUPPLIER_PAYMENT.CREATED',
         entityType: AUDIT_ENTITY.SUPPLIER_PAYMENT,
         entityId: id,
-        branchId: input.branchId,
+        entityLabel: code,
+        branchIds: [input.branchId],
+        amount,
+        searchTerms: [code, ...receiptEntries.map((entry) => entry.entityLabel ?? '')].filter(Boolean),
         after: {
           code,
           supplierId: input.supplierId,
@@ -65,10 +69,9 @@ export class SupplierPaymentWriter {
           amount: amount.toString(),
           allocations: input.allocations.map((row) => ({ receiptId: row.receiptId, amount: row.amount.toString() })),
         },
-        ipAddress: actor.ip,
       },
-    ]);
-    return { id, code, amount };
+    ];
+    return { id, code, amount, auditEntries };
   }
 
   /** Phiếu chi tự sinh khi xác nhận phiếu nhập / tăng "đã trả": phân bổ trọn `amount` vào chính phiếu đó. */
@@ -94,84 +97,92 @@ export class SupplierPaymentWriter {
     );
   }
 
-  /** Huỷ phiếu chi: đánh dấu huỷ (có điều kiện) rồi hoàn lại `paidAmount` từng phiếu nhập. Đã huỷ → 1701. */
+  /**
+   * Huỷ phiếu chi: đánh dấu huỷ (có điều kiện) rồi hoàn lại `paidAmount` từng phiếu nhập. Đã huỷ → 1701.
+   * Trả entry nhật ký (phiếu nhập được hoàn + chính phiếu chi) cho caller ghi.
+   */
   async cancel(
     tx: Prisma.TransactionClient,
-    payment: Pick<PaymentRow, 'id' | 'code' | 'branchId' | 'allocations'>,
+    payment: Pick<PaymentRow, 'id' | 'code' | 'branchId' | 'amount' | 'allocations'>,
     reason: string | null,
     actor: WriterActor,
-  ): Promise<void> {
+  ): Promise<AuditEntry[]> {
     const changed = await this.payments.markCancelled(tx, payment.id, { cancelledBy: actor.actorId, reason });
     if (!changed) throw inventoryError(ErrorCode.INVALID_DOCUMENT_STATE, 'phiếu chi đã được huỷ trước đó');
-    await this.applyDeltas(
+    const receiptEntries = await this.applyDeltas(
       tx,
       payment.allocations.map((row) => ({ receiptId: row.receiptId, delta: -row.amount })),
       false,
-      actor,
+      payment.code,
     );
-    await this.audit.record(tx, [
+    return [
+      ...receiptEntries,
       {
-        actorId: actor.actorId,
-        action: AuditAction.STATUS_CHANGE,
+        event: 'SUPPLIER_PAYMENT.CANCELLED',
         entityType: AUDIT_ENTITY.SUPPLIER_PAYMENT,
         entityId: payment.id,
-        branchId: payment.branchId,
+        entityLabel: payment.code,
+        branchIds: [payment.branchId],
+        amount: payment.amount,
+        searchTerms: [payment.code, ...payment.allocations.map((row) => row.receipt.code)],
         before: { status: 'COMPLETED' },
         after: { status: 'CANCELLED' },
-        reason: reason ?? undefined,
-        ipAddress: actor.ip,
+        reason,
       },
-    ]);
+    ];
   }
 
   /**
    * Gọi khi huỷ phiếu nhập đã xác nhận: còn phiếu chi LẬP TAY chưa huỷ → 1713 (liệt kê mã TTPN); phiếu chi RECEIPT
-   * (tự sinh) được huỷ theo.
+   * (tự sinh) được huỷ theo. Trả entry nhật ký của mọi phiếu chi bị huỷ theo.
    */
   async releaseForReceiptCancel(
     tx: Prisma.TransactionClient,
     receipt: { id: string; code: string },
     actor: WriterActor,
-  ): Promise<void> {
+  ): Promise<AuditEntry[]> {
     const active = await this.payments.findActiveByReceipt(tx, receipt.id);
     const manual = active.filter((row) => row.source === SupplierPaymentSource.MANUAL);
     if (manual.length) {
       throw inventoryError(ErrorCode.RECEIPT_HAS_PAYMENTS, manual.map((row) => row.code).join(', '));
     }
+    const entries: AuditEntry[] = [];
     for (const voucher of active) {
       const full = await this.payments.findById(voucher.id, tx);
-      if (full) await this.cancel(tx, full, `Huỷ theo phiếu nhập ${receipt.code}`, actor);
+      if (full) entries.push(...(await this.cancel(tx, full, `Huỷ theo phiếu nhập ${receipt.code}`, actor)));
     }
+    return entries;
   }
 
-  /** Áp ± vào `paidAmount` và ghi nhật ký `goods_receipts` UPDATE. Thiếu dòng được sửa → điều kiện bị vi phạm. */
+  /**
+   * Áp ± vào `paidAmount`; trả entry `GOODS_RECEIPT.PAYMENT_UPDATED` (amount = delta có dấu) cho từng phiếu nhập.
+   * Thiếu dòng được sửa → điều kiện bị vi phạm.
+   */
   private async applyDeltas(
     tx: Prisma.TransactionClient,
     deltas: readonly PaidDelta[],
     requireConfirmed: boolean,
-    actor: WriterActor,
-  ): Promise<void> {
+    paymentCode: string,
+  ): Promise<AuditEntry[]> {
     const updated = await this.payments.applyPaidDeltas(tx, deltas, requireConfirmed);
     if (updated.size !== deltas.length) {
       throw requireConfirmed
         ? inventoryError(ErrorCode.DEBT_EXCEEDED, 'phiếu nhập vừa được thanh toán hoặc thay đổi, hãy tải lại')
         : inventoryError(ErrorCode.INVALID_DOCUMENT_STATE, 'số đã trả của phiếu nhập đã thay đổi, hãy tải lại');
     }
-    await this.audit.record(
-      tx,
-      deltas.map((delta) => {
-        const after = updated.get(delta.receiptId)!;
-        return {
-          actorId: actor.actorId,
-          action: AuditAction.UPDATE,
-          entityType: AUDIT_ENTITY.GOODS_RECEIPT,
-          entityId: delta.receiptId,
-          branchId: after.branchId,
-          before: { paidAmount: (after.paidAmount - delta.delta).toString() },
-          after: { paidAmount: after.paidAmount.toString() },
-          ipAddress: actor.ip,
-        };
-      }),
-    );
+    return deltas.map((delta): AuditEntry => {
+      const after = updated.get(delta.receiptId)!;
+      return {
+        event: 'GOODS_RECEIPT.PAYMENT_UPDATED',
+        entityType: AUDIT_ENTITY.GOODS_RECEIPT,
+        entityId: delta.receiptId,
+        entityLabel: after.code,
+        branchIds: [after.branchId],
+        amount: delta.delta,
+        searchTerms: [after.code, paymentCode],
+        before: { paidAmount: (after.paidAmount - delta.delta).toString() },
+        after: { paidAmount: after.paidAmount.toString() },
+      };
+    });
   }
 }

@@ -1,17 +1,39 @@
 import { Injectable } from '@nestjs/common';
 import { Unit } from '@prisma/client';
+import { PrismaService } from 'src/common/databases/prisma.service';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { diffFields, pickAuditFields } from 'src/providers/audit-log/audit-diff';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { CreateUnitRequest, UpdateUnitRequest } from './dtos/unit.request';
 import { UnitQuery } from './dtos/unit.query';
 import { UnitRepository } from './repositories/unit.repository';
 
+const AUDITED_FIELDS = ['code', 'name', 'note'] as const;
+
+/** Danh mục dùng chung toàn chuỗi → `branchIds: []`. Từ khoá tìm kiếm: mã + tên (D8). */
+function auditBase(unit: Pick<Unit, 'id' | 'code' | 'name'>) {
+  return {
+    entityType: 'units',
+    entityId: unit.id,
+    entityLabel: unit.code,
+    branchIds: [],
+    searchTerms: [unit.code, unit.name],
+  };
+}
+
 @Injectable()
 export class UnitService extends AbstractBaseService<Unit> {
-  constructor(private readonly unitRepository: UnitRepository) {
+  constructor(
+    private readonly unitRepository: UnitRepository,
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditLogService,
+  ) {
     super(unitRepository);
   }
 
@@ -33,37 +55,53 @@ export class UnitService extends AbstractBaseService<Unit> {
     return unit;
   }
 
-  async create(dto: CreateUnitRequest, callerId: string): Promise<Unit> {
+  async create(dto: CreateUnitRequest, actor: RequestActor): Promise<Unit> {
     try {
-      return await this.unitRepository.create({
-        code: dto.code,
-        name: dto.name,
-        note: dto.note ?? null,
-        createdBy: callerId,
+      return await this.prisma.$transaction(async (tx) => {
+        const created = await this.unitRepository.create(
+          { code: dto.code, name: dto.name, note: dto.note ?? null, createdBy: actor.user.userId },
+          tx,
+        );
+        await this.audit.record(tx, auditActorOf(actor), [
+          { event: 'UNIT.CREATED', ...auditBase(created), after: pickAuditFields(created, AUDITED_FIELDS) },
+        ]);
+        return created;
       });
     } catch (error) {
       rethrowDuplicate(error);
     }
   }
 
-  async update(id: string, dto: UpdateUnitRequest, callerId: string): Promise<Unit> {
+  async update(id: string, dto: UpdateUnitRequest, actor: RequestActor): Promise<Unit> {
     if (Object.keys(dto).length === 0) throw this.badRequest('Cần gửi ít nhất một trường để cập nhật');
 
-    const data: Partial<Unit> = { updatedBy: callerId };
+    const existing = await this.unitRepository.findOne({ id });
+    if (!existing) throw this.notFound();
+
+    const data: Partial<Unit> = { updatedBy: actor.user.userId };
     if (dto.code !== undefined) data.code = dto.code;
     if (dto.name !== undefined) data.name = dto.name;
     if (dto.note !== undefined) data.note = dto.note;
 
     try {
-      const updated = await this.unitRepository.update({ id }, data);
-      if (!updated) throw this.notFound();
-      return updated;
+      return await this.prisma.$transaction(async (tx) => {
+        const updated = await this.unitRepository.update({ id }, data, undefined, tx);
+        if (!updated) throw this.notFound();
+
+        const diff = diffFields(existing, data, AUDITED_FIELDS);
+        if (diff) {
+          await this.audit.record(tx, auditActorOf(actor), [
+            { event: 'UNIT.UPDATED', ...auditBase({ ...existing, ...data }), before: diff.before, after: diff.after },
+          ]);
+        }
+        return updated;
+      });
     } catch (error) {
       rethrowDuplicate(error);
     }
   }
 
-  async remove(id: string): Promise<{ success: true }> {
+  async remove(id: string, actor: RequestActor): Promise<{ success: true }> {
     const existing = await this.unitRepository.findOne({ id });
     if (!existing) throw this.notFound();
 
@@ -80,8 +118,13 @@ export class UnitService extends AbstractBaseService<Unit> {
       });
     }
 
-    const deleted = await this.unitRepository.softDelete({ id });
-    if (!deleted) throw this.notFound();
+    await this.prisma.$transaction(async (tx) => {
+      const deleted = await this.unitRepository.softDelete({ id }, tx);
+      if (!deleted) throw this.notFound();
+      await this.audit.record(tx, auditActorOf(actor), [
+        { event: 'UNIT.DELETED', ...auditBase(existing), before: pickAuditFields(existing, AUDITED_FIELDS) },
+      ]);
+    });
 
     return { success: true };
   }

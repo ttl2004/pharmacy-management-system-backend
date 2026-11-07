@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { AuditAction } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { assertBranchInScope, resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { DocumentCodeService } from '../core/document-code.service';
 import { AUDIT_ENTITY } from '../core/inventory.constants';
@@ -82,21 +82,23 @@ export class SupplierDebtAdjustmentService {
         note: dto.note.trim(),
         createdBy: actorId,
       });
-      await this.audit.record(tx, [
+      const delta = debtAfter - current;
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId,
-          action: AuditAction.CREATE,
+          event: 'SUPPLIER_DEBT.ADJUSTED',
           entityType: AUDIT_ENTITY.SUPPLIER_DEBT_ADJUSTMENT,
           entityId: id,
-          branchId,
+          entityLabel: code,
+          branchIds: [branchId],
+          amount: delta,
+          searchTerms: [code],
           after: {
             code,
             supplierId: dto.supplierId,
             debtBefore: current.toString(),
             debtAfter: debtAfter.toString(),
-            delta: (debtAfter - current).toString(),
+            delta: delta.toString(),
           },
-          ipAddress: actor.ip,
         },
       ]);
       return present((await this.adjustments.findById(id, tx))!);
@@ -128,17 +130,18 @@ export class SupplierDebtAdjustmentService {
       const changed = await this.adjustments.markCancelled(tx, id, { cancelledBy: actorId, reason });
       if (!changed) throw inventoryError(ErrorCode.INVALID_DOCUMENT_STATE, 'phiếu điều chỉnh đã được huỷ trước đó');
       await assertBranchDebtNotNegative(this.debts, tx, row.supplierId, row.branchId, 'Huỷ phiếu điều chỉnh');
-      await this.audit.record(tx, [
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId,
-          action: AuditAction.STATUS_CHANGE,
+          event: 'SUPPLIER_DEBT.ADJUSTMENT_CANCELLED',
           entityType: AUDIT_ENTITY.SUPPLIER_DEBT_ADJUSTMENT,
           entityId: id,
-          branchId: row.branchId,
+          entityLabel: row.code,
+          branchIds: [row.branchId],
+          amount: row.delta,
+          searchTerms: [row.code],
           before: { status: 'COMPLETED' },
           after: { status: 'CANCELLED' },
           reason,
-          ipAddress: actor.ip,
         },
       ]);
       return present((await this.adjustments.findById(id, tx))!);

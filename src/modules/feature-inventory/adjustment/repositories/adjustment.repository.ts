@@ -18,8 +18,10 @@ export interface DraftBatch {
   quantityOnHand: number;
   /** Trả NCC theo phiếu nhập: khớp dòng phiếu nhập gốc (cùng sản phẩm + số lô). */
   batchNumber: string;
-  /** Giá trả lại mặc định khi không gửi. */
+  /** Giá trả lại mặc định khi không gửi; cũng là trần giá trả khi không kèm phiếu nhập. */
   importPrice: number;
+  /** NCC của lô; null = dữ liệu cũ chưa biết NCC. */
+  supplierId: string | null;
 }
 
 const ADJUSTMENT_LIST_SELECT = {
@@ -82,12 +84,19 @@ export type AdjustmentDetail = Prisma.StockAdjustmentGetPayload<{ select: typeof
 
 export interface AdjustmentHead {
   id: string;
+  /** Mã phiếu, lý do của phiếu, tổng tiền trả NCC — cho nhật ký (nhãn, lý do bắt buộc, amount). */
+  code: string;
+  reason: string;
+  totalAmount: bigint;
   status: ReceiptStatus;
   type: AdjustmentType;
   branchId: string;
   /** Trả NCC theo phiếu nhập: kiểm lại trần lúc xác nhận. */
   goodsReceiptId: string | null;
   refundExpenses: Prisma.JsonValue;
+  /** Trả NCC: kiểm công nợ không âm lúc xác nhận. */
+  supplierId: string | null;
+  supplierPaid: bigint;
 }
 
 @Injectable()
@@ -122,9 +131,18 @@ export class AdjustmentRepository {
     const [money, qty] = await Promise.all([
       this.prisma.stockAdjustment.aggregate({
         where: live,
-        _sum: { goodsAmount: true, discountAmount: true, refundExpenseAmount: true, totalAmount: true, supplierPaid: true },
+        _sum: {
+          goodsAmount: true,
+          discountAmount: true,
+          refundExpenseAmount: true,
+          totalAmount: true,
+          supplierPaid: true,
+        },
       }),
-      this.prisma.stockAdjustmentItem.aggregate({ where: { isDeleted: false, adjustment: live }, _sum: { quantity: true } }),
+      this.prisma.stockAdjustmentItem.aggregate({
+        where: { isDeleted: false, adjustment: live },
+        _sum: { quantity: true },
+      }),
     ]);
     return {
       goodsAmount: money._sum.goodsAmount ?? 0n,
@@ -151,7 +169,19 @@ export class AdjustmentRepository {
   ): Promise<AdjustmentHead | null> {
     return tx.stockAdjustment.findFirst({
       where: { id, isDeleted: false, ...scopeWhere },
-      select: { id: true, status: true, type: true, branchId: true, goodsReceiptId: true, refundExpenses: true },
+      select: {
+        id: true,
+        code: true,
+        reason: true,
+        totalAmount: true,
+        status: true,
+        type: true,
+        branchId: true,
+        goodsReceiptId: true,
+        refundExpenses: true,
+        supplierId: true,
+        supplierPaid: true,
+      },
     });
   }
 
@@ -197,7 +227,14 @@ export class AdjustmentRepository {
   findBatches(tx: Prisma.TransactionClient, branchId: string, ids: readonly string[]): Promise<DraftBatch[]> {
     return tx.stockBatch.findMany({
       where: { id: { in: [...ids] }, branchId, isDeleted: false },
-      select: { id: true, productId: true, quantityOnHand: true, batchNumber: true, importPrice: true },
+      select: {
+        id: true,
+        productId: true,
+        quantityOnHand: true,
+        batchNumber: true,
+        importPrice: true,
+        supplierId: true,
+      },
     });
   }
 
@@ -208,7 +245,7 @@ export class AdjustmentRepository {
   lockBatches(tx: Prisma.TransactionClient, branchId: string, ids: readonly string[]): Promise<DraftBatch[]> {
     if (!ids.length) return Promise.resolve([]);
     return tx.$queryRaw<DraftBatch[]>(Prisma.sql`
-      SELECT "id", "productId", "quantityOnHand", "batchNumber", "importPrice"
+      SELECT "id", "productId", "quantityOnHand", "batchNumber", "importPrice", "supplierId"
       FROM "stock_batches"
       WHERE "id" IN (${Prisma.join(ids.map((id) => Prisma.sql`${id}::uuid`))})
         AND "branchId" = ${branchId}::uuid AND "isDeleted" = false
@@ -271,7 +308,12 @@ export class AdjustmentRepository {
       select: { id: true, batchNumber: true, quantityOnHand: true, product: { select: { name: true } } },
     });
     return {
-      newLots: fresh.map((b) => ({ lotId: b.id, lotNumber: b.batchNumber, drugName: b.product.name, qtyOnHand: b.quantityOnHand })),
+      newLots: fresh.map((b) => ({
+        lotId: b.id,
+        lotNumber: b.batchNumber,
+        drugName: b.product.name,
+        qtyOnHand: b.quantityOnHand,
+      })),
       movedLots: head.items
         .filter((i) => i.systemQuantity !== null && i.systemQuantity !== i.batch.quantityOnHand)
         .map((i) => ({
@@ -326,7 +368,13 @@ export class AdjustmentRepository {
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       // unitCost: giá vốn đã chốt lúc xác nhận — huỷ phiếu đã xác nhận đảo đúng giá này.
       select: {
-        id: true, batchId: true, systemQuantity: true, actualQuantity: true, quantity: true, unitCost: true, reason: true,
+        id: true,
+        batchId: true,
+        systemQuantity: true,
+        actualQuantity: true,
+        quantity: true,
+        unitCost: true,
+        reason: true,
         goodsReceiptItemId: true,
       },
     });

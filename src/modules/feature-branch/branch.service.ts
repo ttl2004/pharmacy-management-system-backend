@@ -1,8 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { Branch, RecordStatus } from '@prisma/client';
+import { PrismaService } from 'src/common/databases/prisma.service';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
+import { maskPhone } from 'src/common/utils/mask.util';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { diffFields, pickAuditFields } from 'src/providers/audit-log/audit-diff';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import type { AuditJson } from 'src/providers/audit-log/audit-log.types';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import type { JwtUser } from 'src/modules/feature-auth/authz/types/authz.types';
@@ -12,6 +19,25 @@ import { CreateBranchRequest, UpdateBranchRequest } from './dtos/branch.request'
 import { BranchQuery } from './dtos/branch.query';
 import { BranchRepository } from './repositories/branch.repository';
 
+const AUDITED_FIELDS = ['code', 'name', 'phone', 'address', 'email', 'openingHours', 'status'] as const;
+
+/** Không bao giờ ghi SĐT đầy đủ vào nhật ký: che còn 4 số cuối. */
+function maskSnapshot(snapshot: Record<string, AuditJson>): Record<string, AuditJson> {
+  if (!('phone' in snapshot)) return snapshot;
+  return { ...snapshot, phone: maskPhone(snapshot.phone as string | null) };
+}
+
+/** Phạm vi của dòng nhật ký chi nhánh là chính chi nhánh đó, để quản lý chi nhánh thấy lịch sử của mình. */
+function auditBase(branch: Pick<Branch, 'id' | 'code' | 'name'>) {
+  return {
+    entityType: 'branches',
+    entityId: branch.id,
+    entityLabel: branch.code,
+    branchIds: [branch.id],
+    searchTerms: [branch.code, branch.name],
+  };
+}
+
 /**
  * Chi nhánh cũng chịu phạm vi chi nhánh như mọi dữ liệu khác: vai trò BRANCH chỉ thấy/đụng tới chi nhánh của
  * mình. Ghi mặc định chỉ ADMIN có quyền, nhưng SUPER_ADMIN có thể tick thêm quyền cho vai trò BRANCH trên ma
@@ -19,7 +45,11 @@ import { BranchRepository } from './repositories/branch.repository';
  */
 @Injectable()
 export class BranchService extends AbstractBaseService<Branch> {
-  constructor(private readonly branchRepository: BranchRepository) {
+  constructor(
+    private readonly branchRepository: BranchRepository,
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditLogService,
+  ) {
     super(branchRepository);
   }
 
@@ -42,33 +72,48 @@ export class BranchService extends AbstractBaseService<Branch> {
     return this.findInScope(id, caller);
   }
 
-  async create(dto: CreateBranchRequest, caller: JwtUser): Promise<Branch> {
+  async create(dto: CreateBranchRequest, actor: RequestActor): Promise<Branch> {
+    const caller = actor.user;
     // Tạo chi nhánh là việc của cả chuỗi: vai trò BRANCH không được tạo dù đã được cấp quyền.
     if (resolveBranchScope(caller).kind !== 'ALL') throw permissionError(ErrorCode.BRANCH_ACCESS_DENIED);
     try {
-      return await this.branchRepository.create({
-        code: dto.code,
-        name: dto.name,
-        phone: dto.phone,
-        email: dto.email ?? null,
-        address: dto.address,
-        openingHours: dto.openingHours ?? null,
-        status: dto.status ?? RecordStatus.ACTIVE,
-        createdBy: caller.userId,
+      return await this.prisma.$transaction(async (tx) => {
+        const created = await this.branchRepository.create(
+          {
+            code: dto.code,
+            name: dto.name,
+            phone: dto.phone,
+            email: dto.email ?? null,
+            address: dto.address,
+            openingHours: dto.openingHours ?? null,
+            status: dto.status ?? RecordStatus.ACTIVE,
+            createdBy: caller.userId,
+          },
+          tx,
+        );
+        await this.audit.record(tx, auditActorOf(actor), [
+          {
+            event: 'BRANCH.CREATED',
+            ...auditBase(created),
+            after: maskSnapshot(pickAuditFields(created, AUDITED_FIELDS)),
+          },
+        ]);
+        return created;
       });
     } catch (error) {
       rethrowDuplicate(error);
     }
   }
 
-  async update(id: string, dto: UpdateBranchRequest, caller: JwtUser): Promise<Branch> {
+  async update(id: string, dto: UpdateBranchRequest, actor: RequestActor): Promise<Branch> {
+    const caller = actor.user;
     if (Object.keys(dto).length === 0) {
       throw new ErrorException({
         code: ErrorCode.HTTP_BAD_REQUEST,
         message: 'Cần gửi ít nhất một trường để cập nhật',
       });
     }
-    await this.findInScope(id, caller);
+    const existing = await this.findInScope(id, caller);
 
     const data: Partial<Branch> = { updatedBy: caller.userId };
     if (dto.code !== undefined) data.code = dto.code;
@@ -80,16 +125,31 @@ export class BranchService extends AbstractBaseService<Branch> {
     if (dto.status !== undefined) data.status = dto.status;
 
     try {
-      const updated = await this.branchRepository.update({ id }, data);
-      if (!updated) throw this.notFound();
-      return updated;
+      return await this.prisma.$transaction(async (tx) => {
+        const updated = await this.branchRepository.update({ id }, data, undefined, tx);
+        if (!updated) throw this.notFound();
+
+        const diff = diffFields(existing, data, AUDITED_FIELDS);
+        if (diff) {
+          await this.audit.record(tx, auditActorOf(actor), [
+            {
+              event: 'BRANCH.UPDATED',
+              ...auditBase({ ...existing, ...data }),
+              before: maskSnapshot(diff.before),
+              after: maskSnapshot(diff.after),
+            },
+          ]);
+        }
+        return updated;
+      });
     } catch (error) {
       rethrowDuplicate(error);
     }
   }
 
-  async remove(id: string, caller: JwtUser): Promise<{ success: true }> {
-    await this.findInScope(id, caller);
+  /** `reason` tuỳ chọn (DELETE không có body nên đi qua `?reason=`). */
+  async remove(id: string, actor: RequestActor, reason?: string): Promise<{ success: true }> {
+    const existing = await this.findInScope(id, actor.user);
 
     const referencing = await this.branchRepository.countReferencingUsers(id);
     if (referencing > 0) {
@@ -105,8 +165,18 @@ export class BranchService extends AbstractBaseService<Branch> {
       });
     }
 
-    const deleted = await this.branchRepository.softDelete({ id });
-    if (!deleted) throw this.notFound();
+    await this.prisma.$transaction(async (tx) => {
+      const deleted = await this.branchRepository.softDelete({ id }, tx);
+      if (!deleted) throw this.notFound();
+      await this.audit.record(tx, auditActorOf(actor), [
+        {
+          event: 'BRANCH.DELETED',
+          ...auditBase(existing),
+          before: maskSnapshot(pickAuditFields(existing, AUDITED_FIELDS)),
+          reason: reason?.trim() || null,
+        },
+      ]);
+    });
 
     return { success: true };
   }

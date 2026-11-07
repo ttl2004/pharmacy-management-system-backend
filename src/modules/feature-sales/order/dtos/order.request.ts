@@ -24,7 +24,7 @@ import { VIETNAM_PHONE_PATTERN } from 'src/common/utils/phone.util';
 import { toVietnamPhone } from 'src/common/utils/string-transform.util';
 import { IsDateOnly } from 'src/common/validators/is-date-only.validator';
 import { AbstractBaseQuery } from 'src/providers/abstract-base/abstract-base.query';
-import { MAX_LINE_QUANTITY, MAX_ORDER_LINES } from '../../core/sales.constants';
+import { MAX_LINE_QUANTITY, MAX_MONEY, MAX_ORDER_LINES } from '../../core/sales.constants';
 
 /** Một dòng đơn: chỉ đơn vị bán và số lượng. Giá, tên, lô do server tự lấy. */
 export class OrderItemRequest {
@@ -98,13 +98,6 @@ class OrderLinesRequest {
   @Type(() => PrescriptionRequest)
   @ApiPropertyOptional({ type: PrescriptionRequest, description: 'Bắt buộc trước khi thu tiền nếu có thuốc kê đơn' })
   prescription?: PrescriptionRequest;
-
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  @Max(2_000_000_000)
-  @ApiPropertyOptional({ description: 'Giảm giá cả đơn (VND, ≤ tạm tính). Sửa đơn: không gửi = 0' })
-  discountAmount?: number;
 
   @IsOptional()
   @ValidateNested()
@@ -197,6 +190,24 @@ export class CancelOrderRequest {
   @MaxLength(500)
   @ApiProperty({ example: 'Khách đổi ý' })
   reason: string;
+}
+
+/** Huỷ hoá đơn ĐÃ THU: ngoài lý do còn phải khai số tiền đã hoàn cho khách (kiểm ở service). */
+export class VoidPaidOrderRequest extends CancelOrderRequest {
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(MAX_MONEY)
+  @ApiPropertyOptional({ example: 100000, description: 'Bắt buộc khi đơn > 0đ: 0 < refundAmount ≤ tổng đơn' })
+  refundAmount?: number;
+
+  @IsOptional()
+  @IsIn([PaymentMethod.CASH, PaymentMethod.BANK_TRANSFER, PaymentMethod.CARD])
+  @ApiPropertyOptional({
+    enum: [PaymentMethod.CASH, PaymentMethod.BANK_TRANSFER, PaymentMethod.CARD],
+    description: 'Bắt buộc khi refundAmount > 0',
+  })
+  refundMethod?: PaymentMethod;
 }
 
 export class OrderQuery extends AbstractBaseQuery {

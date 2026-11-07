@@ -1,12 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { Drug, Prisma } from '@prisma/client';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { AbstractBaseService } from 'src/providers/abstract-base/abstract-base.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { DrugSourceClient } from './drug-source.client';
 import { DrugQuery } from './dtos/drug.query';
-import { DrugRepository } from './repositories/drug.repository';
+import { DrugRepository, PrescriptionChange } from './repositories/drug.repository';
 
 export interface DrugSyncResult {
   total: number;
@@ -32,11 +37,43 @@ const LINKED_PRODUCTS = {
 /** Một lần đồng bộ chuyển INACTIVE quá tỉ lệ này của thuốc đang ACTIVE thì coi là nghi nguồn lỗi, phải `force`. */
 export const MAX_DEACTIVATE_RATIO = 0.1;
 
+const SYNC_AUDIT_LABEL = 'Đồng bộ CSDL Dược';
+
+/** Một dòng `DRUG.SYNCED` cho cả lần chạy + một dòng `PRODUCT.CONTROL_FLAGS_CHANGED` cho mỗi hàng bị đổi cờ (D10). */
+function syncAuditEntries(
+  result: Omit<DrugSyncResult, 'syncedAt'>,
+  changed: readonly PrescriptionChange[],
+  force: boolean,
+): AuditEntry[] {
+  const syncId = randomUUID();
+  return [
+    {
+      event: 'DRUG.SYNCED',
+      entityType: 'drugs',
+      entityId: syncId,
+      entityLabel: SYNC_AUDIT_LABEL,
+      branchIds: [],
+      metadata: { syncId, ...result, force },
+    },
+    ...changed.map((product): AuditEntry => ({
+      event: 'PRODUCT.CONTROL_FLAGS_CHANGED',
+      entityType: 'products',
+      entityId: product.id,
+      entityLabel: product.code,
+      branchIds: [],
+      before: { requiresPrescription: product.before },
+      after: { requiresPrescription: product.after },
+      metadata: { syncId },
+    })),
+  ];
+}
+
 @Injectable()
 export class DrugService extends AbstractBaseService<Drug> {
   constructor(
     private readonly drugRepository: DrugRepository,
     private readonly drugSource: DrugSourceClient,
+    private readonly audit: AuditLogService,
   ) {
     super(drugRepository);
   }
@@ -65,9 +102,10 @@ export class DrugService extends AbstractBaseService<Drug> {
   /**
    * Kéo toàn bộ danh mục từ nguồn CSDL Dược và ghi đè bản sao cục bộ. Cả lần chạy giữ khoá đồng bộ từ TRƯỚC khi tải
    * nguồn, nên hai lần bấm gần nhau không thể để snapshot cũ ghi sau snapshot mới. Mọi lỗi giữa chừng (kể cả rào tỉ lệ
-   * INACTIVE) đều rollback — không bao giờ để lại danh mục ghi dở.
+   * INACTIVE) đều rollback — không bao giờ để lại danh mục ghi dở. Nhật ký ghi trong cùng transaction.
    */
-  sync(callerId: string, force = false): Promise<DrugSyncResult> {
+  sync(actor: RequestActor, force = false): Promise<DrugSyncResult> {
+    const callerId = actor.user.userId;
     return this.drugRepository.withSyncLock(async (tx) => {
       const drugs = await this.drugSource.fetchAll();
       // Nguồn rỗng gần như chắc chắn là sự cố phía nguồn — ghi vào sẽ chuyển INACTIVE toàn bộ danh mục.
@@ -91,8 +129,10 @@ export class DrugService extends AbstractBaseService<Drug> {
         });
       }
       const deactivated = await this.drugRepository.deactivateStale(tx, syncedAt, callerId);
-      const productsUpdated = await this.drugRepository.syncProductPrescription(tx, syncedAt, callerId);
-      return { total: drugs.length, upserted, deactivated, productsUpdated, syncedAt };
+      const changed = await this.drugRepository.syncProductPrescription(tx, syncedAt, callerId);
+      const counts = { total: drugs.length, upserted, deactivated, productsUpdated: changed.length };
+      await this.audit.record(tx, auditActorOf(actor), syncAuditEntries(counts, changed, force));
+      return { ...counts, syncedAt };
     });
   }
 }

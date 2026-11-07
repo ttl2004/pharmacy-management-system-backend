@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { AuditAction, BatchStatus, Prisma } from '@prisma/client';
+import { BatchStatus, Prisma } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { badRequest, inventoryError } from '../core/inventory.error';
 import { InventoryEvents } from '../core/inventory-events';
@@ -33,6 +34,19 @@ const BLOCKING_RANK: Record<BatchStatus, number> = {
   [BatchStatus.QUARANTINE]: 1,
   [BatchStatus.RECALLED]: 2,
 };
+
+/**
+ * Event nhật ký theo trạng thái đích: chuyển sang RECALLED là `BATCH.RECALLED` (CRITICAL, bắt buộc lý do — DTO và
+ * kiểm ở đầu `setStatus` đã đảm bảo có), còn lại `BATCH.STATUS_CHANGED`.
+ */
+function batchStatusEvent(
+  status: BatchStatus,
+  reason: string | null,
+): { event: 'BATCH.RECALLED'; reason: string; severity: 2 } | { event: 'BATCH.STATUS_CHANGED'; reason: string | null } {
+  if (status !== BatchStatus.RECALLED) return { event: 'BATCH.STATUS_CHANGED', reason };
+  if (!reason) throw badRequest('Thu hồi lô phải có lý do');
+  return { event: 'BATCH.RECALLED', reason, severity: 2 };
+}
 
 /**
  * Khoá / mở khoá / thu hồi lô. Không đổi tồn — chỉ đổi lô có được xuất/bán hay không (FEFO bỏ qua lô khác AVAILABLE).
@@ -89,17 +103,15 @@ export class BatchStatusService {
           message: 'Lô vừa được người khác đổi trạng thái, hãy tải lại rồi thử lại',
         });
       }
-      await this.audit.record(tx, [
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId,
-          action: AuditAction.STATUS_CHANGE,
+          ...batchStatusEvent(dto.status, dto.reason ?? null),
           entityType: AUDIT_ENTITY.STOCK_BATCH,
           entityId: id,
-          branchId: batch.branchId,
+          entityLabel: batch.batchNumber,
+          branchIds: [batch.branchId],
           before: { status: batch.status },
           after: { status: dto.status },
-          reason: dto.reason ?? null,
-          ipAddress: actor.ip,
         },
       ]);
       this.emitAfterCommit(ctx, [batch.branchId], batch.productId);
@@ -141,18 +153,19 @@ export class BatchStatusService {
           updatedBy: actorId,
         },
       });
+      // Mỗi lô một dòng (phạm vi = chi nhánh của lô), gom một lần record.
+      const event = batchStatusEvent(dto.status, dto.reason);
       await this.audit.record(
         tx,
+        auditActorOf(actor),
         targets.map((target) => ({
-          actorId,
-          action: AuditAction.STATUS_CHANGE,
+          ...event,
           entityType: AUDIT_ENTITY.STOCK_BATCH,
           entityId: target.id,
-          branchId: target.branchId,
+          entityLabel: dto.batchNumber,
+          branchIds: [target.branchId],
           before: { status: target.status },
           after: { status: dto.status },
-          reason: dto.reason,
-          ipAddress: actor.ip,
         })),
       );
       this.emitAfterCommit(

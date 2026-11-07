@@ -11,6 +11,8 @@ import {
   resolveBranchScope,
 } from 'src/modules/feature-auth/permission/branch-scope';
 import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { badRequest, inventoryError, invalidReference } from '../core/inventory.error';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { resolveWriteBranch } from '../core/inventory-scope';
@@ -56,6 +58,7 @@ export class SupplierPaymentService {
     private readonly writer: SupplierPaymentWriter,
     private readonly transactions: InventoryTransactions,
     private readonly permissions: PermissionService,
+    private readonly audit: AuditLogService,
   ) {}
 
   /** Lập phiếu chi phân bổ vào nhiều phiếu nhập của MỘT NCC; sai một dòng là rollback cả phiếu. */
@@ -108,8 +111,9 @@ export class SupplierPaymentService {
           source: SupplierPaymentSource.MANUAL,
           allocations: dto.allocations.map((row) => ({ receiptId: row.receiptId, amount: BigInt(row.amount) })),
         },
-        { actorId: actor.user.userId, ip: actor.ip },
+        { actorId: actor.user.userId },
       );
+      await this.audit.record(tx, auditActorOf(actor), created.auditEntries);
       const row = (await this.payments.findById(created.id, tx))!;
       return present(row, await this.canCancel(row, scope, actor));
     });
@@ -131,7 +135,8 @@ export class SupplierPaymentService {
       if (!row || !branchesOf(row).some((b) => isInBranchScope(scope, b))) throw notFound();
       for (const branchId of branchesOf(row)) assertBranchInScope(scope, branchId);
 
-      await this.writer.cancel(tx, row, dto.reason?.trim() || null, { actorId: actor.user.userId, ip: actor.ip });
+      const entries = await this.writer.cancel(tx, row, dto.reason?.trim() || null, { actorId: actor.user.userId });
+      await this.audit.record(tx, auditActorOf(actor), entries);
       const after = (await this.payments.findById(id, tx))!;
       return present(after, false);
     });

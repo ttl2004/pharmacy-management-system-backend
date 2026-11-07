@@ -114,11 +114,16 @@ export class PriceBookRowsRepository {
     const onHand = Prisma.sql`COALESCE(c."onHand", 0)`;
     const minStock = Prisma.sql`COALESCE(bp."minStockLevel", p."minStockLevel")`;
     switch (stock) {
-      case 'in_stock': return [Prisma.sql`${onHand} > 0`];
-      case 'out_of_stock': return [Prisma.sql`${onHand} <= 0`];
-      case 'below_min': return [Prisma.sql`${minStock} > 0 AND ${onHand} < ${minStock}`];
-      case 'above_max': return [Prisma.sql`p."maxStockLevel" IS NOT NULL AND ${onHand} > p."maxStockLevel"`];
-      default: return [];
+      case 'in_stock':
+        return [Prisma.sql`${onHand} > 0`];
+      case 'out_of_stock':
+        return [Prisma.sql`${onHand} <= 0`];
+      case 'below_min':
+        return [Prisma.sql`${minStock} > 0 AND ${onHand} < ${minStock}`];
+      case 'above_max':
+        return [Prisma.sql`p."maxStockLevel" IS NOT NULL AND ${onHand} > p."maxStockLevel"`];
+      default:
+        return [];
     }
   }
 
@@ -153,11 +158,17 @@ export class PriceBookRowsRepository {
   findProductUnit(productId: string, unitId: string, db: Prisma.TransactionClient = this.prisma) {
     return db.productUnit.findFirst({
       where: { productId, unitId, isDeleted: false, status: RecordStatus.ACTIVE },
-      select: { id: true, salePrice: true },
+      // Mã + tên sản phẩm cho nhãn và từ khoá tìm kiếm của nhật ký khi sửa giá chung.
+      select: { id: true, salePrice: true, product: { select: { code: true, name: true } } },
     });
   }
 
-  async setGeneralPrice(db: Prisma.TransactionClient, productUnitId: string, price: number, actorId: string): Promise<void> {
+  async setGeneralPrice(
+    db: Prisma.TransactionClient,
+    productUnitId: string,
+    price: number,
+    actorId: string,
+  ): Promise<void> {
     await db.productUnit.update({
       where: { id: productUnitId },
       data: { salePrice: price, updatedAt: new Date(), updatedBy: actorId },

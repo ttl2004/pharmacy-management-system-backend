@@ -114,17 +114,17 @@ export class SupplierPaymentRepository {
    * Cộng/trừ `paidAmount` của nhiều phiếu nhập bằng MỘT câu UPDATE có điều kiện. Điều kiện nằm trong WHERE nên hai
    * request đồng thời không thể cùng vượt tổng tiền phiếu; câu lệnh sửa ít dòng hơn yêu cầu = có điều kiện bị vi phạm.
    * `requireConfirmed`: trả thêm chỉ cho phiếu CONFIRMED; hoàn lại (huỷ phiếu chi/phiếu nhập) thì không đòi.
-   * Trả `id → { paidAmount mới, branchId }` của các phiếu đã sửa.
+   * Trả `id → { paidAmount mới, branchId, code }` của các phiếu đã sửa (mã phiếu cho nhãn nhật ký).
    */
   async applyPaidDeltas(
     tx: Prisma.TransactionClient,
     deltas: readonly PaidDelta[],
     requireConfirmed: boolean,
-  ): Promise<Map<string, { paidAmount: bigint; branchId: string }>> {
+  ): Promise<Map<string, { paidAmount: bigint; branchId: string; code: string }>> {
     if (!deltas.length) return new Map();
     const values = Prisma.join(deltas.map((d) => Prisma.sql`(${d.receiptId}::uuid, ${d.delta}::bigint)`));
     const statusCond = requireConfirmed ? Prisma.sql`AND r."status" = 'CONFIRMED'` : Prisma.empty;
-    const rows = await tx.$queryRaw<{ id: string; branchId: string; paidAmount: bigint }[]>(Prisma.sql`
+    const rows = await tx.$queryRaw<{ id: string; code: string; branchId: string; paidAmount: bigint }[]>(Prisma.sql`
       UPDATE "goods_receipts" AS r
       SET "paidAmount" = r."paidAmount" + v."delta",
           "paymentStatus" = (CASE
@@ -135,7 +135,7 @@ export class SupplierPaymentRepository {
       FROM (VALUES ${values}) AS v("id", "delta")
       WHERE r."id" = v."id" AND r."isDeleted" = false ${statusCond}
         AND r."paidAmount" + v."delta" BETWEEN 0 AND r."totalAmount"
-      RETURNING r."id", r."branchId", r."paidAmount"`);
-    return new Map(rows.map((row) => [row.id, { paidAmount: row.paidAmount, branchId: row.branchId }]));
+      RETURNING r."id", r."code", r."branchId", r."paidAmount"`);
+    return new Map(rows.map((row) => [row.id, { paidAmount: row.paidAmount, branchId: row.branchId, code: row.code }]));
   }
 }

@@ -13,7 +13,7 @@ import { AuthzGuard } from './guards/auth.guard';
 import type { JwtUser } from './types/authz.types';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { AuthConfig } from './auth.config';
-import { SessionStore } from './session.store';
+import { requestContextOf } from 'src/common/decorators/request-context';
 import type { TokenPair } from './token.service';
 import { PasswordService } from './password.service';
 import { ChangePasswordRequest } from './dtos/password.request';
@@ -37,7 +37,6 @@ export class AuthzController {
   constructor(
     private readonly auth: AuthzService,
     private readonly config: AuthConfig,
-    private readonly sessions: SessionStore,
     private readonly passwords: PasswordService,
   ) {}
 
@@ -64,7 +63,7 @@ export class AuthzController {
       'Swagger UI không cho phép đặt cookie thủ công. Bật AUTH_REFRESH_IN_BODY=true để kiểm thử bằng token trong body.',
   })
   async login(@Body() dto: LoginRequest, @Req() req: FastifyRequest, @Res({ passthrough: true }) reply: FastifyReply) {
-    return this.respond(reply, await this.auth.login(dto, { userAgent: req.headers['user-agent'], ip: req.ip }));
+    return this.respond(reply, await this.auth.login(dto, requestContextOf(req)));
   }
 
   @Post('refresh')
@@ -83,7 +82,7 @@ export class AuthzController {
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
     reply.header('Cache-Control', 'no-store');
-    return this.auth.refreshToken(this.receiveToken(req, dto));
+    return this.auth.refreshToken(this.receiveToken(req, dto), requestContextOf(req));
   }
 
   @Post('logout')
@@ -109,8 +108,12 @@ export class AuthzController {
   @HttpCode(200)
   @ApiBearerAuth(AUTH_JWT)
   @UseGuards(AuthzGuard)
-  async logoutAll(@CurrentUser() user: JwtUser, @Res({ passthrough: true }) reply: FastifyReply) {
-    await this.sessions.revokeAllByUser(user.userId);
+  async logoutAll(
+    @CurrentUser() user: JwtUser,
+    @Req() req: FastifyRequest,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    await this.auth.logoutAll(user, requestContextOf(req));
     reply.clearCookie(this.config.cookieName, this.config.cookieOptions);
     return { success: true };
   }
@@ -133,9 +136,10 @@ export class AuthzController {
   async changePassword(
     @CurrentUser() user: JwtUser,
     @Body() dto: ChangePasswordRequest,
+    @Req() req: FastifyRequest,
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
-    await this.passwords.change(user, dto);
+    await this.passwords.change(user, dto, requestContextOf(req));
     reply.clearCookie(this.config.cookieName, this.config.cookieOptions);
     return { success: true };
   }

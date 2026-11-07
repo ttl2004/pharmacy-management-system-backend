@@ -2,6 +2,8 @@
 export const MAX_ORDER_LINES = 100;
 
 /** Số lượng tối đa của một dòng theo đơn vị bán. Trần thật theo đơn vị cơ bản vẫn là `MAX_BASE_QUANTITY` của kho. */
+/** Trần một khoản tiền nhập từ client (đồng), khớp trần ở DTO kho. */
+export const MAX_MONEY = 2_000_000_000;
 export const MAX_LINE_QUANTITY = 10_000;
 
 /** Đơn tại quầy PENDING không ai thao tác quá chừng này phút thì tự huỷ để nhả hàng đang giữ (luật S8). */

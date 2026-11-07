@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
+import { SecurityEventModule } from 'src/providers/security-event/security-event.module';
 import { UserModule } from '../user/user.module';
 import { AuthzController } from './authz.controller';
 import { AuthzService } from './authz.service';
@@ -13,6 +14,8 @@ import { AuthzStrategy } from './strategies/auth.strategy';
 import { AuthConfig } from './auth.config';
 import { SessionStore, DbSessionStore, SessionTransactions } from './session.store';
 import { TokenService } from './token.service';
+import { LoginFailureMonitor } from './login-failure.monitor';
+import { BruteForceDetector } from './brute-force.detector';
 import { PasswordService } from './password.service';
 
 @Module({ imports: [ConfigModule], providers: [AuthConfig], exports: [AuthConfig] })
@@ -21,6 +24,7 @@ class AuthConfigModule {}
 @Module({
   imports: [
     AuthConfigModule,
+    SecurityEventModule,
     PassportModule.register({ defaultStrategy: AUTH_JWT }),
     // forwardRef vì UserModule cần AuthzGuard của module này — xem user.module.ts.
     forwardRef(() => UserModule),
@@ -43,8 +47,10 @@ class AuthConfigModule {}
     SessionTransactions,
     TokenService,
     PasswordService,
+    LoginFailureMonitor,
+    BruteForceDetector,
     { provide: SessionStore, useClass: DbSessionStore },
   ],
-  exports: [AuthzService, AuthzGuard, SessionStore, PasswordService],
+  exports: [AuthzService, AuthzGuard, SessionStore, SessionTransactions, PasswordService],
 })
 export class AuthzModule {}

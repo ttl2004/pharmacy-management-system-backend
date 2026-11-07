@@ -59,6 +59,7 @@ export enum ErrorCode {
   DRUG_SOURCE_UNAVAILABLE = 1607,
   DRUG_SYNC_IN_PROGRESS = 1608,
   DRUG_SYNC_SUSPICIOUS = 1609,
+  ASSISTANT_UNAVAILABLE = 1610,
 
   //- Kho — khai đủ cả dải từ giai đoạn 1 để các giai đoạn sau không tranh số
   INSUFFICIENT_STOCK = 1700,

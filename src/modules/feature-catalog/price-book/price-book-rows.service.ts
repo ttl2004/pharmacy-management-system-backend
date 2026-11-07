@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
 import { resolveBranchScope, scopedBranchFilter } from '../../feature-auth/permission/branch-scope';
@@ -51,7 +53,10 @@ export class PriceBookRowsService {
       this.rowsRepository.findPage(filter, page, pageSize),
       this.rowsRepository.findReadableBookIds(scope, query.bookIds ?? []),
     ]);
-    const bookPrices = await this.rowsRepository.findBookPrices(bookIds, items.map((i) => i.productUnitId));
+    const bookPrices = await this.rowsRepository.findBookPrices(
+      bookIds,
+      items.map((i) => i.productUnitId),
+    );
 
     const priceOf = new Map(bookPrices.map((p) => [`${p.priceBookId}|${p.productUnitId}`, p.price]));
     const rows: PriceRowResponse[] = items.map((row) => ({
@@ -73,16 +78,20 @@ export class PriceBookRowsService {
    * Sửa giá chung = `product_units.salePrice` — dữ liệu toàn chuỗi nên chỉ vai trò toàn chuỗi được sửa (D6);
    * quản lý chi nhánh có `price-book:update` vẫn bị 403 ở đây.
    */
-  async setGeneralPrice(dto: SetGeneralPriceRequest, user: JwtUser): Promise<{ ok: true }> {
-    if (resolveBranchScope(user).kind !== 'ALL') {
+  async setGeneralPrice(dto: SetGeneralPriceRequest, actor: RequestActor): Promise<{ ok: true }> {
+    if (resolveBranchScope(actor.user).kind !== 'ALL') {
       throw permissionError(ErrorCode.PERMISSION_DENIED, 'Chỉ quản trị toàn chuỗi mới được sửa giá chung');
     }
     await this.bookRepository.transaction(async (tx) => {
       const unit = await this.rowsRepository.findProductUnit(dto.drugId, dto.unitId, tx);
-      if (!unit) throw new ErrorException({ code: ErrorCode.INVALID_REFERENCE, message: 'Đơn vị không thuộc hàng này' });
+      if (!unit)
+        throw new ErrorException({ code: ErrorCode.INVALID_REFERENCE, message: 'Đơn vị không thuộc hàng này' });
       if (unit.salePrice === dto.price) return;
-      await this.rowsRepository.setGeneralPrice(tx, unit.id, dto.price, user.userId);
-      await this.audit.record(tx, [generalPriceChangedEntry(user.userId, dto.drugId, dto.unitId, unit.salePrice, dto.price)]);
+      await this.rowsRepository.setGeneralPrice(tx, unit.id, dto.price, actor.user.userId);
+      const product = { id: dto.drugId, code: unit.product.code, name: unit.product.name };
+      await this.audit.record(tx, auditActorOf(actor), [
+        generalPriceChangedEntry(product, dto.unitId, unit.salePrice, dto.price),
+      ]);
     });
     return { ok: true };
   }

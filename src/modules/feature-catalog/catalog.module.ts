@@ -6,6 +6,10 @@ import { CatalogTransactions } from './catalog-transactions';
 import { CategoryController } from './category/category.controller';
 import { CategoryService } from './category/category.service';
 import { CategoryRepository } from './category/repositories/category.repository';
+import { DrugSourceClient } from './drug/drug-source.client';
+import { DrugController } from './drug/drug.controller';
+import { DrugService } from './drug/drug.service';
+import { DrugRepository } from './drug/repositories/drug.repository';
 import { LocationController } from './location/location.controller';
 import { LocationService } from './location/location.service';
 import { LocationRepository } from './location/repositories/location.repository';
@@ -40,6 +44,7 @@ import { PriceBookRowsRepository } from './price-book/repositories/price-book-ro
     LocationController,
     RouteController,
     PriceBookController,
+    DrugController,
   ],
   providers: [
     CatalogTransactions,
@@ -60,6 +65,9 @@ import { PriceBookRowsRepository } from './price-book/repositories/price-book-ro
     PriceBookRowsService,
     PriceBookRepository,
     PriceBookRowsRepository,
+    DrugService,
+    DrugRepository,
+    DrugSourceClient,
   ],
   // Repository được export để `StorefrontModule` dùng lại truy vấn đọc công khai, không viết lại.
   exports: [

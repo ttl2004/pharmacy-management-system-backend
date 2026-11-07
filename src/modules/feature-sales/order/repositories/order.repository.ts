@@ -68,6 +68,7 @@ const ORDER_DETAIL_SELECT = {
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     select: {
       id: true,
+      kind: true,
       method: true,
       amount: true,
       status: true,
@@ -99,6 +100,8 @@ export interface OrderHead {
   channel: OrderChannel;
   status: OrderStatus;
   totalAmount: bigint;
+  /** Giảm giá hiện tại — để nhật ký biết lần sửa đơn có đổi giảm giá không. */
+  discountAmount: bigint;
   prescriptionCode: string | null;
   prescriberName: string | null;
   updatedAt: Date | null;
@@ -150,6 +153,7 @@ export class OrderRepository {
         channel: true,
         status: true,
         totalAmount: true,
+        discountAmount: true,
         prescriptionCode: true,
         prescriberName: true,
         updatedAt: true,
@@ -253,7 +257,7 @@ export class OrderRepository {
         status: OrderStatus.PENDING,
         OR: [{ updatedAt: { lt: cutoff } }, { updatedAt: null, createdAt: { lt: cutoff } }],
       },
-      select: { id: true, branchId: true, status: true, updatedAt: true },
+      select: { id: true, code: true, branchId: true, status: true, updatedAt: true },
       orderBy: { createdAt: 'asc' },
       take,
     });

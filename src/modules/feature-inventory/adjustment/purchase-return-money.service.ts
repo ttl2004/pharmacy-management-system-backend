@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PaymentMethod, Prisma, ReceiptStatus } from '@prisma/client';
 import { badRequest, invalidReference } from '../core/inventory.error';
+import { SupplierDebtRepository } from '../supplier-debt/repositories/supplier-debt.repository';
 import { percentOf, type ExpenseSnapshot } from '../goods-receipt/goods-receipt.calculator';
 import type { AdjustmentItemRequest, CreateAdjustmentRequest } from './dtos/adjustment.request';
 import type { DraftBatch } from './repositories/adjustment.repository';
@@ -12,7 +13,13 @@ import {
 
 type MoneyDto = Pick<
   CreateAdjustmentRequest,
-  'goodsReceiptId' | 'discountAmount' | 'discountPercent' | 'refundExpenses' | 'supplierPaid' | 'paymentMethod' | 'items'
+  | 'goodsReceiptId'
+  | 'discountAmount'
+  | 'discountPercent'
+  | 'refundExpenses'
+  | 'supplierPaid'
+  | 'paymentMethod'
+  | 'items'
 >;
 
 /** Một dòng trả: lô đã đọc + số đưa ra (dương) + phần tiền gửi lên. */
@@ -33,6 +40,17 @@ export interface ReturnMoneyHeader {
   totalAmount: bigint;
   supplierPaid: bigint;
   paymentMethod: PaymentMethod | null;
+}
+
+/**
+ * Trần giá trả / đơn vị cơ bản: theo dòng phiếu nhập nếu có (đơn giá thực nhập sau chiết khấu dòng, quy về đơn vị cơ
+ * bản, làm tròn lên để không chặn nhầm giá vốn hợp lệ), không thì giá vốn lô.
+ */
+export function returnPriceCap(
+  source: { importPrice: number; unitDiscount: number; conversionRate: number } | null,
+  batchImportPrice: number,
+): number {
+  return source ? Math.ceil((source.importPrice - source.unitDiscount) / source.conversionRate) : batchImportPrice;
 }
 
 /** Header tiền của phiếu không phải trả NCC — về 0 / null. */
@@ -56,7 +74,10 @@ export const NO_RETURN_MONEY: ReturnMoneyHeader = {
  */
 @Injectable()
 export class PurchaseReturnMoneyService {
-  constructor(private readonly returns: PurchaseReturnRepository) {}
+  constructor(
+    private readonly returns: PurchaseReturnRepository,
+    private readonly debts: SupplierDebtRepository,
+  ) {}
 
   /**
    * Trả theo phiếu nhập: từng dòng nhập + đã trả (phiếu trả đã xác nhận) + tồn lô hiện tại → còn trả được =
@@ -64,10 +85,14 @@ export class PurchaseReturnMoneyService {
    */
   async returnable(receiptId: string, ownBranchId: string | undefined) {
     const receipt = await this.returns.findReceipt(receiptId);
-    if (!receipt || (ownBranchId && receipt.branchId !== ownBranchId)) throw invalidReference('phiếu nhập không tồn tại');
+    if (!receipt || (ownBranchId && receipt.branchId !== ownBranchId))
+      throw invalidReference('phiếu nhập không tồn tại');
     if (receipt.status !== ReceiptStatus.CONFIRMED) throw badRequest('Chỉ trả theo phiếu nhập đã nhập kho');
     const [returned, refunded, costs, batches] = await Promise.all([
-      this.returns.returnedByReceiptItem(receipt.items.map((i) => i.id), undefined),
+      this.returns.returnedByReceiptItem(
+        receipt.items.map((i) => i.id),
+        undefined,
+      ),
       this.returns.refundedByCode(receipt.id, undefined),
       this.returns.receiptItemCosts(receipt.id),
       this.returns.findReceiptBatches(receipt.branchId, receipt.items),
@@ -116,8 +141,12 @@ export class PurchaseReturnMoneyService {
   /** Phiếu không phải trả NCC mà gửi trường tiền → 400 (không âm thầm bỏ qua). */
   assertNoMoney(dto: MoneyDto): void {
     const headerSent =
-      dto.goodsReceiptId !== undefined || dto.discountAmount !== undefined || dto.discountPercent !== undefined ||
-      (dto.refundExpenses?.length ?? 0) > 0 || dto.supplierPaid !== undefined || dto.paymentMethod !== undefined;
+      dto.goodsReceiptId !== undefined ||
+      dto.discountAmount !== undefined ||
+      dto.discountPercent !== undefined ||
+      (dto.refundExpenses?.length ?? 0) > 0 ||
+      dto.supplierPaid !== undefined ||
+      dto.paymentMethod !== undefined;
     const lineSent = dto.items.some((i) => i.returnPrice !== undefined || i.goodsReceiptItemId !== undefined);
     if (headerSent || lineSent) throw badRequest('Giá trả, giảm giá, tiền NCC trả chỉ dùng cho phiếu trả hàng nhập');
   }
@@ -125,21 +154,44 @@ export class PurchaseReturnMoneyService {
   /** Tính + kiểm tiền phiếu trả lúc lưu nháp. `excludeId` = phiếu đang sửa (không tự tính vào "đã trả"). */
   async build(
     tx: Prisma.TransactionClient,
-    input: { dto: MoneyDto; branchId: string; supplierId: string; excludeId?: string; lines: readonly ReturnLineInput[] },
-  ): Promise<{ header: ReturnMoneyHeader; lineMoney: Map<string, { returnPrice: number; goodsReceiptItemId: string | null }> }> {
+    input: {
+      dto: MoneyDto;
+      branchId: string;
+      supplierId: string;
+      excludeId?: string;
+      lines: readonly ReturnLineInput[];
+    },
+  ): Promise<{
+    header: ReturnMoneyHeader;
+    lineMoney: Map<string, { returnPrice: number; goodsReceiptItemId: string | null }>;
+  }> {
     const { dto } = input;
-    const receipt = dto.goodsReceiptId ? await this.loadReceipt(tx, dto.goodsReceiptId, input.branchId, input.supplierId) : null;
+    const receipt = dto.goodsReceiptId
+      ? await this.loadReceipt(tx, dto.goodsReceiptId, input.branchId, input.supplierId)
+      : null;
     if (!receipt && input.lines.some((l) => l.item.goodsReceiptItemId)) {
       throw badRequest('Dòng trả theo phiếu nhập phải kèm goodsReceiptId');
     }
-    if (!receipt && dto.refundExpenses?.length) throw badRequest('Chi phí nhập hoàn lại chỉ có khi trả theo phiếu nhập');
+    if (!receipt && dto.refundExpenses?.length)
+      throw badRequest('Chi phí nhập hoàn lại chỉ có khi trả theo phiếu nhập');
     if (receipt) await this.assertWithinReceived(tx, receipt, input.lines, input.excludeId);
 
     const lineMoney = new Map(
-      input.lines.map((l) => [
-        l.batch.id,
-        { returnPrice: l.item.returnPrice ?? l.batch.importPrice, goodsReceiptItemId: l.item.goodsReceiptItemId ?? null },
-      ]),
+      input.lines.map((l, index) => {
+        if (!receipt) this.assertBatchOfSupplier(l.batch, input.supplierId, index);
+        const source = receipt?.items.find((i) => i.id === l.item.goodsReceiptItemId) ?? null;
+        const cap = returnPriceCap(source, l.batch.importPrice);
+        if (l.item.returnPrice !== undefined && l.item.returnPrice > cap) {
+          throw badRequest(`Dòng ${index + 1}: giá trả ${l.item.returnPrice} vượt giá nhập ${cap}`);
+        }
+        return [
+          l.batch.id,
+          {
+            returnPrice: l.item.returnPrice ?? Math.min(l.batch.importPrice, cap),
+            goodsReceiptItemId: l.item.goodsReceiptItemId ?? null,
+          },
+        ] as const;
+      }),
     );
     const goodsAmount = input.lines.reduce(
       (sum, l) => sum + BigInt(l.quantity) * BigInt(lineMoney.get(l.batch.id)?.returnPrice ?? 0),
@@ -148,7 +200,9 @@ export class PurchaseReturnMoneyService {
 
     const hasPercent = dto.discountPercent !== undefined;
     if (hasPercent && (dto.discountAmount ?? 0) > 0) throw badRequest('Chỉ chọn giảm giá theo VND hoặc theo %');
-    const discountAmount = hasPercent ? percentOf(goodsAmount, dto.discountPercent as number) : BigInt(dto.discountAmount ?? 0);
+    const discountAmount = hasPercent
+      ? percentOf(goodsAmount, dto.discountPercent as number)
+      : BigInt(dto.discountAmount ?? 0);
     if (discountAmount > goodsAmount) throw badRequest('Giảm giá vượt tổng tiền hàng');
 
     const refunds = receipt ? await this.refundSnapshots(tx, receipt, dto.refundExpenses ?? [], input.excludeId) : [];
@@ -174,6 +228,29 @@ export class PurchaseReturnMoneyService {
     };
   }
 
+  /** Trả không kèm phiếu nhập: lô đã biết NCC thì phải là NCC của phiếu trả (không trừ nhầm công nợ NCC khác). */
+  private assertBatchOfSupplier(batch: DraftBatch, supplierId: string, index: number): void {
+    if (batch.supplierId && batch.supplierId !== supplierId) {
+      throw invalidReference(`dòng ${index + 1}: lô thuộc nhà cung cấp khác`);
+    }
+  }
+
+  /**
+   * Công nợ NCC tại chi nhánh không được âm sau khi phiếu trả này có hiệu lực. GỌI SAU KHI phiếu đã được chiếm
+   * (CONFIRMED trong tx) và đã giữ khoá NCC: `debtOf` đã tính phiếu này nên chỉ cần kiểm kết quả ≥ 0; khoá NCC làm hai
+   * phiếu cùng NCC xếp hàng, phiếu sau thấy phiếu trước đã commit. Số tiền + NCC được ĐỌC LẠI trong tx (không dùng
+   * bản đọc trước khi chiếm — sửa nháp song song có thể đã đổi). Phiếu không làm giảm nợ (NCC hoàn đủ tiền) thì bỏ qua.
+   */
+  async assertDebtStaysNonNegative(tx: Prisma.TransactionClient, adjustmentId: string): Promise<void> {
+    const head = await tx.stockAdjustment.findUnique({
+      where: { id: adjustmentId },
+      select: { supplierId: true, branchId: true, totalAmount: true, supplierPaid: true },
+    });
+    if (!head?.supplierId || head.totalAmount - head.supplierPaid <= 0n) return;
+    const debt = await this.debts.debtOf(head.supplierId, head.branchId, tx);
+    if (debt.scoped < 0n) throw badRequest('Trả vượt công nợ hiện có với NCC');
+  }
+
   /**
    * Khoá NCC của phiếu trả (lock order chung: NCC → phiếu nhập → lô) — xác nhận/huỷ phiếu trả đổi công nợ nên xếp hàng
    * cùng phiếu chi / điều chỉnh nợ (các bên đó tính `debtBefore` dưới khoá NCC).
@@ -197,10 +274,12 @@ export class PurchaseReturnMoneyService {
   ): Promise<void> {
     await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "goods_receipts" WHERE "id" = ${receiptId}::uuid FOR UPDATE`);
     const receipt = await this.returns.findReceipt(receiptId, tx);
-    if (!receipt || receipt.status !== ReceiptStatus.CONFIRMED) throw badRequest('Phiếu nhập gốc không còn ở trạng thái đã nhập');
+    if (!receipt || receipt.status !== ReceiptStatus.CONFIRMED)
+      throw badRequest('Phiếu nhập gốc không còn ở trạng thái đã nhập');
     const wanted = new Map<string, number>();
     for (const item of items) {
-      if (item.goodsReceiptItemId) wanted.set(item.goodsReceiptItemId, (wanted.get(item.goodsReceiptItemId) ?? 0) - item.quantity);
+      if (item.goodsReceiptItemId)
+        wanted.set(item.goodsReceiptItemId, (wanted.get(item.goodsReceiptItemId) ?? 0) - item.quantity);
     }
     await this.assertQuantities(tx, receipt, wanted, adjustmentId);
     const saved = (refundExpenses as RefundExpenseSnapshot[] | null) ?? [];
@@ -249,7 +328,9 @@ export class PurchaseReturnMoneyService {
       if (qty === undefined) continue;
       const left = item.baseQuantity - (returned.get(item.id) ?? 0);
       if (qty > left) {
-        throw badRequest(`${item.product.name} lô ${item.batchNumber}: trả ${qty} vượt số còn trả được (${Math.max(left, 0)})`);
+        throw badRequest(
+          `${item.product.name} lô ${item.batchNumber}: trả ${qty} vượt số còn trả được (${Math.max(left, 0)})`,
+        );
       }
     }
   }
@@ -271,7 +352,8 @@ export class PurchaseReturnMoneyService {
       const source = sources.find((e) => e.code === r.code);
       if (!source) throw invalidReference(`chi phí ${r.code} không có trên phiếu nhập gốc`);
       const remaining = source.amount - (refunded.get(r.code) ?? 0);
-      if (r.amount > remaining) throw badRequest(`${source.name}: hoàn ${r.amount} vượt phần còn hoàn được (${Math.max(remaining, 0)})`);
+      if (r.amount > remaining)
+        throw badRequest(`${source.name}: hoàn ${r.amount} vượt phần còn hoàn được (${Math.max(remaining, 0)})`);
       return { code: source.code, name: source.name, receivedAmount: source.amount, amount: r.amount };
     });
   }

@@ -1,17 +1,8 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  Param,
-  ParseUUIDPipe,
-  Patch,
-  Post,
-  Query,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
+import { DeleteReasonQuery } from 'src/common/dtos/delete-reason.query';
+import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { AuthzGuard } from '../feature-auth/authz/guards/auth.guard';
 import type { JwtUser } from '../feature-auth/authz/types/authz.types';
@@ -52,8 +43,8 @@ export class BranchController {
   @RequirePermissions('branch:create')
   @Post()
   @ApiOperation({ description: 'Tạo chi nhánh. Chỉ vai trò phạm vi toàn chuỗi.' })
-  create(@Body() dto: CreateBranchRequest, @CurrentUser() user: JwtUser) {
-    return this.branchService.create(dto, user);
+  create(@Body() dto: CreateBranchRequest, @CurrentActor() actor: RequestActor) {
+    return this.branchService.create(dto, actor);
   }
 
   @RequirePermissions('branch:update')
@@ -62,15 +53,21 @@ export class BranchController {
   update(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: UpdateBranchRequest,
-    @CurrentUser() user: JwtUser,
+    @CurrentActor() actor: RequestActor,
   ) {
-    return this.branchService.update(id, dto, user);
+    return this.branchService.update(id, dto, actor);
   }
 
   @RequirePermissions('branch:delete')
   @Delete(':id')
-  @ApiOperation({ description: 'Xoá mềm chi nhánh. Từ chối nếu còn người dùng tham chiếu.' })
-  remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentUser() user: JwtUser) {
-    return this.branchService.remove(id, user);
+  @ApiOperation({
+    description: 'Xoá mềm chi nhánh. Từ chối nếu còn người dùng tham chiếu. `?reason=` (tuỳ chọn) ghi vào nhật ký.',
+  })
+  remove(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Query() query: DeleteReasonQuery,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.branchService.remove(id, actor, query.reason);
   }
 }

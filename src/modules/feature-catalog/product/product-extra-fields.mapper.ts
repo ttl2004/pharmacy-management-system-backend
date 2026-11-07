@@ -14,8 +14,6 @@ export function toExtraCreateData(dto: ProductExtraFieldsRequest) {
     trackBatches: dto.trackBatches ?? type === ProductType.DRUG,
     routeId: dto.routeId ?? null,
     isControlled: dto.isControlled ?? false,
-    registrationNumber: text(dto.registrationNumber) ?? null,
-    countryOfOrigin: text(dto.countryOfOrigin) ?? null,
     maxStockLevel: dto.maxStockLevel ?? null,
     shortName: text(dto.shortName) ?? null,
     weight: dto.weight ?? null,
@@ -23,7 +21,7 @@ export function toExtraCreateData(dto: ProductExtraFieldsRequest) {
     description: text(dto.description) ?? null,
     orderNote: text(dto.orderNote) ?? null,
     isFavourite: dto.isFavourite ?? false,
-    nationalDrugCode: text(dto.nationalDrugCode) ?? null,
+    drugId: dto.drugId ?? null,
   } satisfies Partial<Prisma.ProductUncheckedCreateInput>;
 }
 
@@ -36,8 +34,6 @@ export function toExtraUpdateData(dto: ProductExtraFieldsRequest): Prisma.Produc
   if (dto.trackBatches !== undefined) data.trackBatches = dto.trackBatches;
   if (dto.routeId !== undefined) data.routeId = dto.routeId;
   if (dto.isControlled !== undefined) data.isControlled = dto.isControlled;
-  if (dto.registrationNumber !== undefined) data.registrationNumber = text(dto.registrationNumber);
-  if (dto.countryOfOrigin !== undefined) data.countryOfOrigin = text(dto.countryOfOrigin);
   if (dto.maxStockLevel !== undefined) data.maxStockLevel = dto.maxStockLevel;
   if (dto.shortName !== undefined) data.shortName = text(dto.shortName);
   if (dto.weight !== undefined) data.weight = dto.weight;
@@ -45,6 +41,6 @@ export function toExtraUpdateData(dto: ProductExtraFieldsRequest): Prisma.Produc
   if (dto.description !== undefined) data.description = text(dto.description);
   if (dto.orderNote !== undefined) data.orderNote = text(dto.orderNote);
   if (dto.isFavourite !== undefined) data.isFavourite = dto.isFavourite;
-  if (dto.nationalDrugCode !== undefined) data.nationalDrugCode = text(dto.nationalDrugCode);
+  if (dto.drugId !== undefined) data.drugId = dto.drugId;
   return data;
 }

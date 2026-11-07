@@ -15,25 +15,28 @@ describe('Danh mục quyền và mã lỗi', () => {
     ]);
   });
 
-  it('ADMIN được cấp đọc/sửa/xoá người dùng nhưng KHÔNG được tạo', () => {
+  it('ADMIN được cấp đủ 5 quyền người dùng (đợt 1 tích hợp: được tạo người dùng và đổi vai trò)', () => {
     const granted = DEFAULT_ROLE_GRANTS[AuthRole.ADMIN] ?? [];
-    expect(granted).toContain('user:read');
-    expect(granted).toContain('user:update');
-    expect(granted).toContain('user:delete');
-    expect(granted).not.toContain('user:create');
+    for (const code of ['user:read', 'user:create', 'user:update', 'user:delete', 'user:role:update']) {
+      expect(granted).toContain(code);
+    }
   });
 
-  it('không vai trò nào được cấp user:create hay user:role:update', () => {
-    const all = Object.values(DEFAULT_ROLE_GRANTS).flat();
-    expect(all).not.toContain('user:create');
-    expect(all).not.toContain('user:role:update');
+  it('chỉ ADMIN và PHARMACY_MANAGER được cấp user:create và user:role:update; SALES_STAFF, CUSTOMER thì không', () => {
+    for (const role of [AuthRole.ADMIN, AuthRole.PHARMACY_MANAGER]) {
+      expect(DEFAULT_ROLE_GRANTS[role] ?? []).toEqual(expect.arrayContaining(['user:create', 'user:role:update']));
+    }
+    for (const role of [AuthRole.SALES_STAFF, AuthRole.CUSTOMER]) {
+      const granted = DEFAULT_ROLE_GRANTS[role] ?? [];
+      expect(granted).not.toContain('user:create');
+      expect(granted).not.toContain('user:role:update');
+    }
   });
 
-  it('PHARMACY_MANAGER được đọc người dùng nhưng không tạo/sửa/xoá; SALES_STAFF không được đọc', () => {
+  it('PHARMACY_MANAGER quản lý được nhân viên chi nhánh mình (đủ 5 quyền người dùng); SALES_STAFF không được đọc', () => {
     const manager = DEFAULT_ROLE_GRANTS[AuthRole.PHARMACY_MANAGER] ?? [];
-    expect(manager).toContain('user:read');
-    for (const code of ['user:create', 'user:update', 'user:delete', 'user:role:update']) {
-      expect(manager).not.toContain(code);
+    for (const code of ['user:read', 'user:create', 'user:update', 'user:delete', 'user:role:update']) {
+      expect(manager).toContain(code);
     }
     expect(DEFAULT_ROLE_GRANTS[AuthRole.SALES_STAFF] ?? []).not.toContain('user:read');
   });
@@ -111,6 +114,16 @@ describe('Danh mục quyền và mã lỗi', () => {
   it('CUSTOMER không có quyền danh mục nào', () => {
     const granted = DEFAULT_ROLE_GRANTS[AuthRole.CUSTOMER] ?? [];
     expect(granted.filter((code) => /^(category|manufacturer|unit|product):/.test(code))).toEqual([]);
+  });
+
+  it('danh mục thuốc CSDL Dược (2026-10-29): ADMIN đọc + đồng bộ; PM, SS chỉ đọc; CUSTOMER không có', () => {
+    const grants = (role: AuthRole) => [...(DEFAULT_ROLE_GRANTS[role] ?? [])] as string[];
+    expect(grants(AuthRole.ADMIN)).toEqual(expect.arrayContaining(['drug:read', 'drug:sync']));
+    for (const role of [AuthRole.PHARMACY_MANAGER, AuthRole.SALES_STAFF]) {
+      expect(grants(role)).toContain('drug:read');
+      expect(grants(role)).not.toContain('drug:sync');
+    }
+    expect(grants(AuthRole.CUSTOMER).filter((code) => code.startsWith('drug:'))).toEqual([]);
   });
 
   describe('ma trận quyền kho (duyệt 2026-10-14) — nhà cung cấp và phiếu nhập', () => {
@@ -216,5 +229,23 @@ describe('Danh mục quyền và mã lỗi', () => {
     expect(ErrorCode.ROLE_NOT_ASSIGNABLE).toBe(1603);
     expect(ErrorCode.SUPER_ADMIN_PROTECTED).toBe(1604);
     expect(ErrorCode.SELF_OPERATION_FORBIDDEN).toBe(1605);
+  });
+
+  it('security-event:read có trong danh mục, chỉ ADMIN được cấp (PM, SS, CUSTOMER → 403)', () => {
+    expect(PERMISSION_CODES).toContain('security-event:read');
+    expect(DEFAULT_ROLE_GRANTS[AuthRole.ADMIN] ?? []).toContain('security-event:read');
+    for (const role of [AuthRole.PHARMACY_MANAGER, AuthRole.SALES_STAFF, AuthRole.CUSTOMER]) {
+      expect(DEFAULT_ROLE_GRANTS[role] ?? []).not.toContain('security-event:read');
+    }
+  });
+});
+
+describe('Quyền quản lý loại xuất dùng nội bộ', () => {
+  it('chỉ ADMIN được cấp internal-use-type:manage; PM và SS không', () => {
+    expect(PERMISSION_CODES).toContain('internal-use-type:manage');
+    expect(DEFAULT_ROLE_GRANTS[AuthRole.ADMIN] ?? []).toContain('internal-use-type:manage');
+    for (const role of [AuthRole.PHARMACY_MANAGER, AuthRole.SALES_STAFF]) {
+      expect(DEFAULT_ROLE_GRANTS[role] ?? []).not.toContain('internal-use-type:manage');
+    }
   });
 });

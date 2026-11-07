@@ -4,6 +4,8 @@ import type { RequestActor } from 'src/common/decorators/current-actor.decorator
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
 import { assertBranchInScope, resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { StockIntakeService } from '../core/stock-intake.service';
 import { OpeningStockRequest } from './dtos/opening-stock.request';
@@ -22,6 +24,7 @@ export class StockOpeningService {
   constructor(
     private readonly transactions: InventoryTransactions,
     private readonly intake: StockIntakeService,
+    private readonly audit: AuditLogService,
   ) {}
 
   async create(dto: OpeningStockRequest, actor: RequestActor): Promise<{ batchId: string }> {
@@ -30,8 +33,14 @@ export class StockOpeningService {
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
       const [branch, product] = await Promise.all([
-        tx.branch.findFirst({ where: { id: dto.branchId, isDeleted: false, status: RecordStatus.ACTIVE }, select: { id: true } }),
-        tx.product.findFirst({ where: { id: dto.productId, isDeleted: false }, select: { id: true, trackBatches: true } }),
+        tx.branch.findFirst({
+          where: { id: dto.branchId, isDeleted: false, status: RecordStatus.ACTIVE },
+          select: { id: true },
+        }),
+        tx.product.findFirst({
+          where: { id: dto.productId, isDeleted: false },
+          select: { id: true, code: true, name: true, trackBatches: true },
+        }),
       ]);
       if (!branch) throw this.error(ErrorCode.INVALID_REFERENCE, 'Chi nhánh không tồn tại hoặc đã ngừng hoạt động');
       if (!product) throw this.error(ErrorCode.RECORD_NOT_FOUND, 'Sản phẩm không tồn tại');
@@ -40,7 +49,10 @@ export class StockOpeningService {
       }
       const existing = await tx.stockBatch.count({ where: { productId: dto.productId, branchId: dto.branchId } });
       if (existing > 0) {
-        throw this.error(ErrorCode.PRODUCT_HAS_STOCK, 'Sản phẩm đã phát sinh kho ở chi nhánh này, không nhập tồn đầu được');
+        throw this.error(
+          ErrorCode.PRODUCT_HAS_STOCK,
+          'Sản phẩm đã phát sinh kho ở chi nhánh này, không nhập tồn đầu được',
+        );
       }
 
       const result = await this.intake.intake(ctx, {
@@ -65,6 +77,22 @@ export class StockOpeningService {
       });
       const batchId = result.batchIdByRefItem.get(dto.productId);
       if (!batchId) throw new Error('Không ghi được lô tồn đầu');
+      // Một lần record cho cả transaction: lô tồn đầu có thể thừa hưởng thu hồi của cùng số lô ở chi nhánh khác
+      // (entry của intake) cộng với chính sự kiện tồn đầu kỳ.
+      await this.audit.record(tx, auditActorOf(actor), [
+        ...result.auditEntries,
+        {
+          event: 'STOCK.OPENING',
+          entityType: 'products',
+          entityId: product.id,
+          entityLabel: product.code,
+          branchIds: [dto.branchId],
+          searchTerms: [product.code, product.name],
+          // Tiền bigint: Σ quantity × unitCost (một dòng).
+          amount: BigInt(dto.quantity) * BigInt(dto.unitCost),
+          metadata: { batchId, quantity: dto.quantity, unitCost: String(dto.unitCost) },
+        },
+      ]);
       return { batchId };
     });
   }

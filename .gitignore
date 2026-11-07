@@ -55,6 +55,9 @@ lerna-debug.log*
 /docs/
 /test/
 
+# Code demo/seed chạy thử local, không commit
+/demo-code/
+
 # temp directory
 .temp
 .tmp

@@ -67,10 +67,11 @@ export interface SeedProduct {
   categoryCode: string;
   manufacturerCode?: string | null;
   baseUnitCode: string;
-  activeIngredient?: string;
-  strength?: string;
+  /** Mã thuốc trong API mô phỏng CSDL Dược (`CSDL-Drug/Data/tap-mau-thuoc.csv`). Bắt buộc với hàng thuốc. */
+  drugCode?: string;
   dosageForm?: DosageForm | null;
   packagingSpec?: string;
+  /** Cờ kê đơn mong đợi — script đối chiếu với thuốc trong danh mục, lệch thì dừng (ghép nhầm thuốc). */
   requiresPrescription: boolean;
   minStockLevel?: number;
   units: SeedProductUnit[];
@@ -79,17 +80,17 @@ export interface SeedProduct {
 /**
  * Sản phẩm mẫu. Khoá ngoại ghi bằng **code** để script tự tra id — không hard-code UUID môi trường.
  * `units` là trạng thái đầy đủ của cấu hình đơn vị bán, đúng ngữ nghĩa replace-all của API.
+ * Hàng thuốc ghép với thuốc có sẵn trong API mô phỏng CSDL Dược; giữ mã SP và đơn vị vì seed kho tham chiếu theo đó.
  */
 export const SEED_PRODUCTS: readonly SeedProduct[] = [
   {
     code: 'SP0001',
     barcode: '8935000000015',
-    name: 'Paracetamol 500mg',
+    name: 'Acetaminophen 500mg',
     categoryCode: 'THUOC_KHONG_KE_DON',
     manufacturerCode: 'DHG',
     baseUnitCode: 'VIEN',
-    activeIngredient: 'Paracetamol',
-    strength: '500mg',
+    drugCode: '0536-1292',
     dosageForm: 'TABLET',
     packagingSpec: 'Hộp 10 vỉ x 10 viên',
     requiresPrescription: false,
@@ -106,8 +107,7 @@ export const SEED_PRODUCTS: readonly SeedProduct[] = [
     categoryCode: 'THUOC_KE_DON',
     manufacturerCode: 'TAPHARM',
     baseUnitCode: 'VIEN',
-    activeIngredient: 'Amoxicillin',
-    strength: '500mg',
+    drugCode: '62135-083',
     dosageForm: 'CAPSULE',
     packagingSpec: 'Hộp 10 vỉ x 10 viên',
     requiresPrescription: true,
@@ -120,56 +120,52 @@ export const SEED_PRODUCTS: readonly SeedProduct[] = [
   },
   {
     code: 'SP0003',
-    name: 'Siro ho Prospan 100ml',
+    name: 'Siro ho Delsym 30mg/5mL',
     categoryCode: 'THUOC_KHONG_KE_DON',
     manufacturerCode: 'SANOFI',
     baseUnitCode: 'CHAI',
-    activeIngredient: 'Cao lá thường xuân',
-    strength: '100ml',
+    drugCode: '63824-175',
     dosageForm: 'SYRUP',
-    packagingSpec: 'Chai 100ml',
+    packagingSpec: 'Hộp 1 chai x 89 mL',
     requiresPrescription: false,
     minStockLevel: 30,
     units: [{ unitCode: 'CHAI', conversionRate: 1, salePrice: 78000, isBaseUnit: true, barcode: '8935000000046' }],
   },
   {
     code: 'SP0004',
-    name: 'Kem trị nấm Lamisil 1%',
-    categoryCode: 'THUOC_KE_DON',
+    name: 'Kem trị nấm Terbinafine 1%',
+    categoryCode: 'THUOC_KHONG_KE_DON',
     manufacturerCode: 'GSK',
     baseUnitCode: 'TUYP',
-    activeIngredient: 'Terbinafine',
-    strength: '1%',
+    drugCode: '50090-5810',
     dosageForm: 'CREAM',
-    packagingSpec: 'Tuýp 10g',
-    requiresPrescription: true,
+    packagingSpec: 'Hộp 1 tuýp x 30 g',
+    requiresPrescription: false,
     minStockLevel: 20,
     units: [{ unitCode: 'TUYP', conversionRate: 1, salePrice: 145000, isBaseUnit: true, barcode: null }],
   },
   {
     code: 'SP0005',
-    name: 'Mỡ tra mắt Tetracycline 1%',
+    name: 'Kem Ketoconazole 2%',
     categoryCode: 'THUOC_KE_DON',
     manufacturerCode: 'GSK',
     baseUnitCode: 'TUYP',
-    activeIngredient: 'Tetracycline',
-    strength: '1%',
-    dosageForm: 'OINTMENT',
-    packagingSpec: 'Tuýp 5g',
+    drugCode: '70518-4236',
+    dosageForm: 'CREAM',
+    packagingSpec: 'Hộp 1 tuýp x 30 g',
     requiresPrescription: true,
     minStockLevel: 20,
     units: [{ unitCode: 'TUYP', conversionRate: 1, salePrice: 25000, isBaseUnit: true, barcode: null }],
   },
   {
     code: 'SP0006',
-    name: 'Thuốc nhỏ mắt Natri Clorid 0,9%',
+    name: 'Xịt mũi Nasal 0,05%',
     categoryCode: 'THUOC_KHONG_KE_DON',
     manufacturerCode: 'TAPHARM',
     baseUnitCode: 'CHAI',
-    activeIngredient: 'Natri clorid',
-    strength: '0,9%',
-    dosageForm: 'DROPS',
-    packagingSpec: 'Chai 10ml',
+    drugCode: '11822-6378',
+    dosageForm: 'SPRAY',
+    packagingSpec: 'Hộp 1 chai x 30 mL',
     requiresPrescription: false,
     minStockLevel: 50,
     units: [
@@ -179,14 +175,13 @@ export const SEED_PRODUCTS: readonly SeedProduct[] = [
   },
   {
     code: 'SP0007',
-    name: 'Bột pha dung dịch ORS',
+    name: 'Bột nhuận tràng Purelax 17g',
     categoryCode: 'THUOC_KHONG_KE_DON',
     manufacturerCode: 'TAPHARM',
     baseUnitCode: 'GOI',
-    activeIngredient: 'Glucose, Natri clorid, Kali clorid',
-    strength: '4,1g',
+    drugCode: '59779-306',
     dosageForm: 'POWDER',
-    packagingSpec: 'Hộp 20 gói',
+    packagingSpec: 'Hộp 20 gói x 17 g',
     requiresPrescription: false,
     minStockLevel: 60,
     units: [
@@ -196,12 +191,12 @@ export const SEED_PRODUCTS: readonly SeedProduct[] = [
   },
   {
     code: 'SP0008',
-    name: 'Viên đặt phụ khoa Polygynax',
+    name: 'Fluconazole 100mg',
     categoryCode: 'THUOC_KE_DON',
     manufacturerCode: 'SANOFI',
     baseUnitCode: 'VIEN',
-    activeIngredient: 'Neomycin, Polymyxin B, Nystatin',
-    dosageForm: 'SUPPOSITORY',
+    drugCode: '70518-2415',
+    dosageForm: 'TABLET',
     packagingSpec: 'Hộp 12 viên',
     requiresPrescription: true,
     minStockLevel: 15,
@@ -212,14 +207,13 @@ export const SEED_PRODUCTS: readonly SeedProduct[] = [
   },
   {
     code: 'SP0009',
-    name: 'Dịch truyền Natri Clorid 0,9% 500ml',
+    name: 'Hỗn dịch Cefdinir 125mg/5mL',
     categoryCode: 'THUOC_KE_DON',
     manufacturerCode: 'DHG',
     baseUnitCode: 'CHAI',
-    activeIngredient: 'Natri clorid',
-    strength: '0,9% - 500ml',
-    dosageForm: 'INJECTION',
-    packagingSpec: 'Chai 500ml',
+    drugCode: '68071-5318',
+    dosageForm: 'OTHER',
+    packagingSpec: 'Hộp 1 chai x 100 mL',
     requiresPrescription: true,
     minStockLevel: 40,
     units: [{ unitCode: 'CHAI', conversionRate: 1, salePrice: 18000, isBaseUnit: true, barcode: null }],

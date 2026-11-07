@@ -41,9 +41,9 @@ export abstract class AbstractBaseService<T extends BaseRecord> {
     return record;
   }
 
-  async deleteRecord(filter: BaseWhere<T>, options?: BaseFindOptions): Promise<boolean> {
+  async deleteRecord(filter: BaseWhere<T>): Promise<boolean> {
     this.logger.log('[deleteRecord] START');
-    const result = await this.repository.softDelete(filter, options);
+    const result = await this.repository.softDelete(filter);
     this.logger.log('[deleteRecord] END');
     return result;
   }

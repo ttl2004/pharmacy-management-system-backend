@@ -1,4 +1,14 @@
+import { CronTime } from 'cron';
 import { z } from 'zod';
+
+function isValidCron(value: string): boolean {
+  try {
+    new CronTime(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const units = { s: 1, m: 60, h: 3600, d: 86400 } as const;
 
@@ -17,6 +27,14 @@ const duration = z
 // Không dùng z.coerce.boolean(): Boolean('false') === true, biến chuỗi 'false' sẽ thành true.
 const boolStr = (defaultValue: 'true' | 'false') =>
   z.enum(['true', 'false'], { error: 'Chỉ nhận giá trị true hoặc false' }).default(defaultValue);
+
+// Số proxy tin cậy phía trước app (0 = không có proxy). Dùng chung cho schema env và main.ts (adapter dựng trước ConfigService).
+export const trustProxySchema = z.coerce
+  .number({ error: 'TRUST_PROXY phải là số' })
+  .int('TRUST_PROXY phải là số nguyên')
+  .min(0, 'TRUST_PROXY không được âm')
+  .max(5, 'TRUST_PROXY tối đa là 5')
+  .default(0);
 
 export const envSchema = z
   .object({
@@ -45,6 +63,8 @@ export const envSchema = z
             ),
         ),
       ),
+
+    TRUST_PROXY: trustProxySchema,
 
     //- Cơ sở dữ liệu
     DB_LOGGING: boolStr('false'),
@@ -84,6 +104,14 @@ export const envSchema = z
       .enum(['MALE', 'FEMALE', 'OTHER'], { error: 'SUPER_ADMIN_GENDER chỉ nhận MALE, FEMALE hoặc OTHER' })
       .optional(),
 
+    //- Đối soát doanh thu hằng đêm
+    REPORT_RECONCILE_ENABLED: boolStr('true'),
+    // Biểu thức cron (giờ Asia/Ho_Chi_Minh); sai cú pháp thì app không khởi động chứ không lặng lẽ không chạy.
+    REPORT_RECONCILE_CRON: z
+      .string({ error: 'REPORT_RECONCILE_CRON phải là chuỗi ký tự' })
+      .refine(isValidCron, 'REPORT_RECONCILE_CRON không phải biểu thức cron hợp lệ')
+      .default('15 0 * * *'),
+
     //- Mailer
     MAIL_GMAIL_USER: z.string().optional(),
     MAIL_GMAIL_APP_PASSWORD: z.string().optional(),
@@ -92,6 +120,23 @@ export const envSchema = z
     MAIL_RABBITMQ_URL: z.string().optional(),
     MAIL_RABBITMQ_EXCHANGE: z.string().default('mailer.exchange'),
     MAIL_RABBITMQ_QUEUE: z.string().default('mailer.queue'),
+
+    //- Nguồn danh mục thuốc CSDL Dược quốc gia (hiện là API giả lập ở repo CSDL-Drug)
+    DRUG_SOURCE_URL: z
+      .string()
+      .refine(
+        (url) => URL.canParse(url) && /^https?:$/.test(new URL(url).protocol),
+        'DRUG_SOURCE_URL phải là URL http(s)',
+      )
+      .default('http://localhost:8001'),
+
+    //- Trợ lý hỏi đáp thuốc (RAG service: projects/base-rag/api.py hoặc bản RAG hoàn chỉnh cùng hợp đồng)
+    RAG_SERVICE_URL: z
+      .string()
+      .refine((url) => URL.canParse(url) && /^https?:$/.test(new URL(url).protocol), 'RAG_SERVICE_URL phải là URL http(s)')
+      .default('http://127.0.0.1:8790'),
+    // Gửi qua header X-Internal-Key; phải trùng RAG_INTERNAL_KEY bên RAG service. Bỏ trống = không gửi.
+    RAG_INTERNAL_KEY: z.string().optional(),
   })
   .refine((env) => env.COOKIE_SAMESITE !== 'none' || env.COOKIE_SECURE === 'true', {
     message: 'COOKIE_SAMESITE=none yêu cầu COOKIE_SECURE=true',

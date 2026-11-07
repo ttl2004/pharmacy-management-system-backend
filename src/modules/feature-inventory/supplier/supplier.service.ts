@@ -1,11 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import { AuditAction, Prisma, RecordStatus, Supplier } from '@prisma/client';
+import { Prisma, RecordStatus, Supplier } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { ErrorCode } from 'src/common/types/error-code';
+import { maskEmail, maskPhone } from 'src/common/utils/mask.util';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { diffFields, pickAuditFields } from 'src/providers/audit-log/audit-diff';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import type { AuditJson } from 'src/providers/audit-log/audit-log.types';
 import { AUDIT_ENTITY } from '../core/inventory.constants';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { CreateSupplierRequest, UpdateSupplierRequest } from './dtos/supplier.request';
@@ -26,6 +29,42 @@ const AUDITED_FIELDS = [
   'companyName',
   'idNumber',
 ] as const;
+
+/**
+ * Dữ liệu định danh không bao giờ vào nhật ký (bản ghi nhật ký là vĩnh viễn): SĐT che còn 4 số cuối, email che theo
+ * `maskEmail`, CCCD (`idNumber`) bỏ hẳn giá trị — chỉ ghi tên trường vào `metadata.changedFields` khi nó có/đổi.
+ */
+function sanitizeSnapshot(snapshot: Record<string, AuditJson>): Record<string, AuditJson> {
+  const rest = { ...snapshot };
+  delete rest.idNumber;
+  if ('phone' in rest) rest.phone = maskPhone(rest.phone as string | null);
+  if ('email' in rest) rest.email = maskEmail(rest.email as string | null);
+  return rest;
+}
+
+/** Che `before`/`after`; `idNumberTouched` → thêm `metadata.changedFields: ['idNumber']`. */
+function sanitizeEntry(
+  before: Record<string, AuditJson> | null,
+  after: Record<string, AuditJson> | null,
+  idNumberTouched: boolean,
+) {
+  return {
+    ...(before ? { before: sanitizeSnapshot(before) } : {}),
+    ...(after ? { after: sanitizeSnapshot(after) } : {}),
+    ...(idNumberTouched ? { metadata: { changedFields: ['idNumber'] } } : {}),
+  };
+}
+
+/** Nhãn, phạm vi (danh mục toàn chuỗi → `[]`) và từ khoá tìm kiếm (mã + tên, D8) của một dòng NCC. */
+function auditBase(supplier: Pick<Supplier, 'id' | 'code' | 'name'>) {
+  return {
+    entityType: AUDIT_ENTITY.SUPPLIER,
+    entityId: supplier.id,
+    entityLabel: supplier.code,
+    branchIds: [],
+    searchTerms: [supplier.code, supplier.name],
+  };
+}
 
 /**
  * Nhà cung cấp là danh mục dùng chung toàn chuỗi (không có `branchId`): mọi vai trò kho đều đọc được, chỉ ADMIN
@@ -58,14 +97,11 @@ export class SupplierService {
           status: dto.status ?? RecordStatus.ACTIVE,
           createdBy: actor.user.userId,
         });
-        await this.audit.record(tx, [
+        await this.audit.record(tx, auditActorOf(actor), [
           {
-            actorId: actor.user.userId,
-            action: AuditAction.CREATE,
-            entityType: AUDIT_ENTITY.SUPPLIER,
-            entityId: created.id,
-            after: pickAuditFields(created, AUDITED_FIELDS),
-            ipAddress: actor.ip,
+            event: 'SUPPLIER.CREATED',
+            ...auditBase(created),
+            ...sanitizeEntry(null, pickAuditFields(created, AUDITED_FIELDS), created.idNumber != null),
           },
         ]);
         return created;
@@ -98,14 +134,11 @@ export class SupplierService {
 
         const diff = diffFields(existing, changes, AUDITED_FIELDS);
         if (diff) {
-          await this.audit.record(tx, [
+          await this.audit.record(tx, auditActorOf(actor), [
             {
-              actorId: actor.user.userId,
-              action: diff.after.status !== undefined ? AuditAction.STATUS_CHANGE : AuditAction.UPDATE,
-              entityType: AUDIT_ENTITY.SUPPLIER,
-              entityId: id,
-              ...diff,
-              ipAddress: actor.ip,
+              event: diff.after.status !== undefined ? 'SUPPLIER.STATUS_CHANGED' : 'SUPPLIER.UPDATED',
+              ...auditBase(updated),
+              ...sanitizeEntry(diff.before, diff.after, 'idNumber' in diff.after),
             },
           ]);
         }
@@ -130,14 +163,11 @@ export class SupplierService {
       }
 
       await this.suppliers.updateWith(tx, id, { isDeleted: true, updatedAt: new Date(), updatedBy: actor.user.userId });
-      await this.audit.record(tx, [
+      await this.audit.record(tx, auditActorOf(actor), [
         {
-          actorId: actor.user.userId,
-          action: AuditAction.DELETE,
-          entityType: AUDIT_ENTITY.SUPPLIER,
-          entityId: id,
-          before: pickAuditFields(existing, AUDITED_FIELDS),
-          ipAddress: actor.ip,
+          event: 'SUPPLIER.DELETED',
+          ...auditBase(existing),
+          ...sanitizeEntry(pickAuditFields(existing, AUDITED_FIELDS), null, existing.idNumber != null),
         },
       ]);
     });

@@ -6,7 +6,11 @@ import { ErrorCode } from 'src/common/types/error-code';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { lockAdvisoryKeys } from 'src/common/databases/advisory-lock';
 import { PrismaService } from 'src/common/databases/prisma.service';
+import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
+import { auditActorOf } from 'src/providers/audit-log/audit-actor';
+import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { UserRepository } from '../user/repositories/user.repository';
+import { userAuditBase, usernameOf } from '../user/user-audit';
 import { UserService } from '../user/user.service';
 import type { JwtUser } from '../authz/types/authz.types';
 import { PERMISSION_CATALOG, PERMISSION_CODES, PermissionCode } from './permission.constant';
@@ -38,6 +42,7 @@ export class PermissionService {
     private readonly users: UserRepository,
     private readonly prisma: PrismaService,
     private readonly userService: UserService,
+    private readonly audit: AuditLogService,
   ) {}
 
   /** Quyền đang có của một vai trò. Guard gọi hàm này ở mỗi request. */
@@ -74,7 +79,9 @@ export class PermissionService {
     return { role: this.toRoleView(role), permissionCodes: await this.rolePermissions.findGrantedCodes(role.id) };
   }
 
-  async replaceRolePermissions(roleCode: string, codes: PermissionCode[], caller: JwtUser) {
+  /** `reason` là MỘT lý do chung cho cả lần lưu (bắt buộc — D9). */
+  async replaceRolePermissions(roleCode: string, codes: PermissionCode[], actor: RequestActor, reason: string) {
+    const caller = actor.user;
     const role = await this.requireRole(roleCode);
     // SUPER_ADMIN luôn có mọi quyền nhờ bỏ qua kiểm tra, bản ghi cấp quyền cho nó là vô nghĩa.
     if ((role.code as AuthRole) === AuthRole.SUPER_ADMIN) throw permissionError(ErrorCode.ROLE_NOT_EDITABLE);
@@ -82,12 +89,29 @@ export class PermissionService {
     assertOutranks(caller.roleLevel, role.level);
 
     const wanted = [...new Set(codes)];
-    const current = new Set(await this.rolePermissions.findGrantedCodes(role.id));
-    const permissionIds = await this.resolvePermissionIds(wanted, current, caller);
     try {
-      await this.writeRolePermissions(role.id, (tx) =>
-        this.rolePermissions.replaceForRole(tx, role.id, permissionIds, caller.userId),
-      );
+      // Đọc quyền hiện tại, kiểm quyền cấp được và ghi đều nằm TRONG transaction đã khoá theo vai trò: hai lần lưu chen
+      // nhau không còn đọc `current` cũ rồi ghi đè lên nhau (TOCTOU), và `added/removed` của nhật ký luôn đúng với DB.
+      await this.writeRolePermissions(role.id, async (tx) => {
+        const current = new Set(await this.rolePermissions.findGrantedCodes(role.id, tx));
+        const permissionIds = await this.resolvePermissionIds(wanted, current, caller);
+        await this.rolePermissions.replaceForRole(tx, role.id, permissionIds, caller.userId);
+
+        const added = wanted.filter((code) => !current.has(code)).sort();
+        const removed = [...current].filter((code) => !wanted.includes(code as PermissionCode)).sort();
+        if (!added.length && !removed.length) return;
+        await this.audit.record(tx, auditActorOf(actor), [
+          {
+            event: 'ROLE.PERMISSIONS_CHANGED',
+            entityType: 'roles',
+            entityId: role.id,
+            entityLabel: role.code,
+            branchIds: [],
+            metadata: { added, removed },
+            reason,
+          },
+        ]);
+      });
     } finally {
       // Xoá cả khi lỗi: không biết chắc transaction đã commit tới đâu.
       this.grantCache.clear();
@@ -109,7 +133,9 @@ export class PermissionService {
     };
   }
 
-  async assignRole(userId: string, roleCode: string, caller: JwtUser) {
+  /** `reason` bắt buộc (D9). Đổi vai trò KHÔNG thu hồi phiên đang đăng nhập (D11). */
+  async assignRole(userId: string, roleCode: string, actor: RequestActor, reason: string) {
+    const caller = actor.user;
     if (userId === caller.userId) throw permissionError(ErrorCode.CANNOT_CHANGE_OWN_ROLE);
     const scope = resolveBranchScope(caller);
 
@@ -145,10 +171,34 @@ export class PermissionService {
     // vừa thi hành — ví dụ gán PHARMACY_MANAGER cho người đang có `branchId = null`.
     await this.userService.assertBranchRule(role.code, target.branchId);
 
-    const updated = await this.users.update({ id: userId }, { roleId: role.id, updatedBy: caller.userId });
-    if (!updated) {
-      throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
-    }
+    await this.prisma.$transaction(async (tx) => {
+      // Khoá theo người dùng rồi ĐỌC LẠI vai trò hiện tại trong tx: `target` ở trên đọc trước tx nên có thể đã cũ nếu
+      // một admin khác vừa đổi vai trò. Quyết định "không đổi gì" và `before` của nhật ký phải lấy từ lần đọc này.
+      await lockAdvisoryKeys(tx, [`user-role:${userId}`]);
+      const fresh = await this.users.findByIdWithRole(userId, tx);
+      if (!fresh) {
+        throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+      }
+      const updated = await this.users.update(
+        { id: userId },
+        { roleId: role.id, updatedBy: caller.userId },
+        undefined,
+        tx,
+      );
+      if (!updated) {
+        throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+      }
+      if (fresh.role.code === role.code) return;
+      await this.audit.record(tx, auditActorOf(actor), [
+        {
+          event: 'USER.ROLE_CHANGED',
+          ...userAuditBase(fresh, await usernameOf(tx, userId), [fresh.branchId]),
+          before: { roleCode: fresh.role.code },
+          after: { roleCode: role.code },
+          reason,
+        },
+      ]);
+    });
 
     return { userId, roleCode: role.code };
   }

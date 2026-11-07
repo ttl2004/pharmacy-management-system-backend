@@ -1,9 +1,8 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
-import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthzGuard } from '../../feature-auth/authz/guards/auth.guard';
-import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
 import { CreateUnitRequest, UpdateUnitRequest } from './dtos/unit.request';
@@ -38,15 +37,19 @@ export class UnitController {
   @RequirePermissions('unit:create')
   @Post()
   @ApiOperation({ description: 'Tạo đơn vị tính. Bảng đơn vị không có trạng thái hoạt động.' })
-  create(@Body() dto: CreateUnitRequest, @CurrentUser() user: JwtUser) {
-    return this.unitService.create(dto, user.userId);
+  create(@Body() dto: CreateUnitRequest, @CurrentActor() actor: RequestActor) {
+    return this.unitService.create(dto, actor);
   }
 
   @RequirePermissions('unit:update')
   @Patch(':id')
   @ApiOperation({ description: 'Sửa đơn vị tính. Gửi null cho note để xoá ghi chú.' })
-  update(@Param('id', new ParseUUIDPipe()) id: string, @Body() dto: UpdateUnitRequest, @CurrentUser() user: JwtUser) {
-    return this.unitService.update(id, dto, user.userId);
+  update(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: UpdateUnitRequest,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.unitService.update(id, dto, actor);
   }
 
   @RequirePermissions('unit:delete')
@@ -54,7 +57,7 @@ export class UnitController {
   @ApiOperation({
     description: 'Xoá mềm đơn vị tính. Từ chối nếu đang là đơn vị cơ bản hoặc có trong cấu hình đơn vị bán.',
   })
-  remove(@Param('id', new ParseUUIDPipe()) id: string) {
-    return this.unitService.remove(id);
+  remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
+    return this.unitService.remove(id, actor);
   }
 }

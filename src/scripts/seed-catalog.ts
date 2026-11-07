@@ -6,7 +6,7 @@ import { PrismaService } from 'src/common/databases/prisma.service';
 import { CatalogTransactions, productWriteLocks } from 'src/modules/feature-catalog/catalog-transactions';
 import { AppModule } from '../app.module';
 import { SEED_BRANCHES, SEED_CATEGORIES, SEED_MANUFACTURERS, SEED_PRODUCTS, SEED_UNITS } from './data/catalog.seed';
-import type { SeedProductUnit } from './data/catalog.seed';
+import type { SeedProduct, SeedProductUnit } from './data/catalog.seed';
 import { seedPriceBooks } from './seed-catalog-price-books';
 
 type IdByCode = Map<string, string>;
@@ -155,6 +155,27 @@ async function reconcileUnits(
   }
 }
 
+/**
+ * Thuốc trong danh mục mà sản phẩm seed ghép tới. Danh mục chỉ có sau khi đồng bộ từ API mô phỏng CSDL Dược, nên thiếu
+ * thì dừng kèm hướng dẫn; cờ kê đơn lệch nghĩa là ghép nhầm thuốc.
+ */
+async function findSeedDrug(prisma: PrismaService, product: SeedProduct) {
+  if (!product.drugCode) throw new Error(`Sản phẩm thuốc ${product.code} thiếu drugCode`);
+  const drug = await prisma.drug.findFirst({
+    where: { code: product.drugCode, isDeleted: false, status: RecordStatus.ACTIVE },
+    select: { id: true, isPrescription: true, indications: true, dosage: true, storage: true },
+  });
+  if (!drug) {
+    throw new Error(
+      `Chưa có thuốc ${product.drugCode} trong danh mục — chạy API mô phỏng CSDL Dược rồi POST /drug/sync trước khi seed`,
+    );
+  }
+  if (drug.isPrescription !== product.requiresPrescription) {
+    throw new Error(`Cờ kê đơn của ${product.code} lệch với thuốc ${product.drugCode} trong danh mục`);
+  }
+  return drug;
+}
+
 async function seedProducts(
   prisma: PrismaService,
   transactions: CatalogTransactions,
@@ -172,6 +193,7 @@ async function seedProducts(
 
     // Nhóm THUOC_* là thuốc theo lô; nhóm khác (thiết bị y tế…) là hàng hoá không theo lô — khớp backfill migration.
     const isDrug = product.categoryCode.startsWith('THUOC');
+    const drug = isDrug ? await findSeedDrug(prisma, product) : null;
     const data = {
       type: isDrug ? ProductType.DRUG : ProductType.GOODS,
       trackBatches: isDrug,
@@ -181,8 +203,10 @@ async function seedProducts(
       categoryId,
       manufacturerId,
       baseUnitId,
-      activeIngredient: product.activeIngredient ?? null,
-      strength: product.strength ?? null,
+      drugId: drug?.id ?? null,
+      indications: drug?.indications ?? null,
+      dosageNote: drug?.dosage ?? null,
+      storageNote: drug?.storage ?? null,
       dosageForm: product.dosageForm ?? null,
       packagingSpec: product.packagingSpec ?? null,
       requiresPrescription: product.requiresPrescription,

@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpCode, Logger, Post, Res, UseGuards } from '@
 import { ApiBearerAuth, ApiOperation, ApiProduces, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { FastifyReply } from 'fastify';
+import type { OutgoingHttpHeaders } from 'node:http';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
 import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthzGuard } from '../feature-auth/authz/guards/auth.guard';
@@ -23,7 +24,9 @@ export class AssistantController {
   constructor(private readonly rag: RagServiceClient) {}
 
   @Get('info')
-  @ApiOperation({ description: 'Thông tin pipeline đang chạy: tên, tính năng (history, feedback), thống kê, câu gợi ý.' })
+  @ApiOperation({
+    description: 'Thông tin pipeline đang chạy: tên, tính năng (history, feedback), thống kê, câu gợi ý.',
+  })
   info() {
     return this.rag.getInfo();
   }
@@ -60,7 +63,7 @@ export class AssistantController {
     reply.hijack();
     reply.raw.writeHead(200, {
       // Giữ header các hook đã đặt (CORS, helmet, X-RateLimit-*) — hijack không tự gửi chúng.
-      ...reply.getHeaders(),
+      ...(reply.getHeaders() as OutgoingHttpHeaders),
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',

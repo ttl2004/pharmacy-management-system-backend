@@ -1313,6 +1313,7 @@ model Order {
   @@index([customerId])
   @@index([createdAt])
   @@index([completedAt])
+  @@index([cancelledAt])
   /// Job tự huỷ quét đơn PENDING theo kênh và thời điểm.
   @@index([status, channel, createdAt])
   @@index([priceBookId])
@@ -1389,6 +1390,7 @@ model Payment {
 
   @@unique([method, transactionCode])
   @@index([orderId])
+  @@index([paidAt])
   @@map("payments")
 }
 

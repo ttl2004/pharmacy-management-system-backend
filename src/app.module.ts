@@ -5,6 +5,7 @@ import configuration from './common/configs/configuration';
 import { validateEnv } from './common/configs/env.validation';
 import { FeatureAuthzModule } from './modules/feature-auth/feature-auth.module';
 import { BranchModule } from './modules/feature-branch/branch.module';
+import { EndOfDayReportModule } from './modules/feature-report/end-of-day/end-of-day-report.module';
 import { CatalogModule } from './modules/feature-catalog/catalog.module';
 import { StorefrontModule } from './modules/feature-storefront/storefront.module';
 import { InventoryModule } from './modules/feature-inventory/inventory.module';
@@ -51,6 +52,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     //- Module chính
     FeatureAuthzModule,
     BranchModule,
+    EndOfDayReportModule,
     CatalogModule,
     StorefrontModule,
     InventoryModule,

@@ -17,9 +17,34 @@ export interface SalesReportResponse {
   totalRevenue: number;
   orderCount: number;
   avgOrderValue: number;
-  daily: { date: string; revenue: number; orders: number }[];
-  byBranch: { branchId: string; branchName: string; revenue: number; orderCount: number }[];
-  topDrugs: { drugId: string; drugName: string; qtyInBase: number; revenue: number }[];
+  totalCogs: number;
+  grossProfit: number;
+  grossMarginPct: number | null;
+  daily: { date: string; revenue: number; orders: number; cogs: number; grossProfit: number }[];
+  byBranch: {
+    branchId: string;
+    branchName: string;
+    revenue: number;
+    orderCount: number;
+    cogs: number;
+    grossProfit: number;
+    grossMarginPct: number | null;
+  }[];
+  topDrugs: {
+    drugId: string;
+    drugName: string;
+    qtyInBase: number;
+    revenue: number;
+    cogs: number;
+    grossProfit: number;
+    grossMarginPct: number | null;
+  }[];
+}
+
+/** Lãi gộp / doanh thu × 100, 1 chữ số thập phân; doanh thu ≤ 0 → null. */
+function marginPct(profit: bigint, revenue: bigint): number | null {
+  if (revenue <= 0n) return null;
+  return Math.round((Number(profit) * 1000) / Number(revenue)) / 10;
 }
 
 @Injectable()
@@ -31,8 +56,9 @@ export class SalesReportService {
 
   async salesReport(query: SalesReportQuery, actor: RequestActor): Promise<SalesReportResponse> {
     this.assertRange(query.from, query.to);
+    const topBy = query.topBy ?? 'revenue';
     const { branchIds, scopeKey } = resolveReportScope(actor, query.branchIds);
-    const key = `${query.from}|${query.to}|${(branchIds ?? []).join(',')}|${scopeKey}`;
+    const key = `${query.from}|${query.to}|${(branchIds ?? []).join(',')}|${scopeKey}|${topBy}`;
     const cached = this.cache.get<SalesReportResponse>(key);
     if (cached) return cached;
 
@@ -42,18 +68,28 @@ export class SalesReportService {
       this.repo.byBranch(filter),
       // Chỉ ADMIN không lọc chi nhánh mới đọc bảng chuỗi; PM và truy vấn có lọc giữ bảng theo chi nhánh.
       branchIds
-        ? this.repo.topProducts(filter, SALES_REPORT_TOP_LIMIT)
-        : this.repo.topProductsChain(filter, SALES_REPORT_TOP_LIMIT),
+        ? this.repo.topProducts(filter, SALES_REPORT_TOP_LIMIT, topBy)
+        : this.repo.topProductsChain(filter, SALES_REPORT_TOP_LIMIT, topBy),
     ]);
 
     const byDate = new Map(daily.map((row) => [row.date, row]));
     const days: SalesReportResponse['daily'] = [];
     let totalRevenue = 0n;
+    let totalCogs = 0n;
     let orderCount = 0;
     for (let date = query.from; date <= query.to; date = addDaysToDateOnly(date, 1)) {
       const row = byDate.get(date);
-      days.push({ date, revenue: Number(row?.revenue ?? 0n), orders: row?.orders ?? 0 });
-      totalRevenue += row?.revenue ?? 0n;
+      const revenue = row?.revenue ?? 0n;
+      const cogs = row?.cogs ?? 0n;
+      days.push({
+        date,
+        revenue: Number(revenue),
+        orders: row?.orders ?? 0,
+        cogs: Number(cogs),
+        grossProfit: Number(revenue - cogs),
+      });
+      totalRevenue += revenue;
+      totalCogs += cogs;
       orderCount += row?.orders ?? 0;
     }
 
@@ -61,18 +97,27 @@ export class SalesReportService {
       totalRevenue: Number(totalRevenue),
       orderCount,
       avgOrderValue: orderCount > 0 ? Math.round(Number(totalRevenue) / orderCount) : 0,
+      totalCogs: Number(totalCogs),
+      grossProfit: Number(totalRevenue - totalCogs),
+      grossMarginPct: marginPct(totalRevenue - totalCogs, totalRevenue),
       daily: days,
       byBranch: byBranch.map((row) => ({
         branchId: row.branchId,
         branchName: row.branchName,
         revenue: Number(row.revenue),
         orderCount: row.orderCount,
+        cogs: Number(row.cogs),
+        grossProfit: Number(row.revenue - row.cogs),
+        grossMarginPct: marginPct(row.revenue - row.cogs, row.revenue),
       })),
       topDrugs: top.map((row) => ({
         drugId: row.productId,
         drugName: row.productName,
         qtyInBase: row.qtyBase,
         revenue: Number(row.revenue),
+        cogs: Number(row.cogs),
+        grossProfit: Number(row.revenue - row.cogs),
+        grossMarginPct: marginPct(row.revenue - row.cogs, row.revenue),
       })),
     };
     this.cache.set(key, report, SALES_REPORT_TTL_MS);

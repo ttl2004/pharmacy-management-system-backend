@@ -21,8 +21,8 @@ export type ReconcileMismatch =
       branchId: string;
       date: string;
       channel: string;
-      stored: { orderCount: number; revenue: number };
-      expected: { orderCount: number; revenue: number };
+      stored: { orderCount: number; revenue: number; cogsAmount: number };
+      expected: { orderCount: number; revenue: number; cogsAmount: number };
     }
   | {
       table: 'sales_daily_product' | 'sales_daily_product_chain';
@@ -64,13 +64,21 @@ export class SalesRollupRepository {
       FROM orders o WHERE o."id" = ${orderId}::uuid AND o."completedAt" IS NOT NULL AND ${LIVE_ORDER}`);
 
     await tx.$executeRaw(Prisma.sql`
-      INSERT INTO sales_daily ("branchId", "date", "channel", "orderCount", "revenue", "updatedAt")
-      SELECT o."branchId", ${VN_DAY}, o."channel", ${sign}::int, ${revenueDelta}::bigint, now()
+      INSERT INTO sales_daily ("branchId", "date", "channel", "orderCount", "revenue", "cogsAmount", "updatedAt")
+      SELECT o."branchId", ${VN_DAY}, o."channel", ${sign}::int, ${revenueDelta}::bigint,
+             ${sign}::bigint * COALESCE(oc."cost", 0), now()
       FROM orders o
+      LEFT JOIN LATERAL (
+        SELECT SUM(b."quantity"::bigint * b."unitCost") AS "cost"
+        FROM order_items oi
+        JOIN order_item_batches b ON b."orderItemId" = oi."id"
+        WHERE oi."orderId" = o."id" AND oi."isDeleted" = false
+      ) oc ON true
       WHERE o."id" = ${orderId}::uuid AND o."completedAt" IS NOT NULL AND ${LIVE_ORDER}
       ON CONFLICT ("branchId", "date", "channel") DO UPDATE SET
         "orderCount" = sales_daily."orderCount" + EXCLUDED."orderCount",
         "revenue" = sales_daily."revenue" + EXCLUDED."revenue",
+        "cogsAmount" = sales_daily."cogsAmount" + EXCLUDED."cogsAmount",
         "updatedAt" = now()`);
 
     // ORDER BY productId: mọi giao dịch khoá các dòng sản phẩm theo cùng thứ tự → không deadlock khi hai đơn trùng hàng.
@@ -142,8 +150,15 @@ export class SalesRollupRepository {
       CREATE TEMP TABLE rb_daily ON COMMIT DROP AS
       SELECT o."branchId", ${VN_DAY} AS "date", o."channel",
              (COUNT(*) FILTER (WHERE o."status" = 'COMPLETED'))::int AS "orderCount",
-             COALESCE(SUM(CASE WHEN o."status" = 'COMPLETED' THEN o."totalAmount" ELSE o."totalAmount" - r."refund" END), 0)::bigint AS "revenue"
+             COALESCE(SUM(CASE WHEN o."status" = 'COMPLETED' THEN o."totalAmount" ELSE o."totalAmount" - r."refund" END), 0)::bigint AS "revenue",
+             COALESCE(SUM(CASE WHEN o."status" = 'COMPLETED' THEN oc."cost" ELSE 0 END), 0)::bigint AS "cogsAmount"
       FROM orders o
+      LEFT JOIN LATERAL (
+        SELECT SUM(b."quantity"::bigint * b."unitCost") AS "cost"
+        FROM order_items oi
+        JOIN order_item_batches b ON b."orderItemId" = oi."id"
+        WHERE oi."orderId" = o."id" AND oi."isDeleted" = false
+      ) oc ON true
       LEFT JOIN LATERAL (
         SELECT COALESCE(SUM(p."amount"), 0) AS "refund" FROM payments p
         WHERE p."orderId" = o."id" AND p."kind" = 'REFUND' AND p."status" = 'SUCCESS'
@@ -183,8 +198,8 @@ export class SalesRollupRepository {
     await tx.$executeRaw(Prisma.sql`DELETE FROM sales_daily_product_chain WHERE ${range('"date"')}`);
 
     const daily = await tx.$executeRaw(Prisma.sql`
-      INSERT INTO sales_daily ("branchId", "date", "channel", "orderCount", "revenue", "updatedAt")
-      SELECT "branchId", "date", "channel", "orderCount", "revenue", now() FROM rb_daily`);
+      INSERT INTO sales_daily ("branchId", "date", "channel", "orderCount", "revenue", "cogsAmount", "updatedAt")
+      SELECT "branchId", "date", "channel", "orderCount", "revenue", "cogsAmount", now() FROM rb_daily`);
     const perProduct = await tx.$executeRaw(Prisma.sql`
       INSERT INTO sales_daily_product ("branchId", "date", "channel", "productId", "qtyBase", "revenue", "cogsAmount")
       SELECT "branchId", "date", "channel", "productId", "qtyBase", "revenue", "cogsAmount" FROM rb_product`);
@@ -207,20 +222,25 @@ export class SalesRollupRepository {
         channel: string;
         storedCount: number;
         storedRevenue: bigint;
+        storedCogs: bigint;
         expectedCount: number;
         expectedRevenue: bigint;
+        expectedCogs: bigint;
       }[]
     >(Prisma.sql`
       SELECT COALESCE(s."branchId", e."branchId") AS "branchId",
              to_char(COALESCE(s."date", e."date"), 'YYYY-MM-DD') AS "date",
              COALESCE(s."channel", e."channel")::text AS "channel",
              COALESCE(s."orderCount", 0) AS "storedCount", COALESCE(s."revenue", 0)::bigint AS "storedRevenue",
-             COALESCE(e."orderCount", 0) AS "expectedCount", COALESCE(e."revenue", 0)::bigint AS "expectedRevenue"
+             COALESCE(s."cogsAmount", 0)::bigint AS "storedCogs",
+             COALESCE(e."orderCount", 0) AS "expectedCount", COALESCE(e."revenue", 0)::bigint AS "expectedRevenue",
+             COALESCE(e."cogsAmount", 0)::bigint AS "expectedCogs"
       FROM (SELECT * FROM sales_daily WHERE ${range('"date"')}) s
       FULL OUTER JOIN rb_daily e
         ON e."branchId" = s."branchId" AND e."date" = s."date" AND e."channel" = s."channel"
       WHERE COALESCE(s."orderCount", 0) <> COALESCE(e."orderCount", 0)
          OR COALESCE(s."revenue", 0) <> COALESCE(e."revenue", 0)
+         OR COALESCE(s."cogsAmount", 0) <> COALESCE(e."cogsAmount", 0)
       ORDER BY 2, 1, 3`);
 
     const productDiff = (table: 'sales_daily_product' | 'sales_daily_product_chain') => {
@@ -251,8 +271,12 @@ export class SalesRollupRepository {
         branchId: r.branchId,
         date: r.date,
         channel: r.channel,
-        stored: { orderCount: r.storedCount, revenue: Number(r.storedRevenue) },
-        expected: { orderCount: r.expectedCount, revenue: Number(r.expectedRevenue) },
+        stored: { orderCount: r.storedCount, revenue: Number(r.storedRevenue), cogsAmount: Number(r.storedCogs) },
+        expected: {
+          orderCount: r.expectedCount,
+          revenue: Number(r.expectedRevenue),
+          cogsAmount: Number(r.expectedCogs),
+        },
       })),
       ...(['sales_daily_product', 'sales_daily_product_chain'] as const).flatMap((table) =>
         (table === 'sales_daily_product' ? branchRows : chainRows).map((r) => ({

@@ -1399,6 +1399,8 @@ model SalesDaily {
   channel    OrderChannel
   orderCount Int          @default(0)
   revenue    BigInt       @default(0)
+  /// Giá vốn của đơn đã thu và chưa huỷ; luôn bằng Σ `cogsAmount` của `sales_daily_product` cùng khoá.
+  cogsAmount BigInt       @default(0)
   updatedAt  DateTime     @default(now()) @updatedAt @db.Timestamptz(3)
   branch     Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
@@ -1407,7 +1409,7 @@ model SalesDaily {
   @@map("sales_daily")
 }
 
-/// Tổng hợp theo sản phẩm. `cogsAmount` = giá vốn (Σ quantity × unitCost của lô xuất) — lưu sẵn cho lãi gộp, CHƯA trả qua API.
+/// Tổng hợp theo sản phẩm. `cogsAmount` = giá vốn (Σ quantity × unitCost của lô xuất) — lưu sẵn cho lãi gộp (báo cáo bán hàng).
 model SalesDailyProduct {
   branchId   String       @db.Uuid
   date       DateTime     @db.Date

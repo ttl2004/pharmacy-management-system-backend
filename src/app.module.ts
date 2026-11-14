@@ -9,6 +9,7 @@ import { EndOfDayReportModule } from './modules/feature-report/end-of-day/end-of
 import { CatalogModule } from './modules/feature-catalog/catalog.module';
 import { StorefrontModule } from './modules/feature-storefront/storefront.module';
 import { InventoryModule } from './modules/feature-inventory/inventory.module';
+import { StaffReportModule } from './modules/feature-report/staff/staff-report.module';
 import { SalesModule } from './modules/feature-sales/sales.module';
 import { ReportModule } from './modules/feature-report/report.module';
 import { AuditLogQueryModule } from './modules/feature-audit/audit-log-query.module';
@@ -57,6 +58,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     CatalogModule,
     StorefrontModule,
     InventoryModule,
+    StaffReportModule,
     SalesModule,
     ReportModule,
     AuditLogQueryModule,

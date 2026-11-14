@@ -28,6 +28,8 @@ describe('migration bo_sung_luot_hoan_don_huy_cu', () => {
     await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCHEMA}" CASCADE`);
     await admin.$executeRawUnsafe(`CREATE SCHEMA "${SCHEMA}"`);
     await applyMigrationsUntil(admin, SCHEMA, MIGRATION);
+    // `rebuild` hiện ghi cả giá vốn ngày → cần cột của migration sau (độc lập với migration đang thử).
+    applyMigrationFile(SCHEMA, 'sales_daily_gia_von');
     db = new PrismaClient({ datasources: { db: { url: buildTestDatabaseUrl(SCHEMA) } } });
     await db.$connect();
     base = await seedReportBase(db);

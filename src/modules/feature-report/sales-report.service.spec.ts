@@ -59,13 +59,15 @@ describe('SalesReportService', () => {
   });
 
   it('daily đủ mọi ngày trong khoảng, ngày không bán = 0', async () => {
-    repo.daily.mockResolvedValue([{ date: '2026-11-02', orders: 2, revenue: 70000n }]);
+    repo.daily.mockResolvedValue([{ date: '2026-11-02', orders: 2, revenue: 70000n, cogs: 30000n }]);
     const report = await service.salesReport({ from: '2026-11-01', to: '2026-11-03' }, admin);
     expect(report.daily).toEqual([
-      { date: '2026-11-01', revenue: 0, orders: 0 },
-      { date: '2026-11-02', revenue: 70000, orders: 2 },
-      { date: '2026-11-03', revenue: 0, orders: 0 },
+      { date: '2026-11-01', revenue: 0, orders: 0, cogs: 0, grossProfit: 0 },
+      { date: '2026-11-02', revenue: 70000, orders: 2, cogs: 30000, grossProfit: 40000 },
+      { date: '2026-11-03', revenue: 0, orders: 0, cogs: 0, grossProfit: 0 },
     ]);
+    expect(report.totalCogs).toBe(30000);
+    expect(report.grossProfit).toBe(40000);
     expect(report.totalRevenue).toBe(70000);
     expect(report.orderCount).toBe(2);
   });
@@ -78,12 +80,36 @@ describe('SalesReportService', () => {
   });
 
   it('byBranch và topDrugs đổi bigint sang number, ánh xạ tên trường theo contract; topDrugs tối đa 10', async () => {
-    repo.byBranch.mockResolvedValue([{ branchId: BRANCH_1, branchName: 'CN1', orderCount: 2, revenue: 70000n }]);
-    repo.topProductsChain.mockResolvedValue([{ productId: 'p1', productName: 'Thuốc', qtyBase: 5, revenue: 50000n }]);
+    repo.byBranch.mockResolvedValue([
+      { branchId: BRANCH_1, branchName: 'CN1', orderCount: 2, revenue: 70000n, cogs: 28000n },
+    ]);
+    repo.topProductsChain.mockResolvedValue([
+      { productId: 'p1', productName: 'Thuốc', qtyBase: 5, revenue: 50000n, cogs: 20000n },
+    ]);
     const report = await service.salesReport({ from: '2026-11-01', to: '2026-11-01' }, admin);
-    expect(repo.topProductsChain).toHaveBeenCalledWith(expect.anything(), 10);
-    expect(report.byBranch).toEqual([{ branchId: BRANCH_1, branchName: 'CN1', revenue: 70000, orderCount: 2 }]);
-    expect(report.topDrugs).toEqual([{ drugId: 'p1', drugName: 'Thuốc', qtyInBase: 5, revenue: 50000 }]);
+    expect(repo.topProductsChain).toHaveBeenCalledWith(expect.anything(), 10, 'revenue');
+    expect(report.byBranch).toEqual([
+      {
+        branchId: BRANCH_1,
+        branchName: 'CN1',
+        revenue: 70000,
+        orderCount: 2,
+        cogs: 28000,
+        grossProfit: 42000,
+        grossMarginPct: 60,
+      },
+    ]);
+    expect(report.topDrugs).toEqual([
+      {
+        drugId: 'p1',
+        drugName: 'Thuốc',
+        qtyInBase: 5,
+        revenue: 50000,
+        cogs: 20000,
+        grossProfit: 30000,
+        grossMarginPct: 60,
+      },
+    ]);
   });
 
   it('topDrugs: ADMIN không lọc chi nhánh → bảng chuỗi; PM hoặc có branchIds → bảng theo chi nhánh', async () => {
@@ -125,5 +151,42 @@ describe('SalesReportService', () => {
     await expect(service.salesReport({ from: '2026-11-05', to: '2026-11-05' }, admin)).rejects.toThrow('db');
     await service.salesReport({ from: '2026-11-05', to: '2026-11-05' }, admin);
     expect(repo.daily).toHaveBeenCalledTimes(4);
+  });
+
+  it('grossMarginPct: revenue 0 → null; lãi âm → tỉ lệ âm; làm tròn 1 chữ số', async () => {
+    repo.byBranch.mockResolvedValue([
+      { branchId: BRANCH_1, branchName: 'CN1', orderCount: 0, revenue: 0n, cogs: 0n },
+      { branchId: BRANCH_2, branchName: 'CN2', orderCount: 1, revenue: 30000n, cogs: 40000n },
+    ]);
+    repo.daily.mockResolvedValue([{ date: '2026-11-01', orders: 1, revenue: 3n, cogs: 2n }]);
+    repo.topProductsChain.mockResolvedValue([
+      { productId: 'p1', productName: 'A', qtyBase: 1, revenue: 7n, cogs: 5n },
+      { productId: 'p2', productName: 'B', qtyBase: 1, revenue: 3n, cogs: 0n },
+    ]);
+    const report = await service.salesReport({ from: '2026-11-01', to: '2026-11-01' }, admin);
+    expect(report.byBranch.map((b) => b.grossMarginPct)).toEqual([null, -33.3]);
+    expect(report.byBranch[1].grossProfit).toBe(-10000);
+    expect(report.grossMarginPct).toBe(33.3);
+    expect(report.topDrugs.map((d) => d.grossMarginPct)).toEqual([28.6, 100]);
+    repo.daily.mockResolvedValue([]);
+    expect((await service.salesReport({ from: '2026-11-02', to: '2026-11-02' }, admin)).grossMarginPct).toBeNull();
+  });
+
+  it('khoá cache gồm topBy', async () => {
+    const query = { from: '2026-11-01', to: '2026-11-01' };
+    await service.salesReport(query, admin);
+    await service.salesReport({ ...query, topBy: 'grossProfit' }, admin);
+    expect(repo.daily).toHaveBeenCalledTimes(2);
+    expect(repo.topProductsChain).toHaveBeenLastCalledWith(expect.anything(), 10, 'grossProfit');
+    await service.salesReport({ ...query, topBy: 'grossProfit' }, admin);
+    await service.salesReport({ ...query, topBy: 'revenue' }, admin);
+    expect(repo.daily).toHaveBeenCalledTimes(2);
+  });
+
+  it('topBy vắng → giống hành vi cũ (revenue)', async () => {
+    await service.salesReport({ from: '2026-11-01', to: '2026-11-01' }, admin);
+    await service.salesReport({ from: '2026-11-02', to: '2026-11-02', branchIds: [BRANCH_2] }, admin);
+    expect(repo.topProductsChain).toHaveBeenCalledWith(expect.anything(), 10, 'revenue');
+    expect(repo.topProducts).toHaveBeenCalledWith(expect.anything(), 10, 'revenue');
   });
 });

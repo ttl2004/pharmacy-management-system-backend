@@ -25,13 +25,17 @@ export class SalesReportController {
   @RequirePermissions('report:read')
   @Get('sales')
   @ApiOperation({
-    summary: 'Báo cáo doanh thu và top sản phẩm',
+    summary: 'Báo cáo doanh thu, lãi gộp và top sản phẩm',
     description:
       'Ngày = ngày giờ VN lúc thu tiền. Doanh thu = tiền thực giữ lại: đơn đã thu tính theo tổng đơn; đơn huỷ sau khi thu trừ ' +
       'đúng số tiền đã hoàn, vào NGÀY THU GỐC; số đơn không tính đơn đã huỷ. Top sản phẩm theo doanh thu giảm dần rồi số lượng ' +
       '(đơn vị gốc), tối đa 10; đơn huỷ trừ toàn bộ dòng. Lưu ý: huỷ hoàn MỘT PHẦN thì tổng doanh thu vẫn giữ phần không hoàn, ' +
       'còn doanh thu theo sản phẩm đã trừ hết — hai số lệch nhau đúng bằng phần không hoàn (chủ ý). `daily` đủ mọi ngày kể cả ' +
-      '0đ; `byBranch` gồm mọi chi nhánh trong phạm vi, giảm dần theo doanh thu. Kết quả được cache tối đa 60 giây.',
+      '0đ; `byBranch` gồm mọi chi nhánh trong phạm vi, giảm dần theo doanh thu. ' +
+      'Giá vốn (`cogs`) = Σ số lượng × giá vốn lô lúc bán của đơn đã thu và chưa huỷ; đơn huỷ sau thu trừ hết giá vốn vào ngày thu gốc. ' +
+      'Lãi gộp = doanh thu − giá vốn, có thể âm; `grossMarginPct` = lãi gộp / doanh thu × 100 làm tròn 1 chữ số, null khi doanh thu ≤ 0. ' +
+      'Tổng lãi trừ Σ lãi theo sản phẩm = phần tiền giữ lại khi huỷ hoàn một phần. `topBy=grossProfit` xếp top 10 theo lãi gộp ' +
+      'giảm dần (hoà: doanh thu, rồi id); mặc định `revenue`. Kết quả được cache tối đa 60 giây.',
   })
   sales(@Query() query: SalesReportQuery, @CurrentActor() actor: RequestActor) {
     return this.service.salesReport(query, actor);

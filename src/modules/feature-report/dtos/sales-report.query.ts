@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
-import { ArrayMaxSize, IsArray, IsOptional, IsUUID } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsIn, IsOptional, IsUUID } from 'class-validator';
 import { IsDateOnly } from 'src/common/validators/is-date-only.validator';
 
 /** Danh sách phân tách dấu phẩy → mảng (quy ước FE `csv`). */
@@ -31,4 +31,13 @@ export class SalesReportQuery {
     description: 'Chi nhánh (csv). ADMIN: bỏ trống = toàn chuỗi. PM: bỏ trống = chi nhánh mình; chi nhánh khác → 1506',
   })
   branchIds?: string[];
+
+  @IsOptional()
+  @IsIn(['revenue', 'grossProfit'])
+  @ApiPropertyOptional({
+    enum: ['revenue', 'grossProfit'],
+    default: 'revenue',
+    description: 'Tiêu chí xếp top 10 sản phẩm: doanh thu (mặc định) hoặc lãi gộp giảm dần',
+  })
+  topBy?: 'revenue' | 'grossProfit';
 }

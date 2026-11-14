@@ -128,6 +128,93 @@ describe('bảng tổng hợp doanh thu (db)', () => {
     expect(byProduct.get(base.products[1].id)).toMatchObject({ qtyBase: 1, revenue: 50000n, cogsAmount: 20000n });
   });
 
+  const dailyCogs = () =>
+    prisma.$queryRaw<{ date: string; cogsAmount: bigint }[]>`
+      SELECT to_char("date", 'YYYY-MM-DD') AS "date", "cogsAmount" FROM sales_daily ORDER BY "date", "cogsAmount" DESC`;
+  /** Bất biến: giá vốn ngày = Σ giá vốn theo sản phẩm, theo từng khoá (chi nhánh, ngày, kênh). */
+  const cogsInvariantViolations = () =>
+    prisma.$queryRaw<{ branchId: string }[]>`
+      SELECT d."branchId" FROM sales_daily d
+      LEFT JOIN (
+        SELECT "branchId", "date", "channel", SUM("cogsAmount") AS "cogs" FROM sales_daily_product GROUP BY 1, 2, 3
+      ) p ON p."branchId" = d."branchId" AND p."date" = d."date" AND p."channel" = d."channel"
+      WHERE d."cogsAmount" <> COALESCE(p."cogs", 0)`;
+
+  it('thu đơn → sales_daily.cogsAmount = Σ giá vốn lô đã xuất', async () => {
+    const o = await seedPaidOrder(prisma, base, {
+      branch: 0,
+      completedAt: vn('2026-11-01T09:00:00'),
+      lines: [
+        { product: 0, qty: 2, unitPrice: 10000, unitCost: 4000 },
+        { product: 1, qty: 3, unitPrice: 50000, unitCost: 20000 },
+      ],
+    });
+    await apply(o.id, 1, o.total);
+    expect(await dailyCogs()).toEqual([{ date: '2026-11-01', cogsAmount: 68000n }]);
+  });
+
+  it('huỷ sau thu (hoàn một phần) → cogsAmount về 0 ở ngày thu gốc, revenue giữ phần không hoàn', async () => {
+    const o = await seedPaidOrder(prisma, base, {
+      branch: 0,
+      completedAt: vn('2026-11-01T10:00:00'),
+      lines: [{ product: 0, qty: 10, unitPrice: 10000, unitCost: 4000 }],
+      voidedRefund: 60000n,
+    });
+    await apply(o.id, 1, o.total);
+    await apply(o.id, -1, -60000n);
+    const rows = await daily();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ date: '2026-11-01', revenue: 40000n });
+    expect(await dailyCogs()).toEqual([{ date: '2026-11-01', cogsAmount: 0n }]);
+  });
+
+  it('bất biến: sales_daily.cogsAmount = Σ sales_daily_product.cogsAmount sau chuỗi thu/huỷ nhiều đơn', async () => {
+    const a = await seedPaidOrder(prisma, base, {
+      branch: 0,
+      completedAt: vn('2026-11-01T09:00:00'),
+      lines: [{ product: 0, qty: 2, unitPrice: 10000, unitCost: 4000 }],
+    });
+    const b = await seedPaidOrder(prisma, base, {
+      branch: 0,
+      completedAt: vn('2026-11-01T11:00:00'),
+      lines: [
+        { product: 1, qty: 1, unitPrice: 50000, unitCost: 20000 },
+        { product: 2, qty: 4, unitPrice: 2500, unitCost: 1000 },
+      ],
+      voidedRefund: 40000n,
+    });
+    const zero = await seedPaidOrder(prisma, base, {
+      branch: 1,
+      completedAt: vn('2026-11-01T12:00:00'),
+      lines: [{ product: 0, qty: 1, unitPrice: 0, unitCost: 4000 }],
+      voidedRefund: 0n,
+    });
+    const c = await seedPaidOrder(prisma, base, {
+      branch: 1,
+      completedAt: vn('2026-11-02T08:00:00'),
+      lines: [{ product: 0, qty: 3, unitPrice: 10000, unitCost: 4500 }],
+    });
+    await apply(a.id, 1, a.total);
+    await apply(b.id, 1, b.total);
+    await apply(b.id, -1, -40000n);
+    await apply(zero.id, 1, zero.total);
+    await apply(zero.id, -1, 0n);
+    await apply(c.id, 1, c.total);
+    expect(await cogsInvariantViolations()).toEqual([]);
+    expect((await dailyCogs()).map((r) => [r.date, r.cogsAmount])).toEqual([
+      ['2026-11-01', 8000n],
+      ['2026-11-01', 0n],
+      ['2026-11-02', 13500n],
+    ]);
+    const dailyBefore =
+      await prisma.$queryRaw`SELECT "branchId", "date", "channel", "cogsAmount" FROM sales_daily ORDER BY 1, 2, 3`;
+    await prisma.$transaction((tx) => repo.rebuild(tx, '2026-11-01', '2026-11-02'));
+    expect(
+      await prisma.$queryRaw`SELECT "branchId", "date", "channel", "cogsAmount" FROM sales_daily ORDER BY 1, 2, 3`,
+    ).toEqual(dailyBefore);
+    expect(await cogsInvariantViolations()).toEqual([]);
+  });
+
   /** Cổng để giữ một transaction mở cho tới khi test cho phép commit. */
   const gate = () => {
     let open!: () => void;

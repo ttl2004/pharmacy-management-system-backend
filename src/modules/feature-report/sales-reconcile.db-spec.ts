@@ -63,6 +63,23 @@ describe('đối soát doanh thu (db)', () => {
     expect(row).toMatchObject({ orderCount: 1, revenue: order.total });
   });
 
+  it('sổ phụ lệch giá vốn → báo lệch có stored/expected.cogsAmount rồi sửa', async () => {
+    const order = await seedOrder();
+    await prisma.$executeRaw`UPDATE sales_daily SET "cogsAmount" = 123 WHERE "date" = '2026-11-01'`;
+    const result = await rebuild();
+    expect(result.mismatchCount).toBeGreaterThanOrEqual(1);
+    expect(result.mismatches[0]).toMatchObject({
+      table: 'sales_daily',
+      date: '2026-11-01',
+      stored: { orderCount: 1, revenue: Number(order.total), cogsAmount: 123 },
+      expected: { orderCount: 1, revenue: Number(order.total), cogsAmount: 8000 },
+    });
+    const [row] = await prisma.$queryRaw<{ cogsAmount: bigint }[]>`
+      SELECT "cogsAmount" FROM sales_daily WHERE "date" = '2026-11-01'`;
+    expect(row.cogsAmount).toBe(8000n);
+    expect((await rebuild()).mismatchCount).toBe(0);
+  });
+
   it('bảng sản phẩm lệch → đếm số dòng và tổng chênh lệch theo (bảng, ngày)', async () => {
     await seedOrder();
     await prisma.$executeRaw`UPDATE sales_daily_product SET "qtyBase" = "qtyBase" + 5, "revenue" = "revenue" - 100`;

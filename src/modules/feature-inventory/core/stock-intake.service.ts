@@ -18,6 +18,7 @@ export interface IntakeLine {
   batchNumber: string;
   manufacturingDate: Date | null;
   expiryDate: Date;
+  /** Đơn vị cơ bản, ≥ 0. Bằng 0: chỉ tạo/khoá lô (điều chuyển nhận 0 cần lô để ghi hao hụt), không ghi sổ, không đổi giá vốn. */
   quantity: number;
   /** Giá vốn / đơn vị cơ bản của lần đưa vào này. */
   unitCost: number;
@@ -126,9 +127,12 @@ export class StockIntakeService {
 
     const costs: { id: string; importPrice: number }[] = [];
     const batchIdByRefItem = new Map<string, string>();
-    const entries = request.lines.map((line) => {
+    const entries = request.lines.flatMap((line) => {
       const batch = batchByKey.get(`${line.productId}|${line.batchNumber}`);
       if (!batch) throw new Error(`Không khoá được lô ${line.batchNumber} vừa tạo`);
+      batchIdByRefItem.set(line.refItemId, batch.id);
+      // Số lượng 0 (điều chuyển nhận 0): chỉ cần có lô ở chi nhánh nhận để ghi hao hụt — không giá vốn, không sổ kho.
+      if (line.quantity === 0) return [];
       // Lô thu hồi vẫn nhận hàng (tồn phải đúng thực tế) và không bán được; chỉ lô đang cách ly mới từ chối.
       if (batch.status === BatchStatus.QUARANTINE) {
         throw inventoryError(ErrorCode.BATCH_NOT_AVAILABLE, `lô ${line.batchNumber} đang ${batch.status}`);
@@ -137,16 +141,17 @@ export class StockIntakeService {
         id: batch.id,
         importPrice: weightedAverageCost(batch.quantityOnHand, batch.importPrice, line.quantity, line.unitCost),
       });
-      batchIdByRefItem.set(line.refItemId, batch.id);
-      return {
-        batchId: batch.id,
-        type: request.type,
-        quantity: line.quantity,
-        unitCost: line.unitCost,
-        refType: request.refType,
-        refId: request.refId,
-        refItemId: line.refItemId,
-      };
+      return [
+        {
+          batchId: batch.id,
+          type: request.type,
+          quantity: line.quantity,
+          unitCost: line.unitCost,
+          refType: request.refType,
+          refId: request.refId,
+          refItemId: line.refItemId,
+        },
+      ];
     });
 
     await this.batches.updateCosts(tx, costs, request.actorId);

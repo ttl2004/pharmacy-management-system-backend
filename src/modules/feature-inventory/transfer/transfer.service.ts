@@ -14,10 +14,14 @@ import { permissionError } from 'src/modules/feature-auth/permission/permission.
 import { BranchScope, isInBranchScope, resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
 import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
-import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
+import type { AuditEntry, AuditJson } from 'src/providers/audit-log/audit-log.types';
 import { DocumentCodeService } from '../core/document-code.service';
 import {
-  assertNoDuplicateBatches, badRequest, documentErrors, invalidReference, inventoryError,
+  assertNoDuplicateBatches,
+  badRequest,
+  documentErrors,
+  invalidReference,
+  inventoryError,
 } from '../core/inventory.error';
 import { resolveWriteBranch, TransferSide, transferWhere } from '../core/inventory-scope';
 import { InventoryTransactions } from '../core/inventory-transactions';
@@ -26,7 +30,11 @@ import { StockIntakeService } from '../core/stock-intake.service';
 import type { LockedBatch } from '../core/stock-ledger.repository';
 import { StockLedgerService } from '../core/stock-ledger.service';
 import {
-  CancelTransferRequest, CreateTransferRequest, ReceiveTransferRequest, TransferQuery, UpdateTransferRequest,
+  CancelTransferRequest,
+  CreateTransferRequest,
+  ReceiveTransferRequest,
+  TransferQuery,
+  UpdateTransferRequest,
 } from './dtos/transfer.request';
 import { TransferDetail, TransferHead, TransferRepository } from './repositories/transfer.repository';
 
@@ -86,6 +94,35 @@ function receivedLines(
     if (qty < item.quantity && !reason) throw badRequest(`Dòng ${index + 1}: nhận thiếu phải ghi lý do lệch`);
     return { itemId: item.id, receivedQuantity: qty, varianceReason: qty < item.quantity ? reason : null };
   });
+}
+
+/** Hao hụt từ ngưỡng này (đồng) trở lên → nhật ký mức cao. */
+const SHORT_HIGH_AMOUNT = 1_000_000n;
+/** Hoặc thiếu từ tỉ lệ này của tổng số gửi trở lên (%). */
+const SHORT_HIGH_PERCENT = 10;
+
+/** Tiền hao hụt + chi tiết từng dòng cho nhật ký `TRANSFER.RECEIVED_SHORT`; vượt ngưỡng thì nâng lên mức cao. */
+function shortAudit(
+  lines: readonly { itemId: string; sent: number; received: number; short: number; unitCost: number }[],
+  items: readonly { quantity: number }[],
+): { amount: bigint; metadata: AuditJson; severity?: 2 } {
+  const amount = lines.reduce((sum, line) => sum + BigInt(line.short) * BigInt(line.unitCost), 0n);
+  const shortQty = lines.reduce((sum, line) => sum + line.short, 0);
+  const sentQty = items.reduce((sum, item) => sum + item.quantity, 0);
+  const high = amount >= SHORT_HIGH_AMOUNT || shortQty * 100 >= sentQty * SHORT_HIGH_PERCENT;
+  return {
+    amount,
+    metadata: {
+      shortLines: lines.map(({ itemId, sent, received, short, unitCost }) => ({
+        itemId,
+        sent,
+        received,
+        short,
+        unitCost,
+      })),
+    },
+    ...(high ? { severity: 2 as const } : {}),
+  };
 }
 
 /** Lô ở chi nhánh nhận của từng dòng. `intake` luôn trả đủ; thiếu là lỗi lập trình (tránh ghi NULL vào toBatchId). */
@@ -254,8 +291,12 @@ export class TransferService {
           throw inventoryError(ErrorCode.INSUFFICIENT_STOCK, `lô ${batch.batchNumber}`);
         }
         return {
-          transferId: id, batchId: item.batchId, productId: batch.productId, quantity: item.quantity,
-          note: item.note ?? null, createdBy: actorId,
+          transferId: id,
+          batchId: item.batchId,
+          productId: batch.productId,
+          quantity: item.quantity,
+          note: item.note ?? null,
+          createdBy: actorId,
         };
       });
       await this.transfers.replaceItems(tx, id, items);
@@ -335,7 +376,8 @@ export class TransferService {
 
   /**
    * IN_TRANSIT → RECEIVED: tạo/gộp lô cùng số ở chi nhánh nhận (giá vốn chốt lúc xuất), ghi TRANSFER_IN. `dto.lines` (tuỳ chọn): số thực nhận từng dòng (0..số gửi), nhận thiếu bắt buộc lý do — như
-   * mock. Kho nhận chỉ cộng số thực nhận; phần thiếu ghi lý do lệch trên dòng (hao hụt trên đường, như mock).
+   * mock. Kho nhận chỉ cộng số thực nhận; phần thiếu ghi lý do lệch trên dòng VÀ thành hao hụt (DISPOSE) ở chi nhánh nhận
+   * với giá chốt lúc xuất (T1) — không còn hàng rời chi nhánh gửi mà không nằm ở sổ nào.
    */
   async receive(id: string, actor: RequestActor, dto?: ReceiveTransferRequest): Promise<TransferDetail> {
     const scope = resolveBranchScope(actor.user);
@@ -363,8 +405,8 @@ export class TransferService {
       const received = receivedLines(allItems, dto);
       await this.transfers.setReceived(tx, received, actorId);
       const receivedById = new Map(received.map((r) => [r.itemId, r.receivedQuantity]));
-      // Dòng nhận 0 không sinh bút toán, không có lô nhận.
-      const items = allItems.filter((item) => (receivedById.get(item.id) ?? 0) > 0);
+      // Mọi dòng đều có lô nhận, kể cả dòng nhận 0 (intake số lượng 0 chỉ tạo lô) — phần thiếu ghi hao hụt vào lô đó.
+      const items = allItems;
       const costs = await this.transfers.findShipCosts(tx, id);
       // `intake` cần mỗi (sản phẩm, số lô) xuất hiện một lần: lúc lập phiếu đã cấm trùng lô, và mỗi lô gửi là duy nhất
       // theo (chi nhánh, sản phẩm, số lô).
@@ -393,11 +435,56 @@ export class TransferService {
         actorId,
       );
 
+      // T1: phần thiếu không được biến mất khỏi sổ. Hao hụt tính cho chi nhánh NHẬN (người ký nhận): trên lô nhận ghi
+      // cặp "nhập chuyển +thiếu" rồi "hao hụt −thiếu" cùng giá chốt lúc xuất — tồn lô không đổi, giá vốn bình quân của
+      // lô không bị kéo lệch, báo cáo nhập–xuất–tồn hiện phần thiếu ở cột huỷ/hao hụt.
+      const shortLines = received.flatMap((line) => {
+        const item = allItems.find((i) => i.id === line.itemId)!;
+        const short = item.quantity - line.receivedQuantity;
+        if (short <= 0) return [];
+        return [
+          {
+            itemId: item.id,
+            sent: item.quantity,
+            received: line.receivedQuantity,
+            short,
+            unitCost: shipCostOf(costs, item.id),
+            batchId: destinationBatchOf(batchIdByRefItem, item.id),
+            reason: line.varianceReason ?? '',
+          },
+        ];
+      });
+      if (shortLines.length) {
+        await this.ledger.apply(
+          ctx,
+          shortLines.flatMap((line) => {
+            const common = {
+              batchId: line.batchId,
+              unitCost: line.unitCost,
+              refType: StockRefType.STOCK_TRANSFER,
+              refId: id,
+              refItemId: line.itemId,
+              note: `Hao hụt điều chuyển ${head.code}: ${line.reason}`,
+            };
+            return [
+              { ...common, type: StockMovementType.TRANSFER_IN, quantity: line.short },
+              { ...common, type: StockMovementType.DISPOSE, quantity: -line.short },
+            ];
+          }),
+          actorId,
+        );
+      }
+
       // Nhận thiếu: lý do bắt buộc = lý do lệch từng dòng (receivedLines đã bắt có lý do khi thiếu).
       const shortReasons = received.flatMap((line) => (line.varianceReason ? [line.varianceReason] : []));
       const base = statusAudit(head, TransferStatus.IN_TRANSIT, TransferStatus.RECEIVED);
       const receivedEntry: AuditEntry = shortReasons.length
-        ? { event: 'TRANSFER.RECEIVED_SHORT', ...base, reason: shortReasons.join('; ') }
+        ? {
+            event: 'TRANSFER.RECEIVED_SHORT',
+            ...base,
+            reason: shortReasons.join('; '),
+            ...shortAudit(shortLines, allItems),
+          }
         : { event: 'TRANSFER.RECEIVED', ...base };
       // Lô vừa tạo ở chi nhánh nhận có thể thừa hưởng thu hồi: ghi chung một lần với dòng của phiếu.
       await this.audit.record(tx, auditActorOf(actor), [...auditEntries, receivedEntry]);

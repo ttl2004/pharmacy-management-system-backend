@@ -205,6 +205,25 @@ describe('StockIntakeService', () => {
     });
   });
 
+  it('dòng số lượng 0: chỉ bảo đảm có lô (để ghi hao hụt điều chuyển), không đổi giá vốn, không ghi sổ', async () => {
+    const rows = [locked(), locked({ id: 'b2', productId: 'p2', batchNumber: 'L2', quantityOnHand: 0 })];
+    const { intake, batches, ledger, ctx } = makeIntake(rows);
+
+    const result = await intake.intake(
+      ctx,
+      request([line(), line({ productId: 'p2', batchNumber: 'L2', quantity: 0, refItemId: 'i2' })]),
+    );
+
+    expect(batches.insertSkipExisting).toHaveBeenCalledWith(
+      {},
+      expect.arrayContaining([expect.objectContaining({ productId: 'p2', batchNumber: 'L2' })]),
+    );
+    expect(batches.updateCosts).toHaveBeenCalledWith({}, [{ id: 'b1', importPrice: 1100 }], 'actor');
+    const [, entries] = ledger.apply.mock.calls[0] as [unknown, { batchId: string }[]];
+    expect(entries.map((e) => e.batchId)).toEqual(['b1']);
+    expect(result.batchIdByRefItem.get('i2')).toBe('b2');
+  });
+
   it('không có dòng thì không gọi DB', async () => {
     const { intake, batches, ctx } = makeIntake([]);
     await intake.intake(ctx, request([]));

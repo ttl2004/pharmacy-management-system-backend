@@ -1,5 +1,5 @@
 import { Prisma, PrismaClient } from '@prisma/client';
-import { containsPattern } from 'src/common/utils/like-pattern.util';
+import { escapeLike } from 'src/common/utils/like-pattern.util';
 import {
   BaseFindOptions,
   BaseRecord,
@@ -72,8 +72,7 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
    * Tên các cột **lọc** được — chỉ `scalar`, cố ý loại enum.
    *
    * Hai lý do, cả hai đều là lỗi runtime chứ không phải lỗi biên dịch:
-   * - `searchIds` chèn thẳng `"cột" ILIKE $1` vào SQL thô, mà PostgreSQL không có toán tử `ILIKE`
-   *   cho kiểu enum.
+   * - PostgreSQL không có toán tử `ILIKE` cho kiểu enum (tìm kiếm chỉ dùng cột chuỗi, xem `textColumnNames`).
    * - Prisma không nhận `gte`/`lte` trên enum, nên `ranges` cũng không dùng được.
    */
   protected get filterableColumnNames(): Set<string> {
@@ -84,6 +83,21 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
       );
     }
     return this.filterColumns;
+  }
+
+  private textColumns?: Set<string>;
+
+  /** Cột chuỗi — chỉ những cột này tìm kiếm `ILIKE` được. */
+  protected get textColumnNames(): Set<string> {
+    if (!this.textColumns) {
+      const model = Prisma.dmmf.datamodel.models.find((item) => item.name === this.modelName);
+      this.textColumns = new Set(
+        (model?.fields ?? [])
+          .filter((field) => field.kind === 'scalar' && field.type === 'String')
+          .map((field) => field.name),
+      );
+    }
+    return this.textColumns;
   }
 
   protected parseOptions(options?: BaseFindOptions) {
@@ -113,7 +127,7 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
 
   protected buildWhere(
     filter: BaseWhere<T> = {},
-    searchIds?: string[],
+    searchWhere?: Record<string, unknown>,
     ranges?: Record<string, QueryRange>,
   ): Record<string, unknown> {
     const base = { ...this.sanitize(filter), isDeleted: false } as Record<string, unknown>;
@@ -129,49 +143,31 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
       }
     }
 
-    if (searchIds) return { AND: [base, { id: { in: searchIds } }] };
+    if (searchWhere) return { AND: [base, searchWhere] };
 
     return base;
   }
 
-  /** Id các bản ghi khớp từ khoá; `undefined` khi không có từ khoá hoặc không có cột nào để tìm. */
-  protected async resolveSearchIds(search?: string, searchFields?: string[]): Promise<string[] | undefined> {
-    if (!search) return undefined;
-
-    const fields = (searchFields ?? []).filter((field) => this.filterableColumnNames.has(field));
-    if (!fields.length) return undefined;
-
-    return this.searchIds(search, fields);
+  /**
+   * Điều kiện tìm kiếm `{ OR: [cột ILIKE %từ khoá%] }` gộp thẳng vào `where` của câu phân trang — PostgreSQL tự
+   * `LIMIT`, không kéo danh sách id khớp về Node (từ khoá ngắn có thể khớp hàng chục nghìn dòng).
+   * `undefined` khi không có từ khoá hoặc không có cột chuỗi nào để tìm.
+   *
+   * `mode: 'insensitive'` → `ILIKE` (PostgreSQL phân biệt hoa/thường với `LIKE`). Prisma `contains` không tự escape
+   * `%`/`_` nên escape sẵn: người dùng gõ `%` là chữ, không phải ký tự đại diện.
+   */
+  protected resolveSearchWhere(search?: string, searchFields?: string[]): Record<string, unknown> | undefined {
+    const conditions = this.searchConditions(search, searchFields);
+    return conditions.length ? { OR: conditions } : undefined;
   }
 
-  /**
-   * Id các bản ghi khớp từ khoá tìm kiếm.
-   *
-   * Prisma dịch `contains` thành `LIKE ?` **không kèm mệnh đề ESCAPE**, nên `%` và `_` do người
-   * dùng gõ sẽ thành ký tự đại diện và không thể vô hiệu hoá ở tầng Prisma. Truy vấn thô dưới đây
-   * dùng `ILIKE ... ESCAPE '\'` để từ khoá luôn được hiểu là văn bản thuần.
-   *
-   * Dùng `ILIKE` chứ không `LIKE` vì PostgreSQL phân biệt hoa/thường với `LIKE` (SQLite thì không)
-   * — tra cứu danh mục phải không phân biệt hoa/thường.
-   */
-  private async searchIds(search: string, fields: string[]): Promise<string[]> {
-    const model = Prisma.dmmf.datamodel.models.find((item) => item.name === this.modelName);
-    const table = model?.dbName ?? this.modelName;
-    const pattern = containsPattern(search);
-
-    const conditions = fields.map((field) => {
-      const column = model?.fields.find((item) => item.name === field)?.dbName ?? field;
-      return Prisma.sql`${Prisma.raw(`"${column}"`)} ILIKE ${pattern} ESCAPE '\\'`;
-    });
-
-    const rows = await this.prisma.$queryRaw<{ id: string }[]>(
-      Prisma.sql`SELECT "id" FROM ${Prisma.raw(`"${table}"`)} WHERE "isDeleted" = false AND (${Prisma.join(
-        conditions,
-        ' OR ',
-      )})`,
-    );
-
-    return rows.map((row) => row.id);
+  /** Từng điều kiện `contains` trên cột chuỗi của model; lớp con thêm điều kiện quan hệ rồi tự gói `OR`. */
+  protected searchConditions(search?: string, searchFields?: string[]): Record<string, unknown>[] {
+    if (!search) return [];
+    const contains = escapeLike(search);
+    return (searchFields ?? [])
+      .filter((field) => this.textColumnNames.has(field))
+      .map((field) => ({ [field]: { contains, mode: 'insensitive' } }));
   }
 
   protected toOrder(sort?: Record<string, SortDirection> | string): Record<string, 'asc' | 'desc'>[] {
@@ -251,10 +247,10 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
 
   async findOne(filter: BaseWhere<T> = {}, options?: BaseFindOptions): Promise<T | null> {
     const { relations, sort, search, searchFields, ranges } = this.parseOptions(options);
-    const searchIds = await this.resolveSearchIds(search, searchFields);
+    const searchWhere = this.resolveSearchWhere(search, searchFields);
 
     const row = await this.delegate.findFirst({
-      where: this.buildWhere(filter, searchIds, ranges),
+      where: this.buildWhere(filter, searchWhere, ranges),
       include: this.toInclude(relations),
       orderBy: this.toOrder(sort),
     });
@@ -264,10 +260,10 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
 
   async findMany(filter: BaseWhere<T> = {}, options?: BaseFindOptions): Promise<T[]> {
     const { relations, sort, limit, skip, search, searchFields, ranges } = this.parseOptions(options);
-    const searchIds = await this.resolveSearchIds(search, searchFields);
+    const searchWhere = this.resolveSearchWhere(search, searchFields);
 
     const rows = await this.delegate.findMany({
-      where: this.buildWhere(filter, searchIds, ranges),
+      where: this.buildWhere(filter, searchWhere, ranges),
       include: this.toInclude(relations),
       orderBy: this.toOrder(sort),
       take: limit,
@@ -281,8 +277,8 @@ export abstract class PrismaBaseRepository<T extends BaseRecord> implements IBas
     const finalOptions = this.parseOptions(options);
     const page = options?.page || 1;
     const { relations, sort, limit, search, searchFields, ranges } = finalOptions;
-    const searchIds = await this.resolveSearchIds(search, searchFields);
-    const where = this.buildWhere(filter, searchIds, ranges);
+    const searchWhere = this.resolveSearchWhere(search, searchFields);
+    const where = this.buildWhere(filter, searchWhere, ranges);
 
     const [rows, total] = await Promise.all([
       this.delegate.findMany({

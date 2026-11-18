@@ -51,3 +51,50 @@ describe('PrismaBaseRepository — nhận transaction client', () => {
     expect(own.updateMany).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('PrismaBaseRepository — tìm kiếm gộp vào câu phân trang (T2)', () => {
+  type FindArgs = { where: unknown; take?: number; skip?: number };
+  const argsOf = (fn: jest.Mock) => (fn.mock.calls as [FindArgs][])[0][0];
+
+  function makeRepo() {
+    const delegate = {
+      findMany: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
+      findFirst: jest.fn().mockResolvedValue(null),
+    };
+    const queryRaw = jest.fn().mockResolvedValue([]);
+    const repo = new CategoryRepo({ category: delegate, $queryRaw: queryRaw } as never);
+    return { repo, delegate, queryRaw };
+  }
+
+  it('không kéo danh sách id về Node: điều kiện ILIKE nằm trong where của câu có LIMIT', async () => {
+    const { repo, delegate, queryRaw } = makeRepo();
+
+    await repo.findManyWithPagination({}, { search: 'a%_', searchFields: ['name', 'code'], limit: 20, page: 2 });
+
+    expect(queryRaw).not.toHaveBeenCalled();
+    const args = argsOf(delegate.findMany);
+    expect(args.take).toBe(20);
+    expect(args.skip).toBe(20);
+    expect(args.where).toEqual({
+      AND: [
+        { isDeleted: false },
+        {
+          OR: [
+            { name: { contains: 'a\\%\\_', mode: 'insensitive' } },
+            { code: { contains: 'a\\%\\_', mode: 'insensitive' } },
+          ],
+        },
+      ],
+    });
+    expect(argsOf(delegate.count).where).toEqual(args.where);
+  });
+
+  it('bỏ cột không phải chuỗi hoặc không tồn tại; không còn cột nào thì không lọc', async () => {
+    const { repo, delegate } = makeRepo();
+
+    await repo.findMany({}, { search: 'x', searchFields: ['createdAt', 'khong-co'] });
+
+    expect(argsOf(delegate.findMany).where).toEqual({ isDeleted: false });
+  });
+});

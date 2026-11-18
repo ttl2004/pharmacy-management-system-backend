@@ -8,7 +8,7 @@ import { AuthzGuard } from '../authz/guards/auth.guard';
 import type { JwtUser } from '../authz/types/authz.types';
 import { RequirePermissions } from '../permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../permission/guards/permission.guard';
-import { CreateUserRequest, UpdateUserRequest } from './dtos/user.request';
+import { CreateUserRequest, ResetPasswordRequest, UpdateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserService } from './user.service';
 
@@ -67,6 +67,21 @@ export class UserController {
     @CurrentActor() actor: RequestActor,
   ) {
     return this.userService.update(id, dto, actor);
+  }
+
+  @RequirePermissions('user:update')
+  @Post(':id/reset-password')
+  @ApiOperation({
+    description:
+      'Đặt lại mật khẩu cho nhân viên quên mật khẩu (8–72 ký tự). Chỉ người cấp cao hơn, trong phạm vi chi nhánh; không cho SUPER_ADMIN và chính mình (1605 — dùng POST /auth/change-password). Thu hồi mọi phiên của người đó.',
+  })
+  @ApiResponse({ status: 404, description: '1200 không tồn tại/ngoài phạm vi/chưa có tài khoản đăng nhập' })
+  resetPassword(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: ResetPasswordRequest,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.userService.resetPassword(id, dto, actor);
   }
 
   @RequirePermissions('user:delete')

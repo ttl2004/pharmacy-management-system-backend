@@ -39,6 +39,10 @@ export const trustProxySchema = z.coerce
 export const envSchema = z
   .object({
     //- Ứng dụng
+    // Không khai báo = coi như chạy thật (production): Swagger tắt, log JSON. Máy dev đặt NODE_ENV=development.
+    NODE_ENV: z
+      .enum(['development', 'production', 'test'], { error: 'NODE_ENV chỉ nhận development, production hoặc test' })
+      .default('production'),
     PORT: z.coerce.number().int().positive().default(3790),
     // Origin được gọi API kèm cookie, ngăn cách bằng dấu phẩy. Để trống: không cho trình duyệt gọi chéo origin.
     CORS_ORIGINS: z
@@ -133,7 +137,10 @@ export const envSchema = z
     //- Trợ lý hỏi đáp thuốc (RAG service: projects/base-rag/api.py hoặc bản RAG hoàn chỉnh cùng hợp đồng)
     RAG_SERVICE_URL: z
       .string()
-      .refine((url) => URL.canParse(url) && /^https?:$/.test(new URL(url).protocol), 'RAG_SERVICE_URL phải là URL http(s)')
+      .refine(
+        (url) => URL.canParse(url) && /^https?:$/.test(new URL(url).protocol),
+        'RAG_SERVICE_URL phải là URL http(s)',
+      )
       .default('http://127.0.0.1:8790'),
     // Gửi qua header X-Internal-Key; phải trùng RAG_INTERNAL_KEY bên RAG service. Bỏ trống = không gửi.
     RAG_INTERNAL_KEY: z.string().optional(),

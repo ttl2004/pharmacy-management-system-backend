@@ -15,6 +15,7 @@ import {
 import { ErrorCode } from '../types/error-code';
 import { ErrorException } from './error.exception';
 import { FastifyReply, FastifyRequest } from 'fastify';
+import { maskPhonesInText } from '../utils/mask.util';
 
 @Catch()
 export class ResolveExceptionFilter implements ExceptionFilter {
@@ -84,7 +85,7 @@ export class ResolveExceptionFilter implements ExceptionFilter {
     // token); `requestId` để nối với dòng log request của pino. Lỗi 4xx là lỗi người dùng — không ghi để log khỏi rác.
     if (statusCode >= 500) {
       this.logger.error(
-        `${request.method} ${request.url} → ${statusCode} (requestId=${String(request.id)})`,
+        `${request.method} ${maskPhonesInText(request.url)} → ${statusCode} (requestId=${String(request.id)})`,
         exception instanceof Error ? exception.stack : String(exception),
       );
     }

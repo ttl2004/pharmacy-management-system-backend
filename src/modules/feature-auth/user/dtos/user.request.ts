@@ -158,3 +158,17 @@ export class UpdateUserRequest {
   @ApiPropertyOptional({ maxLength: 500 })
   reason?: string;
 }
+
+/** Body của `POST /user/:id/reset-password` (L10): ADMIN/PM đặt mật khẩu mới cho nhân viên quên mật khẩu. */
+export class ResetPasswordRequest {
+  /** Cùng luật với đổi mật khẩu: 8–72 ký tự (bcrypt bỏ phần vượt 72 byte). */
+  @IsString()
+  @MinLength(8, { message: '$property phải có ít nhất $constraint1 ký tự' })
+  @MaxLength(72, { message: '$property không được vượt quá $constraint1 ký tự' })
+  @ApiProperty({
+    minLength: 8,
+    maxLength: 72,
+    description: 'Mật khẩu mới — báo trực tiếp cho nhân viên, họ nên đổi lại',
+  })
+  newPassword!: string;
+}

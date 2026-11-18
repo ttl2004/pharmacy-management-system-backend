@@ -29,7 +29,7 @@ import {
 } from '../permission/branch-scope';
 import { assertOutranks } from '../permission/role-hierarchy';
 import { assertRoleWithinCallerGrants } from '../permission/role-grant-guard';
-import { CreateUserRequest, UpdateUserRequest } from './dtos/user.request';
+import { CreateUserRequest, ResetPasswordRequest, UpdateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserRepository } from './repositories/user.repository';
 import {
@@ -358,6 +358,40 @@ export class UserService extends AbstractBaseService<User> {
     } catch (error) {
       rethrowDuplicate(error);
     }
+  }
+
+  /**
+   * L10: đặt lại mật khẩu cho người quên mật khẩu — cùng rào với sửa người dùng: trong phạm vi chi nhánh (ngoài phạm vi
+   * → 1200), không đụng SUPER_ADMIN, không tự đặt cho mình (dùng đổi mật khẩu), chỉ người cấp thấp hơn. Mật khẩu mới
+   * lưu dạng hash; mọi phiên của người đó bị thu hồi (máy đang đăng nhập phải đăng nhập lại bằng mật khẩu mới).
+   */
+  async resetPassword(id: string, dto: ResetPasswordRequest, actor: RequestActor): Promise<{ success: true }> {
+    const caller = actor.user;
+    await this.assertTargetInScope(id, resolveBranchScope(caller));
+    await this.assertNotSuperAdminTarget(id);
+    if (caller.userId === id) {
+      throw new ErrorException({
+        code: ErrorCode.SELF_OPERATION_FORBIDDEN,
+        message: 'Không tự đặt lại mật khẩu của mình — dùng chức năng đổi mật khẩu',
+      });
+    }
+    const target = await this.userRepository.findByIdWithRole(id);
+    if (!target) throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+    assertOutranks(caller.roleLevel, target.role.level);
+
+    const hash = await bcrypt.hash(dto.newPassword, APP_CONSTANTS.BCRYPT_SALT);
+    await this.transactions.forUser(id, async (tx) => {
+      const updated = await tx.auth.updateMany({
+        where: { userId: id, isDeleted: false },
+        data: { password: hash, lastChangedPasswordAt: new Date(), updatedAt: new Date() },
+      });
+      if (!updated.count) {
+        throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng chưa có tài khoản đăng nhập' });
+      }
+      await this.revokeRefreshTokens(tx, id);
+      await this.recordSessionsRevoked(tx, id, target.role.code, actor, { trigger: 'PASSWORD_RESET' });
+    });
+    return { success: true };
   }
 
   /** Luật 13: xoá mềm + thu hồi mọi refresh token còn hiệu lực. */

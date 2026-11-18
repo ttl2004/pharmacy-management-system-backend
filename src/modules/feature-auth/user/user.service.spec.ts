@@ -815,3 +815,69 @@ describe('UserService — update đọc lại trong tx (race)', () => {
     expect(entriesOf(audit)[0]).toMatchObject({ before: { status: 'ACTIVE' }, after: { status: 'LOCKED' } });
   });
 });
+
+describe('UserService — đặt lại mật khẩu (L10)', () => {
+  function withAuth(target: Record<string, unknown> = {}) {
+    const authUpdate = jest.fn().mockResolvedValue({ count: 1 });
+    const revoke = jest.fn();
+    const service = makeService(
+      {
+        findByIdWithRole: jest.fn().mockResolvedValue({
+          id: 'staff-1',
+          branchId: CN1,
+          status: 'ACTIVE',
+          role: { code: 'SALES_STAFF', level: 40 },
+          ...target,
+        }),
+      },
+      { tx: { auth: { updateMany: authUpdate }, refreshToken: { updateMany: revoke } } },
+    );
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    return { service, authUpdate, revoke };
+  }
+
+  it('ADMIN đặt lại: lưu hash mới (không lưu mật khẩu thô), thu hồi mọi phiên, ghi sự kiện bảo mật', async () => {
+    const { service, authUpdate, revoke } = withAuth();
+    await service.resetPassword('staff-1', { newPassword: 'MatKhauMoi123' }, actorOf(ADMIN));
+    const { data } = (authUpdate.mock.calls[0] as [{ data: { password: string } }])[0];
+    expect(data.password).not.toBe('MatKhauMoi123');
+    expect(data.password).toMatch(/^\$2[aby]\$/);
+    expect((revoke.mock.calls[0] as [{ where: unknown }])[0].where).toEqual({ userId: 'staff-1', revokedAt: null });
+    const [events] = security.record.mock.calls[0] as [Record<string, unknown>[]];
+    expect(events[0]).toMatchObject({
+      type: 'AUTH.SESSIONS_REVOKED_BY_ADMIN',
+      actorId: 'staff-1',
+      metadata: { revokedBy: 'caller-id', trigger: 'PASSWORD_RESET' },
+    });
+  });
+
+  it('tự đặt lại mật khẩu của mình (dùng đổi mật khẩu) — 1605', async () => {
+    const { service } = withAuth();
+    expect(await codeOf(service.resetPassword('caller-id', { newPassword: 'MatKhauMoi123' }, actorOf(ADMIN)))).toBe(
+      ErrorCode.SELF_OPERATION_FORBIDDEN,
+    );
+  });
+
+  it('PM đặt lại cho nhân viên chi nhánh khác → 1200 như không tồn tại', async () => {
+    const { service, authUpdate } = withAuth({ branchId: 'other-branch' });
+    expect(await codeOf(service.resetPassword('staff-1', { newPassword: 'MatKhauMoi123' }, actorOf(MANAGER_CN1)))).toBe(
+      ErrorCode.USER_NOT_FOUND,
+    );
+    expect(authUpdate).not.toHaveBeenCalled();
+  });
+
+  it('PM đặt lại cho người cùng cấp/cao hơn → 1508', async () => {
+    const { service } = withAuth({ role: { code: 'PHARMACY_MANAGER', level: 60 } });
+    expect(await codeOf(service.resetPassword('staff-1', { newPassword: 'MatKhauMoi123' }, actorOf(MANAGER_CN1)))).toBe(
+      ErrorCode.ROLE_LEVEL_FORBIDDEN,
+    );
+  });
+
+  it('người dùng chưa có tài khoản đăng nhập → 1200', async () => {
+    const { service, authUpdate } = withAuth();
+    authUpdate.mockResolvedValue({ count: 0 });
+    expect(await codeOf(service.resetPassword('staff-1', { newPassword: 'MatKhauMoi123' }, actorOf(ADMIN)))).toBe(
+      ErrorCode.USER_NOT_FOUND,
+    );
+  });
+});

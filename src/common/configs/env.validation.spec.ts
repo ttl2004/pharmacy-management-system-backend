@@ -67,3 +67,11 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ ...base, REPORT_RECONCILE_CRON: 'không phải cron' })).toThrow(/REPORT_RECONCILE_CRON/);
   });
 });
+
+describe('NODE_ENV (L1)', () => {
+  it('mặc định production (không khai báo = coi như chạy thật, tắt Swagger)', () => {
+    expect(validateEnv({ ...base }).NODE_ENV).toBe('production');
+    expect(validateEnv({ ...base, NODE_ENV: 'development' }).NODE_ENV).toBe('development');
+    expect(() => validateEnv({ ...base, NODE_ENV: 'dev' })).toThrow(/NODE_ENV/);
+  });
+});

@@ -7,8 +7,8 @@ import { AUTH_JWT } from 'src/common/constants/app.constant';
 import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthzGuard } from '../feature-auth/authz/guards/auth.guard';
 import { AssistantChatRequest, AssistantFeedbackRequest } from './dtos/assistant.request';
-import { RagServiceClient } from './rag-service.client';
-import { UserThrottlerGuard } from './user-throttler.guard';
+import { CHAT_MAX_DURATION_MS, RagServiceClient } from './rag-service.client';
+import { UserThrottlerGuard } from 'src/common/guards/user-throttler.guard';
 
 const sseEvent = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
@@ -48,12 +48,19 @@ export class AssistantController {
     // `close` bắn cả khi xong bình thường lẫn khi FE ngắt (bấm Dừng) — abort sau khi xong là vô hại,
     // còn ngắt giữa chừng thì RAG service dừng gọi LLM, không tốn token.
     reply.raw.on('close', () => abort.abort());
+    // L3: trần cả câu trả lời — RAG treo giữa chừng thì cắt, báo lỗi cho FE, không giữ kết nối mãi.
+    let timedOut = false;
+    const maxTimer = setTimeout(() => {
+      timedOut = true;
+      abort.abort();
+    }, CHAT_MAX_DURATION_MS);
 
     let upstream: Awaited<ReturnType<RagServiceClient['openChat']>>;
     try {
       // Ném ở đây (RAG tắt, lệch khoá) thì filter lỗi chung vẫn trả JSON như mọi route.
       upstream = await this.rag.openChat(dto, actor.user, abort.signal);
     } catch (error) {
+      clearTimeout(maxTimer);
       // FE đã ngắt trước khi RAG kịp trả lời: không còn ai nhận, khỏi ghi lỗi lên kết nối đã đóng.
       if (abort.signal.aborted) return;
       throw error;
@@ -72,11 +79,15 @@ export class AssistantController {
     try {
       for await (const chunk of upstream) reply.raw.write(chunk);
     } catch (error) {
-      if (!abort.signal.aborted) {
+      if (timedOut) {
+        this.logger.warn(`Trợ lý RAG trả lời quá ${CHAT_MAX_DURATION_MS / 1000} giây, đã cắt`);
+        reply.raw.write(sseEvent('error', { message: 'Trợ lý trả lời quá lâu, vui lòng hỏi lại' }));
+      } else if (!abort.signal.aborted) {
         this.logger.warn(`Stream trợ lý RAG bị ngắt: ${String(error)}`);
         reply.raw.write(sseEvent('error', { message: 'Mất kết nối tới trợ lý RAG giữa chừng' }));
       }
     } finally {
+      clearTimeout(maxTimer);
       reply.raw.end();
     }
   }

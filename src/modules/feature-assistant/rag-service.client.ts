@@ -8,6 +8,10 @@ import type { JwtUser } from '../feature-auth/authz/types/authz.types';
 import type { AssistantChatRequest, AssistantFeedbackRequest } from './dtos/assistant.request';
 
 const SHORT_TIMEOUT_MS = 10_000;
+/** RAG phải trả header (bắt đầu stream) trong chừng này; tìm tài liệu + gọi LLM lượt đầu thường dưới 10 giây. */
+export const CHAT_CONNECT_TIMEOUT_MS = 30_000;
+/** Trần cả câu trả lời (L3): stream dài hơn thì controller cắt và báo lỗi, không giữ kết nối mãi khi RAG treo giữa chừng. */
+export const CHAT_MAX_DURATION_MS = 180_000;
 
 /**
  * Gọi RAG service (hợp đồng v1: plans/261105-0118-pos-rag-assistant/design.md). BE không đọc nội dung câu trả lời,
@@ -31,7 +35,22 @@ export class RagServiceClient {
 
   /** Mở stream SSE. Lỗi kết nối/HTTP ném trước khi trả, để controller còn trả JSON lỗi bình thường. */
   async openChat(body: AssistantChatRequest, user: JwtUser, signal: AbortSignal): Promise<Readable> {
-    const response = await this.request('/chat', { method: 'POST', body: JSON.stringify(body), signal }, user);
+    // Hạn chờ chỉ áp tới lúc nhận header: xong thì gỡ, để không cắt stream đang chảy (trần cả stream do controller giữ).
+    const connect = new AbortController();
+    const timer = setTimeout(
+      () => connect.abort(new DOMException('RAG không phản hồi', 'TimeoutError')),
+      CHAT_CONNECT_TIMEOUT_MS,
+    );
+    let response: Response;
+    try {
+      response = await this.request(
+        '/chat',
+        { method: 'POST', body: JSON.stringify(body), signal: AbortSignal.any([signal, connect.signal]) },
+        user,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
     if (!response.body) throw this.unavailable('Trợ lý RAG không trả nội dung');
     // body của fetch là ReadableStream (web) — đổi sang Readable của Node để `for await` ghi thẳng vào reply.raw.
     return Readable.fromWeb(response.body as unknown as WebReadableStream<Uint8Array>);
@@ -59,14 +78,19 @@ export class RagServiceClient {
       response = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
     } catch (error) {
       // Người dùng bấm Dừng / đóng kết nối: để controller tự xử lý, không phải lỗi dịch vụ.
-      if (init.signal?.aborted && !(init.signal.reason instanceof DOMException && init.signal.reason.name === 'TimeoutError')) {
+      if (
+        init.signal?.aborted &&
+        !(init.signal.reason instanceof DOMException && init.signal.reason.name === 'TimeoutError')
+      ) {
         throw error;
       }
       throw this.unavailable(`Không kết nối được trợ lý RAG (${this.baseUrl})`);
     }
     if (!response.ok) {
       throw this.unavailable(
-        response.status === 401 ? 'BE và trợ lý RAG lệch RAG_INTERNAL_KEY' : `Trợ lý RAG trả lỗi HTTP ${response.status}`,
+        response.status === 401
+          ? 'BE và trợ lý RAG lệch RAG_INTERNAL_KEY'
+          : `Trợ lý RAG trả lỗi HTTP ${response.status}`,
       );
     }
     return response;

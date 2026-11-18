@@ -1,7 +1,17 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Gender, UserStatus } from '@prisma/client';
 import { Transform } from 'class-transformer';
-import { IsEnum, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength, ValidateIf } from 'class-validator';
+import {
+  IsEnum,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Matches,
+  MaxLength,
+  MinLength,
+  ValidateIf,
+} from 'class-validator';
 import { VIETNAM_PHONE_PATTERN } from 'src/common/utils/phone.util';
 import { toVietnamPhone, trimLowerCase } from 'src/common/utils/string-transform.util';
 
@@ -65,9 +75,12 @@ export class CreateUserRequest {
   @ApiProperty({ required: false, description: 'Tạo kèm tài khoản đăng nhập' })
   username?: string;
 
+  /** Cùng luật với `POST /auth/change-password`: 8–72 ký tự (bcrypt bỏ phần vượt 72 byte). */
   @IsOptional()
   @IsString()
-  @ApiProperty({ required: false })
+  @MinLength(8, { message: '$property phải có ít nhất $constraint1 ký tự' })
+  @MaxLength(72, { message: '$property không được vượt quá $constraint1 ký tự' })
+  @ApiProperty({ required: false, minLength: 8, maxLength: 72 })
   password?: string;
 
   @IsOptional()

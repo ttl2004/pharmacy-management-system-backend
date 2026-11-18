@@ -6,6 +6,7 @@ const unit = (overrides: Partial<SellableUnit> & { id: string }): SellableUnit =
   conversionRate: 1,
   salePrice: 1000,
   status: RecordStatus.ACTIVE,
+  allowLooseSale: true,
   unit: { name: 'Viên' },
   product: { id: 'p1', name: 'Paracetamol', status: RecordStatus.ACTIVE, requiresPrescription: false },
   ...overrides,
@@ -52,6 +53,20 @@ describe('buildOrderLines', () => {
       [unit({ id: 'hop', conversionRate: 10 }), unit({ id: 'vien' })],
     );
     expect(lines.map((line) => line.productUnitId)).toEqual(['vien', 'hop']);
+  });
+
+  it('đơn vị không cho bán (allowLooseSale = false) → 1801, kể cả khi còn đơn vị khác bán được', () => {
+    expect(
+      codeOf(() =>
+        buildOrderLines(
+          [
+            { productUnitId: 'hop', quantity: 1 },
+            { productUnitId: 'vien', quantity: 3 },
+          ],
+          [unit({ id: 'hop', conversionRate: 10 }), unit({ id: 'vien', allowLooseSale: false })],
+        ),
+      ),
+    ).toBe(ErrorCode.PRODUCT_NOT_SELLABLE);
   });
 
   it('trùng đơn vị bán → 1002', () => {

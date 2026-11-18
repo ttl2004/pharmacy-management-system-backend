@@ -884,6 +884,31 @@ model StockMovement {
   @@map("stock_movements")
 }
 
+/// Phát sinh sổ kho cộng dồn theo THÁNG (giờ VN) của các tháng đã đóng — để báo cáo nhập–xuất–tồn tính tồn đầu kỳ
+/// không phải quét lại toàn bộ sổ kho. Dựng lười khi báo cáo cần; sổ kho chỉ thêm dòng nên tháng đã đóng không đổi.
+/// Không khoá ngoại: chỉ là bảng tổng hợp, dựng lại được từ `stock_movements`.
+model StockMovementMonthly {
+  branchId  String   @db.Uuid
+  productId String   @db.Uuid
+  /// Ngày đầu tháng (giờ VN).
+  month     DateTime @db.Date
+  quantity  BigInt
+  /// Σ SL × giá vốn ghi trên bút toán (đồng).
+  value     BigInt
+
+  @@id([branchId, productId, month])
+  @@index([month])
+  @@map("stock_movement_monthly")
+}
+
+/// Tháng đã dựng xong trong `stock_movement_monthly` (liền mạch từ tháng đầu tiên có sổ kho), kể cả tháng không có phát sinh.
+model StockMovementMonthlyBuilt {
+  month   DateTime @id @db.Date
+  builtAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@map("stock_movement_monthly_built")
+}
+
 model StockTransfer {
   id           String         @id @default(uuid()) @db.Uuid
   isDeleted    Boolean        @default(false)

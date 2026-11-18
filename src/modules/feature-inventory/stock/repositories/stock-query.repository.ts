@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, StockRefType } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
+import { lockAdvisoryKeys } from 'src/common/databases/advisory-lock';
+import { parseDateOnly, toDateOnlyString, todayInVietnam, vietnamDayStartUtc } from 'src/common/utils/date-only.util';
 import { containsPattern } from 'src/common/utils/like-pattern.util';
 
 const BATCH_SELECT = {
@@ -81,7 +83,8 @@ export interface MovementSummaryRow {
 }
 
 /**
- * Đọc tồn kho, sổ kho, báo cáo. Chỉ đọc — không có hàm ghi. Báo cáo là một câu SQL gom nhóm, không kéo dòng về JS.
+ * Đọc tồn kho, sổ kho, báo cáo. Không ghi dữ liệu nghiệp vụ — chỉ dựng bảng tổng hợp `stock_movement_monthly` (dựng
+ * lại được). Báo cáo là câu SQL gom nhóm, không kéo dòng về JS.
  *
  * Về sau có Redis: cache đặt ở `StockQueryService` (không ở đây), xoá theo `InventoryEvents.onStockChanged()`.
  */
@@ -124,13 +127,24 @@ export class StockQueryRepository {
   async findRefCodes(refs: readonly { refType: StockRefType; refId: string }[]): Promise<Map<string, string>> {
     const idsOf = (type: StockRefType) => [...new Set(refs.filter((r) => r.refType === type).map((r) => r.refId))];
     const pick = { id: true, code: true } as const;
-    const query = <T>(ids: string[], run: (ids: string[]) => Promise<T[]>) => (ids.length ? run(ids) : Promise.resolve([]));
+    const query = <T>(ids: string[], run: (ids: string[]) => Promise<T[]>) =>
+      ids.length ? run(ids) : Promise.resolve([]);
     const groups = await Promise.all([
-      query(idsOf(StockRefType.GOODS_RECEIPT), (ids) => this.prisma.goodsReceipt.findMany({ where: { id: { in: ids } }, select: pick })),
-      query(idsOf(StockRefType.ORDER), (ids) => this.prisma.order.findMany({ where: { id: { in: ids } }, select: pick })),
-      query(idsOf(StockRefType.STOCK_TRANSFER), (ids) => this.prisma.stockTransfer.findMany({ where: { id: { in: ids } }, select: pick })),
-      query(idsOf(StockRefType.STOCK_ADJUSTMENT), (ids) => this.prisma.stockAdjustment.findMany({ where: { id: { in: ids } }, select: pick })),
-      query(idsOf(StockRefType.OPENING_STOCK), (ids) => this.prisma.product.findMany({ where: { id: { in: ids } }, select: pick })),
+      query(idsOf(StockRefType.GOODS_RECEIPT), (ids) =>
+        this.prisma.goodsReceipt.findMany({ where: { id: { in: ids } }, select: pick }),
+      ),
+      query(idsOf(StockRefType.ORDER), (ids) =>
+        this.prisma.order.findMany({ where: { id: { in: ids } }, select: pick }),
+      ),
+      query(idsOf(StockRefType.STOCK_TRANSFER), (ids) =>
+        this.prisma.stockTransfer.findMany({ where: { id: { in: ids } }, select: pick }),
+      ),
+      query(idsOf(StockRefType.STOCK_ADJUSTMENT), (ids) =>
+        this.prisma.stockAdjustment.findMany({ where: { id: { in: ids } }, select: pick }),
+      ),
+      query(idsOf(StockRefType.OPENING_STOCK), (ids) =>
+        this.prisma.product.findMany({ where: { id: { in: ids } }, select: pick }),
+      ),
     ]);
     return new Map(groups.flat().map((row) => [row.id, row.code]));
   }
@@ -212,40 +226,217 @@ export class StockQueryRepository {
   }
 
   /**
-   * Nhập–xuất–tồn theo kỳ `[from, toExclusive)`: một lượt quét sổ kho, gom theo sản phẩm. Tồn đầu kỳ = tổng mọi bút
-   * toán trước `from`; tồn cuối = đầu kỳ + phát sinh. Chi nhánh bỏ trống = gộp toàn chuỗi.
+   * Nhập–xuất–tồn theo kỳ `[from, toExclusive)`, gom theo sản phẩm. Chi nhánh bỏ trống = gộp toàn chuỗi.
+   *
+   * Tồn đầu kỳ = Σ phát sinh mọi tháng đã đóng trước mốc B (bảng `stock_movement_monthly`) + Σ sổ kho `[B, from)`, với
+   * B = đầu tháng của `from` (không vượt tháng chưa đóng). Nhờ vậy chỉ quét sổ kho trong kỳ và tối đa ~1 tháng trước
+   * kỳ, không quét lại cả lịch sử mỗi lần gọi. Tồn cuối = đầu kỳ + phát sinh trong kỳ. Số lượng/tiền cộng bằng bigint
+   * (không tràn int4), đổi sang `number` ở TS.
    */
-  findMovementSummary(filter: { branchId?: string; from: Date; toExclusive: Date }): Promise<MovementSummaryRow[]> {
-    const branchCondition = filter.branchId ? Prisma.sql`AND m."branchId" = ${filter.branchId}::uuid` : Prisma.empty;
-    const inPeriod = Prisma.sql`m."createdAt" >= ${filter.from}`;
+  async findMovementSummary(filter: {
+    branchId?: string;
+    from: Date;
+    toExclusive: Date;
+  }): Promise<MovementSummaryRow[]> {
+    const boundary = monthlyBoundary(filter.from, new Date());
+    await this.ensureMonthlyBuilt(boundary);
+
+    const branchOf = (alias: string) =>
+      filter.branchId ? Prisma.sql`AND ${Prisma.raw(alias)}."branchId" = ${filter.branchId}::uuid` : Prisma.empty;
+    const value = Prisma.sql`m."quantity"::bigint * COALESCE(m."unitCost", 0)`;
     const sumType = (type: string) =>
-      Prisma.sql`SUM(CASE WHEN ${inPeriod} AND m."type" = ${type}::"StockMovementType" THEN m."quantity" ELSE 0 END)::int`;
-    // Giá trị = SL × giá vốn ghi trên bút toán (giá vốn lô lúc biến động). float8 thay bigint: BigInt không ra JSON.
-    // Nhân ở float8 ngay từ đầu: int4 × int4 tràn khi SL × giá lớn (vd. 10 000 × 1 000 000).
-    const value = Prisma.sql`(m."quantity"::float8 * COALESCE(m."unitCost", 0)::float8)`;
-    return this.prisma.$queryRaw<MovementSummaryRow[]>(Prisma.sql`
-      SELECT m."productId", p."code" AS "productCode", p."name" AS "productName", u."name" AS "baseUnitName",
-             SUM(CASE WHEN m."createdAt" < ${filter.from} THEN m."quantity" ELSE 0 END)::int AS "opening",
-             SUM(CASE WHEN ${inPeriod} AND m."quantity" > 0 THEN m."quantity" ELSE 0 END)::int AS "inQuantity",
-             SUM(CASE WHEN ${inPeriod} AND m."quantity" < 0 THEN -m."quantity" ELSE 0 END)::int AS "outQuantity",
-             SUM(m."quantity")::int AS "closing",
-             SUM(CASE WHEN m."createdAt" < ${filter.from} THEN ${value} ELSE 0 END)::float8 AS "openingValue",
-             SUM(CASE WHEN ${inPeriod} AND m."quantity" > 0 THEN ${value} ELSE 0 END)::float8 AS "inValue",
-             SUM(CASE WHEN ${inPeriod} AND m."quantity" < 0 THEN -${value} ELSE 0 END)::float8 AS "outValue",
-             SUM(${value})::float8 AS "closingValue",
-             ${sumType('IMPORT')} AS "importQty",
-             ${sumType('SALE')} AS "saleQty",
-             ${sumType('TRANSFER_IN')} AS "transferInQty",
-             ${sumType('TRANSFER_OUT')} AS "transferOutQty",
-             ${sumType('ADJUST')} AS "adjustQty",
-             ${sumType('DISPOSE')} AS "disposeQty",
-             ${sumType('RETURN_IN')} AS "returnInQty",
-             ${sumType('RETURN_OUT')} AS "returnOutQty"
-      FROM "stock_movements" m
-      JOIN "products" p ON p."id" = m."productId"
+      Prisma.sql`COALESCE(SUM(m."quantity") FILTER (WHERE m."type" = ${type}::"StockMovementType"), 0)::bigint`;
+
+    const rows = await this.prisma.$queryRaw<RawMovementSummaryRow[]>(Prisma.sql`
+      WITH opening_parts AS (
+        SELECT s."productId", SUM(s."quantity") AS "qty", SUM(s."value") AS "val"
+        FROM "stock_movement_monthly" s
+        WHERE s."month" < ${boundary.month}::date ${branchOf('s')}
+        GROUP BY s."productId"
+        UNION ALL
+        SELECT m."productId", SUM(m."quantity")::bigint, SUM(${value})
+        FROM "stock_movements" m
+        WHERE m."createdAt" >= ${boundary.at} AND m."createdAt" < ${filter.from} ${branchOf('m')}
+        GROUP BY m."productId"
+      ),
+      opening AS (
+        SELECT "productId", SUM("qty")::bigint AS "qty", SUM("val")::bigint AS "val"
+        FROM opening_parts GROUP BY "productId"
+      ),
+      period AS (
+        SELECT m."productId",
+               COALESCE(SUM(m."quantity") FILTER (WHERE m."quantity" > 0), 0)::bigint AS "inQuantity",
+               COALESCE(-SUM(m."quantity") FILTER (WHERE m."quantity" < 0), 0)::bigint AS "outQuantity",
+               COALESCE(SUM(${value}) FILTER (WHERE m."quantity" > 0), 0)::bigint AS "inValue",
+               COALESCE(-SUM(${value}) FILTER (WHERE m."quantity" < 0), 0)::bigint AS "outValue",
+               ${sumType('IMPORT')} AS "importQty",
+               ${sumType('SALE')} AS "saleQty",
+               ${sumType('TRANSFER_IN')} AS "transferInQty",
+               ${sumType('TRANSFER_OUT')} AS "transferOutQty",
+               ${sumType('ADJUST')} AS "adjustQty",
+               ${sumType('DISPOSE')} AS "disposeQty",
+               ${sumType('RETURN_IN')} AS "returnInQty",
+               ${sumType('RETURN_OUT')} AS "returnOutQty"
+        FROM "stock_movements" m
+        WHERE m."createdAt" >= ${filter.from} AND m."createdAt" < ${filter.toExclusive} ${branchOf('m')}
+        GROUP BY m."productId"
+      )
+      SELECT p."id" AS "productId", p."code" AS "productCode", p."name" AS "productName", u."name" AS "baseUnitName",
+             COALESCE(o."qty", 0) AS "opening", COALESCE(o."val", 0) AS "openingValue",
+             COALESCE(t."inQuantity", 0) AS "inQuantity", COALESCE(t."outQuantity", 0) AS "outQuantity",
+             COALESCE(t."inValue", 0) AS "inValue", COALESCE(t."outValue", 0) AS "outValue",
+             COALESCE(t."importQty", 0) AS "importQty", COALESCE(t."saleQty", 0) AS "saleQty",
+             COALESCE(t."transferInQty", 0) AS "transferInQty", COALESCE(t."transferOutQty", 0) AS "transferOutQty",
+             COALESCE(t."adjustQty", 0) AS "adjustQty", COALESCE(t."disposeQty", 0) AS "disposeQty",
+             COALESCE(t."returnInQty", 0) AS "returnInQty", COALESCE(t."returnOutQty", 0) AS "returnOutQty"
+      FROM opening o
+      FULL JOIN period t ON t."productId" = o."productId"
+      JOIN "products" p ON p."id" = COALESCE(o."productId", t."productId")
       JOIN "units" u ON u."id" = p."baseUnitId"
-      WHERE m."createdAt" < ${filter.toExclusive} ${branchCondition}
-      GROUP BY m."productId", p."code", p."name", u."name"
-      ORDER BY p."name"`);
+      ORDER BY p."name", p."id"`);
+
+    return rows.map((row) => {
+      const n = (v: bigint) => Number(v);
+      const opening = n(row.opening);
+      const inQuantity = n(row.inQuantity);
+      const outQuantity = n(row.outQuantity);
+      const openingValue = n(row.openingValue);
+      const inValue = n(row.inValue);
+      const outValue = n(row.outValue);
+      return {
+        productId: row.productId,
+        productCode: row.productCode,
+        productName: row.productName,
+        baseUnitName: row.baseUnitName,
+        opening,
+        inQuantity,
+        outQuantity,
+        closing: opening + inQuantity - outQuantity,
+        openingValue,
+        inValue,
+        outValue,
+        closingValue: openingValue + inValue - outValue,
+        importQty: n(row.importQty),
+        saleQty: n(row.saleQty),
+        transferInQty: n(row.transferInQty),
+        transferOutQty: n(row.transferOutQty),
+        adjustQty: n(row.adjustQty),
+        disposeQty: n(row.disposeQty),
+        returnInQty: n(row.returnInQty),
+        returnOutQty: n(row.returnOutQty),
+      };
+    });
   }
+
+  /**
+   * Bảo đảm `stock_movement_monthly` đã có mọi tháng trước `boundary.month`. Đường nhanh: một câu đọc tháng dựng gần
+   * nhất. Thiếu thì dựng phần còn thiếu trong MỘT câu INSERT … GROUP BY tháng, dưới khoá advisory (hai request cùng
+   * lúc không dựng trùng), rồi đánh dấu các tháng — kể cả tháng không phát sinh — để lần sau khỏi kiểm lại.
+   */
+  private async ensureMonthlyBuilt(boundary: MonthlyBoundary): Promise<void> {
+    const needUpTo = boundary.previousMonth;
+    if (await this.monthlyBuiltThrough(this.prisma, needUpTo)) return;
+
+    await this.prisma.$transaction(async (tx) => {
+      await lockAdvisoryKeys(tx, ['stock-movement-monthly']);
+      if (await this.monthlyBuiltThrough(tx, needUpTo)) return;
+
+      const [last] = await tx.$queryRaw<{ month: Date | null }[]>(
+        Prisma.sql`SELECT MAX("month") AS "month" FROM "stock_movement_monthly_built"`,
+      );
+      // Tháng bắt đầu dựng: sau tháng đã dựng gần nhất; chưa dựng gì thì từ đầu sổ kho (không chặn dưới).
+      const fromMonth = last?.month ? addMonthsToDateOnly(toDateOnlyString(last.month), 1) : null;
+      const fromAt = fromMonth ? vietnamDayStartUtc(fromMonth) : null;
+      const lower = fromAt ? Prisma.sql`AND m."createdAt" >= ${fromAt}` : Prisma.empty;
+
+      await tx.$executeRaw(Prisma.sql`
+        INSERT INTO "stock_movement_monthly" ("branchId", "productId", "month", "quantity", "value")
+        SELECT m."branchId", m."productId",
+               date_trunc('month', m."createdAt" AT TIME ZONE 'Asia/Ho_Chi_Minh')::date,
+               SUM(m."quantity")::bigint, SUM(m."quantity"::bigint * COALESCE(m."unitCost", 0))::bigint
+        FROM "stock_movements" m
+        WHERE m."createdAt" < ${boundary.at} ${lower}
+        GROUP BY 1, 2, 3
+        ON CONFLICT DO NOTHING`);
+
+      // Đánh dấu liền mạch tới tháng trước mốc. Lần đầu bắt đầu từ tháng sổ kho sớm nhất (không có sổ kho → chỉ
+      // đánh dấu tháng trước mốc).
+      const [first] = fromMonth
+        ? [{ month: parseDateOnly(fromMonth) }]
+        : await tx.$queryRaw<{ month: Date | null }[]>(Prisma.sql`
+            SELECT date_trunc('month', MIN("createdAt") AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS "month"
+            FROM "stock_movements" WHERE "createdAt" < ${boundary.at}`);
+      const startMonth = first?.month ?? parseDateOnly(needUpTo);
+      await tx.$executeRaw(Prisma.sql`
+        INSERT INTO "stock_movement_monthly_built" ("month")
+        SELECT g::date FROM generate_series(${startMonth}::date, ${needUpTo}::date, interval '1 month') AS g
+        ON CONFLICT DO NOTHING`);
+    });
+  }
+
+  /**
+   * Tháng đánh dấu liền mạch từ tháng sổ kho sớm nhất, nên có dấu ở `month` hoặc muộn hơn là đủ: tháng trước dấu
+   * sớm nhất không có bút toán nào.
+   */
+  private async monthlyBuiltThrough(client: Prisma.TransactionClient, month: string): Promise<boolean> {
+    const [row] = await client.$queryRaw<{ ok: boolean }[]>(
+      Prisma.sql`SELECT EXISTS (SELECT 1 FROM "stock_movement_monthly_built" WHERE "month" >= ${month}::date) AS "ok"`,
+    );
+    return row?.ok === true;
+  }
+}
+
+interface RawMovementSummaryRow {
+  productId: string;
+  productCode: string;
+  productName: string;
+  baseUnitName: string;
+  opening: bigint;
+  openingValue: bigint;
+  inQuantity: bigint;
+  outQuantity: bigint;
+  inValue: bigint;
+  outValue: bigint;
+  importQty: bigint;
+  saleQty: bigint;
+  transferInQty: bigint;
+  transferOutQty: bigint;
+  adjustQty: bigint;
+  disposeQty: bigint;
+  returnInQty: bigint;
+  returnOutQty: bigint;
+}
+
+/** Bút toán có thể mang `createdAt` = lúc BẮT ĐẦU transaction; tháng chỉ coi là đóng sau ngần này. */
+const MONTH_CLOSE_GRACE_MS = 10 * 60_000;
+
+export interface MonthlyBoundary {
+  /** Ngày đầu tháng (giờ VN) của mốc B, `YYYY-MM-DD`. */
+  month: string;
+  /** Mốc B quy ra UTC. */
+  at: Date;
+  /** Tháng ngay trước B — tháng cuối cùng phải có trong bảng tháng. */
+  previousMonth: string;
+}
+
+/**
+ * Mốc B = đầu tháng (giờ VN) chứa `from`, nhưng không vượt đầu tháng chứa `now − 10 phút` — tháng chưa đóng (hoặc
+ * vừa đóng chưa đủ lâu) không được ghi vào bảng tháng.
+ */
+export function monthlyBoundary(from: Date, now: Date): MonthlyBoundary {
+  const fromMonth = monthStartOf(todayInVietnam(from));
+  const closedMonth = monthStartOf(todayInVietnam(new Date(now.getTime() - MONTH_CLOSE_GRACE_MS)));
+  const month = fromMonth < closedMonth ? fromMonth : closedMonth;
+  return { month, at: vietnamDayStartUtc(month), previousMonth: addMonthsToDateOnly(month, -1) };
+}
+
+function monthStartOf(date: string): string {
+  return `${date.slice(0, 7)}-01`;
+}
+
+/** Cộng `months` tháng vào một ngày đầu tháng `YYYY-MM-01`. */
+function addMonthsToDateOnly(monthStart: string, months: number): string {
+  const d = parseDateOnly(monthStart);
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return toDateOnlyString(d);
 }

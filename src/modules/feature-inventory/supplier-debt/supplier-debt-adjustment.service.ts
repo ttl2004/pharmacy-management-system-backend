@@ -15,8 +15,7 @@ import { CancelDebtDocumentRequest } from './dtos/supplier-payment.request';
 import { assertBranchDebtNotNegative } from './supplier-debt-guards';
 import { AdjustmentRow, SupplierDebtAdjustmentRepository } from './repositories/supplier-debt-adjustment.repository';
 import { SupplierDebtRepository } from './repositories/supplier-debt.repository';
-
-const FUTURE_TOLERANCE_MS = 60_000;
+import { assertDocumentDate } from '../core/document-date';
 
 const notFound = () =>
   new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Phiếu điều chỉnh nợ không tồn tại' });
@@ -53,9 +52,7 @@ export class SupplierDebtAdjustmentService {
     const scope = resolveBranchScope(actor.user);
     const branchId = resolveWriteBranch(scope, dto.branchId, 'Cần chọn chi nhánh điều chỉnh (branchId)');
     const adjustedAt = new Date(dto.adjustedAt);
-    if (adjustedAt.getTime() > Date.now() + FUTURE_TOLERANCE_MS) {
-      throw badRequest('Ngày điều chỉnh không được ở tương lai');
-    }
+    assertDocumentDate(adjustedAt, 'Ngày điều chỉnh');
     const actorId = actor.user.userId;
 
     return this.transactions.run(async ({ tx }) => {

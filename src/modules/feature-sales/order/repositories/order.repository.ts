@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { OrderChannel, OrderStatus, Prisma, UserStatus } from '@prisma/client';
+import { lockAdvisoryKeys } from 'src/common/databases/advisory-lock';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { AuthRole } from 'src/common/types/common.enum';
 import type { SellableUnit } from '../../core/order-lines';
@@ -250,6 +251,17 @@ export class OrderRepository {
   }
 
   /** Đơn tại quầy PENDING không ai đụng tới từ trước `cutoff`. */
+  /**
+   * Khoá theo nhân viên rồi đếm đơn tại quầy đang chờ thu của họ. Khoá giữ tới hết transaction lập đơn, nên hai lần
+   * lập đơn cùng lúc của một người chạy nối tiếp — không lọt quá trần.
+   */
+  async lockAndCountPendingPos(tx: Prisma.TransactionClient, staffId: string): Promise<number> {
+    await lockAdvisoryKeys(tx, [`pos-pending:${staffId}`]);
+    return tx.order.count({
+      where: { staffId, isDeleted: false, channel: OrderChannel.POS, status: OrderStatus.PENDING },
+    });
+  }
+
   findAbandonedPos(cutoff: Date, take: number) {
     return this.prisma.order.findMany({
       where: {

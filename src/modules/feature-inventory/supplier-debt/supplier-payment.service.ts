@@ -13,17 +13,15 @@ import {
 import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
 import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
-import { badRequest, inventoryError, invalidReference } from '../core/inventory.error';
+import { inventoryError, invalidReference } from '../core/inventory.error';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { resolveWriteBranch } from '../core/inventory-scope';
 import { CancelDebtDocumentRequest, CreateSupplierPaymentRequest } from './dtos/supplier-payment.request';
 import { PaymentRow, SupplierPaymentRepository } from './repositories/supplier-payment.repository';
 import { SupplierDebtRepository } from './repositories/supplier-debt.repository';
+import { assertDocumentDate } from '../core/document-date';
 import { assertPaymentWithinDebt } from './supplier-debt-guards';
 import { SupplierPaymentWriter } from './supplier-payment.writer';
-
-/** Cho lệch đồng hồ client: `paidAt` được vượt hiện tại tối đa chừng này (như mock). */
-const FUTURE_TOLERANCE_MS = 60_000;
 
 const money = (value: bigint | number) => Number(value).toLocaleString('vi-VN');
 
@@ -66,9 +64,7 @@ export class SupplierPaymentService {
     const scope = resolveBranchScope(actor.user);
     const branchId = resolveWriteBranch(scope, dto.branchId, 'Cần chọn chi nhánh chi tiền (branchId)');
     const paidAt = new Date(dto.paidAt);
-    if (paidAt.getTime() > Date.now() + FUTURE_TOLERANCE_MS) {
-      throw badRequest('Thời gian thanh toán không được ở tương lai');
-    }
+    assertDocumentDate(paidAt, 'Ngày chi');
     const ids = dto.allocations.map((row) => row.receiptId);
     if (new Set(ids).size !== ids.length) throw invalidReference('một phiếu nhập chỉ được phân bổ một lần');
 

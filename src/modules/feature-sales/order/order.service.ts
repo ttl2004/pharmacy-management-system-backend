@@ -27,7 +27,12 @@ import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { buildOrderLines, deletedPriceBookError, OrderLine, orderTotals, toBookPricing } from '../core/order-lines';
 import { OrderStockService } from '../core/order-stock.service';
-import { EXPIRY_BATCH_SIZE, POS_ABANDON_MINUTES, SALES_AUDIT_ENTITY } from '../core/sales.constants';
+import {
+  EXPIRY_BATCH_SIZE,
+  MAX_PENDING_POS_PER_STAFF,
+  POS_ABANDON_MINUTES,
+  SALES_AUDIT_ENTITY,
+} from '../core/sales.constants';
 import { orderErrors, salesError } from '../core/sales.error';
 import {
   CancelOrderRequest,
@@ -154,6 +159,13 @@ export class OrderService {
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
       await this.assertBranchActive(tx, branchId);
+      // L12: trần đơn chờ thu mỗi nhân viên — chặn giữ hết hàng bằng đơn chờ.
+      const pending = await this.orders.lockAndCountPendingPos(tx, actorId);
+      if (pending >= MAX_PENDING_POS_PER_STAFF) {
+        throw badRequest(
+          `Bạn đang có ${pending} đơn chờ thu (tối đa ${MAX_PENDING_POS_PER_STAFF}) — thu tiền hoặc huỷ bớt đơn trước khi lập đơn mới`,
+        );
+      }
       const customer = dto.customerPhone
         ? await this.walkInCustomerOf(tx, dto.customerPhone, dto.customerName, actorId)
         : null;

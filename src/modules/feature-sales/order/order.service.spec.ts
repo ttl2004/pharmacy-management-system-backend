@@ -6,6 +6,7 @@ import type { AuditActor } from 'src/providers/audit-log/audit-actor';
 import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { OrderHead, OrderRepository } from './repositories/order.repository';
 import { OrderService } from './order.service';
+import { MAX_PENDING_POS_PER_STAFF } from '../core/sales.constants';
 
 const actorOf = (role: AuthRole, branchId: string | null): RequestActor =>
   ({
@@ -62,6 +63,7 @@ describe('OrderService', () => {
     claim: jest.fn().mockResolvedValue(1),
     createPayment: jest.fn(),
     findAbandonedPos: jest.fn(),
+    lockAndCountPendingPos: jest.fn().mockResolvedValue(0),
   };
   const transactions = { run: jest.fn((work: (c: typeof ctx) => unknown) => work(ctx)) };
   const stock = { reserve: jest.fn(), release: jest.fn(), discard: jest.fn(), consume: jest.fn() };
@@ -84,6 +86,7 @@ describe('OrderService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     orders.claim.mockResolvedValue(1);
+    orders.lockAndCountPendingPos.mockResolvedValue(0);
   });
 
   it('createPos: SS lập ở chi nhánh mình, giữ hàng với id dòng tự sinh trùng id đã ghi', async () => {
@@ -99,6 +102,23 @@ describe('OrderService', () => {
       actorId: 'u1',
       items: [{ orderItemId: rows[0].id, productId: 'p1', baseQuantity: 12 }],
     });
+  });
+
+  // L12: một người lập đơn chờ thu liên tục sẽ giữ hết hàng, quầy khác thấy "hết hàng".
+  it('createPos: nhân viên đã có 3 đơn chờ thu → 1002, không lập đơn, không giữ hàng', async () => {
+    orders.lockAndCountPendingPos.mockResolvedValue(MAX_PENDING_POS_PER_STAFF);
+    await expect(service.createPos({ items: [{ productUnitId: 'pu1', quantity: 1 }] }, ss)).rejects.toThrow(
+      /3 đơn chờ thu/,
+    );
+    expect(orders.lockAndCountPendingPos).toHaveBeenCalledWith(tx, ss.user.userId);
+    expect(orders.createHeader).not.toHaveBeenCalled();
+    expect(stock.reserve).not.toHaveBeenCalled();
+  });
+
+  it('createPos: đang có 2 đơn chờ thu → vẫn lập được đơn thứ 3', async () => {
+    orders.lockAndCountPendingPos.mockResolvedValue(MAX_PENDING_POS_PER_STAFF - 1);
+    await service.createPos({ items: [{ productUnitId: 'pu1', quantity: 1 }] }, ss);
+    expect(orders.createHeader).toHaveBeenCalled();
   });
 
   it('createPos: ADMIN không chỉ định chi nhánh → 1002', async () => {

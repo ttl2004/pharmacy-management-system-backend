@@ -106,6 +106,31 @@ describe('ánh xạ loại phiếu → bút toán', () => {
 });
 
 describe('AdjustmentService — lập phiếu', () => {
+  // L8: mã tự đặt dạng DCK + số sẽ đụng mã tự sinh sau này (dãy số chạy tới đó → lỗi 500 một lần).
+  it.each(['DCK000050', 'dck12', ' DCK7 '])('tự đặt mã "%s" trùng mẫu tự sinh → 1002, không ghi gì', async (code) => {
+    const { service, repository } = makeService();
+    await expect(
+      service.create(create('DISPOSE', { quantity: 1, reason: 'Vỡ' }, { code }) as never, PM_A),
+    ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+    expect(repository.createHeader).not.toHaveBeenCalled();
+  });
+
+  it('L9: ngày chứng từ lùi quá 7 ngày → 1002; mã tự đặt khác mẫu vẫn được', async () => {
+    const { service, repository } = makeService();
+    const old = new Date(Date.now() - 8 * 86_400_000).toISOString();
+    await expect(
+      service.create(create('DISPOSE', { quantity: 1, reason: 'Vỡ' }, { documentDate: old }) as never, PM_A),
+    ).rejects.toThrow(/Ngày chứng từ.*7 ngày/);
+    expect(repository.createHeader).not.toHaveBeenCalled();
+  });
+
+  it('sửa phiếu đổi mã sang mẫu tự sinh → 1002', async () => {
+    const { service } = makeService({ findHead: jest.fn().mockResolvedValue(head('DISPOSE')) });
+    await expect(
+      service.update('adj1', create('DISPOSE', { quantity: 1, reason: 'Vỡ' }, { code: 'DCK000999' }) as never, PM_A),
+    ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+  });
+
   it('kiểm kê mà gửi quantity → 1002 (server tự tính chênh lệch)', async () => {
     const { service } = makeService();
     await expect(

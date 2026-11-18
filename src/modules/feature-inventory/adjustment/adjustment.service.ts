@@ -18,7 +18,8 @@ import {
 import { branchWhere, resolveWriteBranch } from '../core/inventory-scope';
 import { InventoryTransactions, type InventoryTxContext } from '../core/inventory-transactions';
 import { StockIntakeService } from '../core/stock-intake.service';
-import { AUDIT_ENTITY, MAX_DOCUMENT_LINES } from '../core/inventory.constants';
+import { AUDIT_ENTITY, DOCUMENT_CODE_FORMATS, MAX_DOCUMENT_LINES } from '../core/inventory.constants';
+import { assertDocumentDate } from '../core/document-date';
 import { LedgerEntry, StockLedgerService } from '../core/stock-ledger.service';
 import {
   AdjustmentItemRequest,
@@ -93,6 +94,25 @@ interface StatusChange {
 }
 
 /** Phần chung của mọi dòng nhật ký phiếu điều chỉnh: nhãn + từ khoá = mã phiếu (D8), phạm vi = chi nhánh phiếu. */
+/** Mã tự sinh của phiếu điều chỉnh: `DCK` + số (xem `DOCUMENT_CODE_FORMATS.STOCK_ADJUSTMENT`). */
+const AUTO_CODE_PATTERN = new RegExp(`^${DOCUMENT_CODE_FORMATS.STOCK_ADJUSTMENT.prefix}\\d+$`, 'i');
+
+/**
+ * Kiểm phần đầu phiếu người dùng tự nhập, trước khi mở transaction:
+ * - L8: mã tự đặt không được theo mẫu tự sinh (`DCK` + số) — nếu không, khi dãy số tự sinh chạy tới đúng mã đó, lần lập
+ *   phiếu ấy lỗi trùng mã.
+ * - L9: ngày chứng từ không ở tương lai, lùi tối đa 7 ngày.
+ */
+function assertHeaderInput(dto: { code?: string; documentDate?: string }): void {
+  const code = dto.code?.trim();
+  if (code && AUTO_CODE_PATTERN.test(code)) {
+    throw badRequest(
+      `Mã ${code} trùng mẫu mã tự sinh (${DOCUMENT_CODE_FORMATS.STOCK_ADJUSTMENT.prefix} + số) — đặt mã khác hoặc bỏ trống để tự sinh`,
+    );
+  }
+  if (dto.documentDate) assertDocumentDate(new Date(dto.documentDate), 'Ngày chứng từ');
+}
+
 function adjustmentAudit(doc: { id: string; code: string; branchId: string }) {
   return {
     entityType: AUDIT_ENTITY.STOCK_ADJUSTMENT,
@@ -183,6 +203,7 @@ export class AdjustmentService {
     if (dto.items.length > MAX_DOCUMENT_LINES) {
       throw inventoryError(ErrorCode.DOCUMENT_LINE_LIMIT, `tối đa ${MAX_DOCUMENT_LINES} dòng`);
     }
+    assertHeaderInput(dto);
     const batchIds = dto.items.map((item) => item.batchId);
     assertNoDuplicateBatches(batchIds);
     const draftLines = dto.items.map((item, index) => this.toDraftLine(dto.type, item, index));
@@ -280,6 +301,7 @@ export class AdjustmentService {
     if (dto.items.length > MAX_DOCUMENT_LINES) {
       throw inventoryError(ErrorCode.DOCUMENT_LINE_LIMIT, `tối đa ${MAX_DOCUMENT_LINES} dòng`);
     }
+    assertHeaderInput(dto);
     const batchIds = dto.items.map((item) => item.batchId);
     assertNoDuplicateBatches(batchIds);
 

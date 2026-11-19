@@ -93,10 +93,13 @@ export class SupplierDebtRepository {
     };
   }
 
-  /** Chi nhánh còn dùng được để ghi chứng từ nợ (tồn tại, chưa xoá, ACTIVE). */
+  /**
+   * Chi nhánh còn ghi chứng từ nợ được: tồn tại và chưa xoá. Chi nhánh NGỪNG HOẠT ĐỘNG vẫn được (M2) — đóng cửa vẫn phải
+   * trả nốt / điều chỉnh nợ NCC; xoá chi nhánh thì bị chặn khi còn nợ (`BranchService.remove`).
+   */
   async branchUsable(tx: Prisma.TransactionClient, branchId: string): Promise<boolean> {
     const found = await tx.branch.findFirst({
-      where: { id: branchId, isDeleted: false, status: 'ACTIVE' },
+      where: { id: branchId, isDeleted: false },
       select: { id: true },
     });
     return !!found;

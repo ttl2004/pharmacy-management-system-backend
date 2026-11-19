@@ -59,7 +59,7 @@ export class SupplierDebtAdjustmentService {
       // Khoá NCC: hai điều chỉnh cùng lúc xếp hàng, mỗi cái thấy nợ đã gồm cái trước.
       if (!(await this.debts.lockSupplier(tx, dto.supplierId))) throw invalidReference('nhà cung cấp không tồn tại');
       if (!(await this.debts.branchUsable(tx, branchId))) {
-        throw invalidReference('chi nhánh không tồn tại hoặc đã ngừng hoạt động');
+        throw invalidReference('chi nhánh không tồn tại');
       }
       // Nợ của đúng chi nhánh này; số người dùng đã thấy phải còn khớp (đã khoá NCC nên không ai chen vào nữa).
       const { scoped: current } = await this.debts.debtOf(dto.supplierId, branchId, tx);

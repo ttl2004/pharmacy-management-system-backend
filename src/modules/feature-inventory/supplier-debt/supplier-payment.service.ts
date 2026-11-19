@@ -72,7 +72,7 @@ export class SupplierPaymentService {
       // Lock order: khoá NCC TRƯỚC (xếp hàng cùng điều chỉnh nợ/huỷ), phiếu nhập khoá sau khi cộng paidAmount.
       if (!(await this.debts.lockSupplier(tx, dto.supplierId))) throw invalidReference('nhà cung cấp không tồn tại');
       if (!(await this.debts.branchUsable(tx, branchId))) {
-        throw invalidReference('chi nhánh không tồn tại hoặc đã ngừng hoạt động');
+        throw invalidReference('chi nhánh không tồn tại');
       }
 
       const receipts = new Map((await this.debts.findReceiptsForAllocation(tx, ids)).map((r) => [r.id, r]));

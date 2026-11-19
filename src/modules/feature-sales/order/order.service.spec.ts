@@ -35,6 +35,8 @@ const head = (overrides: Partial<OrderHead> = {}): OrderHead => ({
   discountAmount: 0n,
   lineCount: 1,
   prescriptionLineCount: 0,
+  customerId: null,
+  controlledLineCount: 0,
   ...overrides,
 });
 
@@ -289,6 +291,36 @@ describe('OrderService', () => {
         amount: 8000n,
       }),
     ]);
+  });
+
+  it('replacePosItems: đơn khách lẻ đổi sang thuốc kiểm soát → 400, không chiếm đơn, không đụng kho (M1)', async () => {
+    orders.findHead.mockResolvedValue(head({ customerId: null }));
+    orders.findSellableUnits.mockResolvedValueOnce([
+      { ...sellable, product: { ...sellable.product, isControlled: true } },
+    ]);
+    await expect(
+      service.replacePosItems('o1', { items: [{ productUnitId: 'pu1', quantity: 1 }] }, ss),
+    ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+    expect(orders.claim).not.toHaveBeenCalled();
+    expect(stock.discard).not.toHaveBeenCalled();
+  });
+
+  it('replacePosItems: đơn đã có khách thì được thêm thuốc kiểm soát (M1)', async () => {
+    orders.findHead.mockResolvedValue(head({ customerId: 'c1' }));
+    orders.findSellableUnits.mockResolvedValueOnce([
+      { ...sellable, product: { ...sellable.product, isControlled: true } },
+    ]);
+    await service.replacePosItems('o1', { items: [{ productUnitId: 'pu1', quantity: 1 }] }, ss);
+    expect(stock.reserve).toHaveBeenCalled();
+  });
+
+  it('payPos: đơn khách lẻ có thuốc kiểm soát → 400, không ghi thanh toán, không trừ kho (M1)', async () => {
+    orders.findHead.mockResolvedValue(head({ customerId: null, controlledLineCount: 1 }));
+    await expect(service.payPos('o1', { method: PaymentMethod.CASH }, ss)).rejects.toMatchObject({
+      errorCode: ErrorCode.HTTP_BAD_REQUEST,
+    });
+    expect(orders.createPayment).not.toHaveBeenCalled();
+    expect(stock.consume).not.toHaveBeenCalled();
   });
 
   it('payPos: có thuốc kê đơn mà thiếu đơn thuốc → 1800, không ghi thanh toán', async () => {

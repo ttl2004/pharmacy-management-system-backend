@@ -112,6 +112,9 @@ export interface OrderHead {
   createdBy: string | null;
   lineCount: number;
   prescriptionLineCount: number;
+  /** Khách mua gắn với đơn (null = khách lẻ) và số dòng thuốc kiểm soát — thuốc kiểm soát phải có khách (M1). */
+  customerId: string | null;
+  controlledLineCount: number;
 }
 
 @Injectable()
@@ -161,15 +164,17 @@ export class OrderRepository {
         priceBookId: true,
         priceBookName: true,
         createdBy: true,
+        customerId: true,
         _count: { select: { items: { where: { isDeleted: false } } } },
       },
     });
     if (!row) return null;
-    const prescriptionLineCount = await tx.orderItem.count({
-      where: { orderId: id, isDeleted: false, product: { requiresPrescription: true } },
-    });
+    const [prescriptionLineCount, controlledLineCount] = await Promise.all([
+      tx.orderItem.count({ where: { orderId: id, isDeleted: false, product: { requiresPrescription: true } } }),
+      tx.orderItem.count({ where: { orderId: id, isDeleted: false, product: { isControlled: true } } }),
+    ]);
     const { _count, ...head } = row;
-    return { ...head, lineCount: _count.items, prescriptionLineCount };
+    return { ...head, lineCount: _count.items, prescriptionLineCount, controlledLineCount };
   }
 
   findBranch(tx: Prisma.TransactionClient, id: string) {
@@ -250,7 +255,6 @@ export class OrderRepository {
     return tx.payment.create({ data, select: { id: true } });
   }
 
-  /** Đơn tại quầy PENDING không ai đụng tới từ trước `cutoff`. */
   /**
    * Khoá theo nhân viên rồi đếm đơn tại quầy đang chờ thu của họ. Khoá giữ tới hết transaction lập đơn, nên hai lần
    * lập đơn cùng lúc của một người chạy nối tiếp — không lọt quá trần.
@@ -262,6 +266,7 @@ export class OrderRepository {
     });
   }
 
+  /** Đơn tại quầy PENDING không ai đụng tới từ trước `cutoff`. */
   findAbandonedPos(cutoff: Date, take: number) {
     return this.prisma.order.findMany({
       where: {

@@ -82,7 +82,9 @@ export const PERMISSION_CATALOG = [
   { code: 'order:read', name: 'Xem đơn hàng', module: 'order', sortOrder: 1 },
   { code: 'order:create', name: 'Lập và sửa đơn tại quầy', module: 'order', sortOrder: 2 },
   { code: 'order:pay', name: 'Thu tiền đơn tại quầy', module: 'order', sortOrder: 3 },
-  { code: 'order:cancel', name: 'Huỷ đơn hàng', module: 'order', sortOrder: 4 },
+  { code: 'order:cancel', name: 'Huỷ đơn chờ thu', module: 'order', sortOrder: 4 },
+  // Tách khỏi `order:cancel` (M3): huỷ hoá đơn ĐÃ THU là lấy tiền khỏi két — mặc định chỉ quản lý/admin.
+  { code: 'order:void', name: 'Huỷ hoá đơn đã thu (hoàn tiền)', module: 'order', sortOrder: 5 },
   // Khai trước cho các màn giao diện đã có — endpoint sẽ gắn khi làm nghiệp vụ tương ứng (đợt tích hợp FE 0b).
   { code: 'customer:read', name: 'Xem khách hàng', module: 'customer', sortOrder: 1 },
   { code: 'customer:create', name: 'Tạo khách hàng', module: 'customer', sortOrder: 2 },

@@ -504,6 +504,14 @@ export class TransferService {
       if (head.status !== TransferStatus.PENDING && head.status !== TransferStatus.IN_TRANSIT) {
         throw errors.wrongState(head.status);
       }
+      // M5: hàng đã rời kho gửi — chi nhánh gửi không tự huỷ được (hàng có thể đã tới nơi, huỷ làm sổ kho lệch hàng
+      // thật). Chỉ vai trò toàn chuỗi (ADMIN) huỷ, cho trường hợp xe quay đầu; hàng tới thì bên nhận nhận và ghi số thực.
+      if (head.status === TransferStatus.IN_TRANSIT && scope.kind !== 'ALL') {
+        throw permissionError(
+          ErrorCode.PERMISSION_DENIED,
+          'Phiếu đã xuất kho chỉ quản trị chuỗi huỷ được — hàng đã tới thì chi nhánh nhận bấm nhận và ghi số thực nhận',
+        );
+      }
       const claimed = await this.transfers.transition(tx, id, head.status, {
         status: TransferStatus.CANCELLED,
         cancelledAt: now,

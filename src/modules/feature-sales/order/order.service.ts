@@ -101,6 +101,10 @@ function overrideEntries(
   ];
 }
 
+function controlledNeedsCustomer() {
+  return badRequest('Đơn có thuốc kiểm soát đặc biệt phải nhập SĐT khách mua');
+}
+
 function isDuplicateTransactionCode(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
 }
@@ -178,9 +182,7 @@ export class OrderService {
       );
       const totals = orderTotals(lines);
       // Thuốc kiểm soát đặc biệt: phải biết người mua (như mock — chặn khách lẻ).
-      if (!customer && lines.some((line) => line.isControlled)) {
-        throw badRequest('Đơn có thuốc kiểm soát đặc biệt phải nhập SĐT khách mua');
-      }
+      if (!customer && lines.some((line) => line.isControlled)) throw controlledNeedsCustomer();
 
       const code = await this.codes.next(tx, 'ORDER');
       const { id } = await this.orders.createHeader(tx, {
@@ -259,6 +261,8 @@ export class OrderService {
         book ? toBookPricing(book) : undefined,
       );
       const totals = orderTotals(lines);
+      // M1: sửa đơn khách lẻ thành đơn có thuốc kiểm soát cũng phải bị chặn như lúc lập đơn.
+      if (!head.customerId && lines.some((line) => line.isControlled)) throw controlledNeedsCustomer();
 
       // Chiếm trước khi đụng kho: request thu tiền/huỷ cùng lúc phải chờ, rồi thấy đơn đã đổi.
       const claimed = await this.orders.claim(
@@ -333,6 +337,8 @@ export class OrderService {
         if (head.prescriptionLineCount > 0 && (!head.prescriptionCode || !head.prescriberName)) {
           throw salesError(ErrorCode.PRESCRIPTION_REQUIRED);
         }
+        // M1: chốt chặn cuối — đơn khách lẻ không được thu tiền nếu có thuốc kiểm soát (dữ liệu cũ, đường sửa khác).
+        if (head.controlledLineCount > 0 && !head.customerId) throw controlledNeedsCustomer();
 
         // Đơn 0đ (giảm giá hết): không có lượt thu nào — CHECK `payments_amount_positive_chk`.
         if (head.totalAmount > 0n) {

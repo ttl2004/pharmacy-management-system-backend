@@ -29,6 +29,8 @@ const head = (overrides: Partial<OrderHead> = {}): OrderHead => ({
   createdBy: 'u1',
   lineCount: 1,
   prescriptionLineCount: 0,
+  customerId: null,
+  controlledLineCount: 0,
   ...overrides,
 });
 

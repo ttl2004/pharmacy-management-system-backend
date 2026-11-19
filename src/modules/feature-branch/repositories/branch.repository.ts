@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Branch, ReceiptStatus, TransferStatus } from '@prisma/client';
+import { Branch, Prisma, ReceiptStatus, TransferStatus } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { PrismaBaseRepository } from 'src/providers/abstract-base/repositories/prisma-base.repository';
 
@@ -35,5 +35,30 @@ export class BranchRepository extends PrismaBaseRepository<Branch> {
       this.prisma.stockAdjustment.count({ where: { branchId, isDeleted: false, status: ReceiptStatus.DRAFT } }),
     ]);
     return stock + receipts + transfers + adjustments > 0;
+  }
+
+  /**
+   * M2: nợ NCC còn lại của chi nhánh, theo từng NCC (chỉ NCC còn nợ ≠ 0). Cùng công thức `SupplierDebtRepository.debtOf`
+   * phạm vi chi nhánh: phiếu nhập (tổng − đã trả) − phiếu trả NCC (cần trả − NCC đã trả) + điều chỉnh nợ của chi nhánh.
+   */
+  async findOutstandingSupplierDebts(branchId: string): Promise<{ supplierId: string; debt: bigint }[]> {
+    return this.prisma.$queryRaw<{ supplierId: string; debt: bigint }[]>(Prisma.sql`
+      SELECT e."supplierId", SUM(e."amount")::bigint AS "debt"
+      FROM (
+        SELECT r."supplierId", r."totalAmount" - r."paidAmount" AS "amount"
+        FROM "goods_receipts" r
+        WHERE r."branchId" = ${branchId}::uuid AND r."status" = 'CONFIRMED' AND r."isDeleted" = false
+        UNION ALL
+        SELECT a."supplierId", -(a."totalAmount" - a."supplierPaid")
+        FROM "stock_adjustments" a
+        WHERE a."branchId" = ${branchId}::uuid AND a."type" = 'RETURN_TO_SUPPLIER' AND a."status" = 'CONFIRMED'
+          AND a."isDeleted" = false AND a."supplierId" IS NOT NULL
+        UNION ALL
+        SELECT d."supplierId", d."delta"
+        FROM "supplier_debt_adjustments" d
+        WHERE d."branchId" = ${branchId}::uuid AND d."cancelledAt" IS NULL
+      ) e
+      GROUP BY e."supplierId"
+      HAVING SUM(e."amount") <> 0`);
   }
 }

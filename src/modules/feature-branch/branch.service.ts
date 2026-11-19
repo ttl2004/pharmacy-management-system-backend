@@ -165,6 +165,17 @@ export class BranchService extends AbstractBaseService<Branch> {
       });
     }
 
+    // M2: còn nợ NCC thì không xoá — chi nhánh đã xoá bị ẩn khắp nơi nên khoản nợ sẽ không trả được nữa.
+    // Muốn đóng cửa khi còn nợ: chuyển NGỪNG HOẠT ĐỘNG (vẫn lập phiếu chi / điều chỉnh nợ được), trả xong mới xoá.
+    const debts = await this.branchRepository.findOutstandingSupplierDebts(id);
+    if (debts.length) {
+      const total = debts.reduce((sum, row) => sum + row.debt, 0n);
+      throw new ErrorException({
+        code: ErrorCode.INVALID_REFERENCE,
+        message: `Chi nhánh còn nợ ${debts.length} nhà cung cấp (tổng ${total.toLocaleString('vi-VN')}đ) — trả hoặc điều chỉnh hết nợ trước khi xoá; muốn đóng cửa thì chuyển sang ngừng hoạt động`,
+      });
+    }
+
     await this.prisma.$transaction(async (tx) => {
       const deleted = await this.branchRepository.softDelete({ id }, tx);
       if (!deleted) throw this.notFound();

@@ -108,7 +108,7 @@ export class OrderController {
     return this.orderService.cancel(id, dto, actor);
   }
 
-  @RequirePermissions('order:cancel')
+  @RequirePermissions('order:void')
   @Post(':id/void')
   @ApiOperation({
     description:

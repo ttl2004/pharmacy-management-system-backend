@@ -16,6 +16,8 @@ import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth
 import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
+import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
+import { canSeeCost } from '../core/cost-visibility';
 import { DocumentCodeService } from '../core/document-code.service';
 import { badRequest, documentErrors, invalidReference, inventoryError } from '../core/inventory.error';
 import { branchWhere, resolveWriteBranch } from '../core/inventory-scope';
@@ -34,6 +36,7 @@ import {
 import { GoodsReceiptQuery } from './dtos/goods-receipt.query';
 import { receiptListWhere } from './goods-receipt-advanced-search';
 import { allocateUnitCosts } from './goods-receipt-cost-allocation';
+import { maskReceiptDetail, maskReceiptPage } from './goods-receipt-cost-mask';
 import { GoodsReceiptDraftBuilder } from './goods-receipt-draft.builder';
 import { GoodsReceiptLocker } from './goods-receipt-locker';
 import { computeLine } from './goods-receipt.calculator';
@@ -70,18 +73,28 @@ export class GoodsReceiptService {
     private readonly codes: DocumentCodeService,
     private readonly supplierPayments: SupplierPaymentWriter,
     private readonly audit: AuditLogService,
+    private readonly permissions: PermissionService,
   ) {}
 
-  list(query: GoodsReceiptQuery, actor: RequestActor) {
+  /** Người không thấy được giá vốn (K8): tiền = null và không sắp theo tổng tiền (bỏ qua, dùng mặc định). */
+  async list(query: GoodsReceiptQuery, actor: RequestActor) {
     const branchId = scopedBranchFilter(resolveBranchScope(actor.user), query.branchId);
-    return this.receipts.findPage(receiptListWhere(query, branchId), query.page, query.limit, this.toOrder(query.sort));
+    const showCost = await canSeeCost(this.permissions, actor.user);
+    const sort = showCost || query.sort?.split(':')[0] !== 'totalAmount' ? query.sort : undefined;
+    const page = await this.receipts.findPage(
+      receiptListWhere(query, branchId),
+      query.page,
+      query.limit,
+      this.toOrder(sort),
+    );
+    return showCost ? page : maskReceiptPage(page);
   }
 
-  async getDetail(id: string, actor: RequestActor): Promise<GoodsReceiptDetail> {
+  async getDetail(id: string, actor: RequestActor) {
     const scope = resolveBranchScope(actor.user);
     const receipt = await this.receipts.findDetail(id, branchWhere(scope));
     if (!receipt) throw errors.notFound();
-    return receipt;
+    return (await canSeeCost(this.permissions, actor.user)) ? receipt : maskReceiptDetail(receipt);
   }
 
   async create(dto: CreateGoodsReceiptRequest, actor: RequestActor): Promise<GoodsReceiptView> {

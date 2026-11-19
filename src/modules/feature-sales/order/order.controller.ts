@@ -112,7 +112,7 @@ export class OrderController {
   @Post(':id/void')
   @ApiOperation({
     description:
-      'Huỷ hoá đơn tại quầy ĐÃ THU (COMPLETED): bắt buộc lý do + số tiền đã hoàn (refundAmount, refundMethod); ghi dòng payments REFUND, hàng về đúng lô đã bán (RETURN_IN).',
+      'Huỷ hoá đơn tại quầy ĐÃ THU (COMPLETED): bắt buộc lý do + số tiền đã hoàn (refundAmount, refundMethod); ghi dòng payments REFUND, hàng về đúng lô đã bán (RETURN_IN). Quá 7 ngày (7×24 giờ) kể từ lúc thu tiền chỉ vai trò toàn chuỗi (ADMIN/SUPER_ADMIN) huỷ được, vai trò theo chi nhánh nhận lỗi PERMISSION_DENIED.',
   })
   voidPaid(
     @Param('id', new ParseUUIDPipe()) id: string,

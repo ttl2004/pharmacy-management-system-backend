@@ -29,6 +29,7 @@ const head = (overrides: Partial<OrderHead> = {}): OrderHead => ({
   prescriptionCode: null,
   prescriberName: null,
   updatedAt: null,
+  completedAt: null,
   priceBookId: null,
   priceBookName: null,
   createdBy: 'u1',

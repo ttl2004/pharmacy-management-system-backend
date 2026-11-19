@@ -11,7 +11,7 @@ import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { DrugSourceClient } from './drug-source.client';
 import { DrugQuery } from './dtos/drug.query';
-import { DrugRepository, PrescriptionChange } from './repositories/drug.repository';
+import { ControlledChange, DrugRepository, PrescriptionChange } from './repositories/drug.repository';
 
 export interface DrugSyncResult {
   total: number;
@@ -44,6 +44,7 @@ function syncAuditEntries(
   result: Omit<DrugSyncResult, 'syncedAt'>,
   changed: readonly PrescriptionChange[],
   force: boolean,
+  controlled: readonly ControlledChange[] = [],
 ): AuditEntry[] {
   const syncId = randomUUID();
   return [
@@ -63,6 +64,17 @@ function syncAuditEntries(
       branchIds: [],
       before: { requiresPrescription: product.before },
       after: { requiresPrescription: product.after },
+      metadata: { syncId },
+    })),
+    // D3: thuốc vào danh mục kiểm soát đặc biệt → hàng hoá tự bật cờ kiểm soát.
+    ...controlled.map((product): AuditEntry => ({
+      event: 'PRODUCT.CONTROL_FLAGS_CHANGED',
+      entityType: 'products',
+      entityId: product.id,
+      entityLabel: product.code,
+      branchIds: [],
+      before: { isControlled: false },
+      after: { isControlled: true },
       metadata: { syncId },
     })),
   ];
@@ -130,8 +142,9 @@ export class DrugService extends AbstractBaseService<Drug> {
       }
       const deactivated = await this.drugRepository.deactivateStale(tx, syncedAt, callerId);
       const changed = await this.drugRepository.syncProductPrescription(tx, syncedAt, callerId);
+      const controlled = await this.drugRepository.syncProductControlled(tx, syncedAt, callerId);
       const counts = { total: drugs.length, upserted, deactivated, productsUpdated: changed.length };
-      await this.audit.record(tx, auditActorOf(actor), syncAuditEntries(counts, changed, force));
+      await this.audit.record(tx, auditActorOf(actor), syncAuditEntries(counts, changed, force, controlled));
       return { ...counts, syncedAt };
     });
   }

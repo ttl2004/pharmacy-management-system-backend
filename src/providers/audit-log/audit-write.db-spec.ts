@@ -21,6 +21,7 @@ import { SupplierService } from 'src/modules/feature-inventory/supplier/supplier
 import { SupplierDebtRepository } from 'src/modules/feature-inventory/supplier-debt/repositories/supplier-debt.repository';
 import { SupplierPaymentRepository } from 'src/modules/feature-inventory/supplier-debt/repositories/supplier-payment.repository';
 import { SupplierPaymentWriter } from 'src/modules/feature-inventory/supplier-debt/supplier-payment.writer';
+import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
 import { createTestPrisma, resetSchema } from 'src/test-support/db-test';
 import { AuditLogService } from './audit-log.service';
 import type { AuditEntry } from './audit-log.types';
@@ -57,6 +58,11 @@ describe('audit ghi thật (db)', () => {
         GoodsReceiptService,
         SupplierRepository,
         SupplierService,
+        // K8: GoodsReceiptService cần quyết định ẩn giá vốn; spec này chỉ ghi, cấp sẵn quyền nhập hàng.
+        {
+          provide: PermissionService,
+          useValue: { getGrantedCodes: () => Promise.resolve(new Set(['goods-receipt:create'])) },
+        },
       ],
     }).compile();
     receipts = moduleRef.get(GoodsReceiptService);

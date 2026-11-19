@@ -24,6 +24,7 @@ const head = (overrides: Partial<OrderHead> = {}): OrderHead => ({
   prescriptionCode: null,
   prescriberName: null,
   updatedAt: null,
+  completedAt: new Date(),
   priceBookId: null,
   priceBookName: null,
   createdBy: 'u1',
@@ -170,6 +171,47 @@ describe('OrderVoidAndPreviewService', () => {
     await expect(
       service.voidPaid('o1', { reason: 'x', refundAmount: 5000, refundMethod: PaymentMethod.CASH }, ss),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+  });
+
+  describe('B7 — hạn 7 ngày huỷ hoá đơn đã thu', () => {
+    const daysAgo = (d: number) => new Date(Date.now() - d * 24 * 60 * 60 * 1000);
+    const pm = {
+      ...ss,
+      user: { ...ss.user, role: AuthRole.PHARMACY_MANAGER, roleLevel: 60 },
+    } as unknown as RequestActor;
+    const admin = {
+      ...ss,
+      user: { ...ss.user, role: AuthRole.ADMIN, branchId: null, roleLevel: 90 },
+    } as unknown as RequestActor;
+
+    it('đã thu 6 ngày: quản lý chi nhánh huỷ được', async () => {
+      orders.findHead.mockResolvedValue(head({ completedAt: daysAgo(6) }));
+      await service.voidPaid('o1', full, pm);
+      expect(orders.claim).toHaveBeenCalled();
+    });
+
+    it('đã thu 8 ngày: quản lý chi nhánh → 1500, không chiếm đơn, không đụng kho', async () => {
+      orders.findHead.mockResolvedValue(head({ completedAt: daysAgo(8) }));
+      await expect(service.voidPaid('o1', full, pm)).rejects.toMatchObject({
+        response: { code: ErrorCode.PERMISSION_DENIED },
+      });
+      expect(orders.claim).not.toHaveBeenCalled();
+      expect(stock.restock).not.toHaveBeenCalled();
+    });
+
+    it('thiếu completedAt (dữ liệu cũ): quản lý chi nhánh → 1500 (coi như quá hạn)', async () => {
+      orders.findHead.mockResolvedValue(head({ completedAt: null, updatedAt: new Date() }));
+      await expect(service.voidPaid('o1', full, pm)).rejects.toMatchObject({
+        response: { code: ErrorCode.PERMISSION_DENIED },
+      });
+      expect(orders.claim).not.toHaveBeenCalled();
+    });
+
+    it('đã thu 8 ngày: ADMIN huỷ được', async () => {
+      orders.findHead.mockResolvedValue(head({ completedAt: daysAgo(8) }));
+      await service.voidPaid('o1', full, admin);
+      expect(orders.claim).toHaveBeenCalled();
+    });
   });
 
   it('kiểm tiền xảy ra TRƯỚC khi chiếm đơn và trả hàng về kho', async () => {

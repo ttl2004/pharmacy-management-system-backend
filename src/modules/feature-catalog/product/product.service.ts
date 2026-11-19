@@ -97,6 +97,10 @@ export class ProductService extends AbstractBaseService<Product> {
           minStockLevel: dto.minStockLevel ?? 0,
           status: dto.status ?? RecordStatus.ACTIVE,
           ...toExtraCreateData(dto),
+          // D3: thuốc thuộc danh mục kiểm soát đặc biệt → cờ kiểm soát luôn bật (đặt SAU toExtraCreateData để ghi đè).
+          ...(drug && this.isControlledByCatalog(drug)
+            ? { isControlled: this.controlledOf(drug, dto.isControlled) }
+            : {}),
           createdBy: callerId,
         });
         await this.productRepository.replaceLocations(tx, product.id, locationIds);
@@ -185,6 +189,10 @@ export class ProductService extends AbstractBaseService<Product> {
 
         const data = this.toUpdateData(dto, callerId);
         if (linkedDrug) data.requiresPrescription = this.prescriptionOf(linkedDrug, dto.requiresPrescription);
+        // D3: thuốc liên kết (mới hoặc cũ) thuộc danh mục kiểm soát đặc biệt → ép bật cờ; thuốc thường → giữ giá trị thủ công.
+        if (linkedDrug && this.isControlledByCatalog(linkedDrug)) {
+          data.isControlled = this.controlledOf(linkedDrug, dto.isControlled);
+        }
         if (newDrug && !existing.drugId) Object.assign(data, prefillFromDrug(newDrug, dto, existing));
         const written = await this.productRepository.updateProduct(tx, id, data);
         if (!written) throw this.notFound();
@@ -246,7 +254,9 @@ export class ProductService extends AbstractBaseService<Product> {
       if (!deleted) throw this.notFound();
 
       // Thuốc liên kết phải còn hiệu lực như lúc tạo (có thể đã bị ngừng/xoá khỏi danh mục từ khi sản phẩm bị xoá).
-      if (deleted.drugId) await this.assertActiveDrug(tx, deleted.drugId);
+      const drug = deleted.drugId ? await this.assertActiveDrug(tx, deleted.drugId) : null;
+      // D3: thuốc nay thuộc danh mục kiểm soát (sync/migration bỏ qua hàng đã xoá) → khôi phục kèm bật cờ kiểm soát.
+      const forceControlled = !!drug && this.isControlledByCatalog(drug) && !deleted.isControlled;
 
       if (deleted.updatedAt) {
         await this.productRepository.restoreUnitsDeletedAt(tx, id, deleted.updatedAt, callerId);
@@ -262,7 +272,10 @@ export class ProductService extends AbstractBaseService<Product> {
       // Cùng luật chống trùng quy cách như tạo/sửa (khoá `drug:<id>`), loại chính sản phẩm này.
       if (deleted.drugId) await this.assertNoDuplicatePack(tx, deleted.drugId, live, id);
       if ((await this.productRepository.restoreProduct(tx, id, callerId)) === 0) throw this.notFound();
-      await this.audit.record(tx, auditActorOf(actor), [productRestoredEntry(id, deleted)]);
+      if (forceControlled) await this.productRepository.updateProduct(tx, id, { isControlled: true });
+      await this.audit.record(tx, auditActorOf(actor), [
+        productRestoredEntry(id, forceControlled ? { ...deleted, isControlled: true } : deleted),
+      ]);
     });
 
     return this.getDetail(id);
@@ -463,6 +476,24 @@ export class ProductService extends AbstractBaseService<Product> {
       throw this.badRequest(`Theo danh mục CSDL Dược đây là ${kind}, không sửa được cờ kê đơn`);
     }
     return drug.isPrescription;
+  }
+
+  /** Thuốc có `controlType` (không rỗng sau trim) trong danh mục quốc gia → hàng hoá luôn là thuốc kiểm soát. */
+  private isControlledByCatalog(drug: { controlType: string | null }): boolean {
+    return (drug.controlType ?? '').trim() !== '';
+  }
+
+  /**
+   * D3: cờ kiểm soát của hàng gắn thuốc thuộc danh mục kiểm soát đặc biệt bị KHOÁ ở bật — client gửi `false` thì từ
+   * chối (rõ ràng hơn là lặng lẽ bỏ qua). Thuốc không có `controlType` thì cờ do dược sĩ tự quyết, không qua hàm này.
+   */
+  private controlledOf(drug: { controlType: string | null }, requested: boolean | undefined): true {
+    if (requested === false) {
+      throw this.badRequest(
+        `Thuốc thuộc danh mục kiểm soát đặc biệt (${(drug.controlType ?? '').trim()}) — không bỏ được cờ kiểm soát`,
+      );
+    }
+    return true;
   }
 
   /**

@@ -64,3 +64,25 @@ describe('SupplierListService — dữ liệu định danh (N6)', () => {
     expect((await root.service.getDetail('s1', actor(AuthRole.SUPER_ADMIN))).idNumber).toBe('012345678901');
   });
 });
+
+describe('SupplierListService — ẩn tổng mua với người không thấy giá vốn (K8)', () => {
+  it('nhân viên bán hàng: totalPurchase = null, bỏ lọc/sắp theo tổng mua; PM có goods-receipt:create thấy', async () => {
+    const staff = makeService(['supplier:read']);
+    const query = { page: 1, limit: 20, purchaseMin: 1, purchaseMax: 9, sort: 'totalPurchase:desc' } as never;
+    const list = await staff.service.list(query, actor(AuthRole.SALES_STAFF));
+    expect(list.hits[0].totalPurchase).toBeNull();
+    expect(list.summary.totalPurchase).toBeNull();
+    expect(staff.totals.findPage).toHaveBeenCalledWith(
+      expect.objectContaining({ purchaseMin: undefined, purchaseMax: undefined, sort: undefined }),
+    );
+    expect((await staff.service.getDetail('s1', actor(AuthRole.SALES_STAFF))).totalPurchase).toBeNull();
+
+    const pm = makeService(['supplier:read', 'goods-receipt:create']);
+    const full = await pm.service.list(query, actor(AuthRole.ADMIN));
+    expect(full.hits[0].totalPurchase).toBe(10);
+    expect(full.summary.totalPurchase).toBe(10);
+    expect(pm.totals.findPage).toHaveBeenCalledWith(
+      expect.objectContaining({ purchaseMin: 1, purchaseMax: 9, sort: 'totalPurchase:desc' }),
+    );
+  });
+});

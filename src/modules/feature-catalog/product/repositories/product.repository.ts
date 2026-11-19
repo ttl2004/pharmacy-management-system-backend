@@ -108,6 +108,7 @@ export type ProductDetail = Prisma.ProductGetPayload<{ select: typeof PRODUCT_DE
 const LINKED_DRUG_SELECT = {
   id: true,
   isPrescription: true,
+  controlType: true,
   indications: true,
   dosage: true,
   storage: true,

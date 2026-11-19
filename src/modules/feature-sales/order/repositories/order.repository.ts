@@ -106,6 +106,8 @@ export interface OrderHead {
   prescriptionCode: string | null;
   prescriberName: string | null;
   updatedAt: Date | null;
+  /** Lúc thu tiền (đơn COMPLETED) — mốc tính hạn huỷ hoá đơn đã thu. */
+  completedAt: Date | null;
   /** Bảng giá lúc tạo đơn (null + tên còn = bảng đã bị xoá) và người tạo — để kiểm lại bảng khi sửa dòng. */
   priceBookId: string | null;
   priceBookName: string | null;
@@ -161,6 +163,7 @@ export class OrderRepository {
         prescriptionCode: true,
         prescriberName: true,
         updatedAt: true,
+        completedAt: true,
         priceBookId: true,
         priceBookName: true,
         createdBy: true,

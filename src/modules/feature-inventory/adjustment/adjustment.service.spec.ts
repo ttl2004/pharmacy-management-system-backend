@@ -63,6 +63,7 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     audit as never,
     intake as never,
     returnMoney as never,
+    { getGrantedCodes: jest.fn().mockResolvedValue(new Set(['goods-receipt:create'])) } as never,
   );
   return { service, repository, ledger, audit, intake, returnMoney };
 }

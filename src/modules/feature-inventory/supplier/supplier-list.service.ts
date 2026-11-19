@@ -3,6 +3,7 @@ import type { RequestActor } from 'src/common/decorators/current-actor.decorator
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
+import { canSeeCost } from '../core/cost-visibility';
 import { resolveBranchScope } from '../../feature-auth/permission/branch-scope';
 import { PermissionService } from '../../feature-auth/permission/permission.service';
 import { SupplierQuery } from './dtos/supplier.query';
@@ -33,31 +34,34 @@ export class SupplierListService {
 
   async list(query: SupplierQuery, actor: RequestActor) {
     const scope = await this.scopeParams(actor);
+    // Tổng mua = tổng tiền phiếu nhập (K8): người không thấy giá vốn không lọc/sắp theo cột này để dò.
+    const sortField = query.sort?.split(':')[0].replace(/^-/, '');
+    const hideSort = !scope.canSeeCost && sortField === 'totalPurchase';
     const result = await this.totals.findPage({
       ...scope,
       status: query.status,
       groupId: query.groupId,
       search: query.search,
       note: query.note,
-      purchaseMin: query.purchaseMin,
-      purchaseMax: query.purchaseMax,
+      purchaseMin: scope.canSeeCost ? query.purchaseMin : undefined,
+      purchaseMax: scope.canSeeCost ? query.purchaseMax : undefined,
       debtMin: query.debtMin,
       debtMax: query.debtMax,
       fromDate: query.fromDate,
       toDate: query.toDate,
-      sort: query.sort,
+      sort: hideSort ? undefined : query.sort,
       page: query.page,
       limit: query.limit,
     });
 
-    const hits = await this.attach(result.rows, scope.canSeeSensitive);
+    const hits = await this.attach(result.rows, scope.canSeeSensitive, scope.canSeeCost);
     return {
       hits,
       total: result.total,
       page: query.page,
       totalPages: Math.ceil(result.total / query.limit),
       limit: query.limit,
-      summary: result.summary,
+      summary: scope.canSeeCost ? result.summary : { ...result.summary, totalPurchase: null },
     };
   }
 
@@ -69,7 +73,7 @@ export class SupplierListService {
       page: 1,
       limit: 1,
     });
-    const [hit] = await this.attach(result.rows, scope.canSeeSensitive);
+    const [hit] = await this.attach(result.rows, scope.canSeeSensitive, scope.canSeeCost);
     if (!hit) {
       throw new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Nhà cung cấp không tồn tại' });
     }
@@ -77,20 +81,24 @@ export class SupplierListService {
   }
 
   /** Nạp cột đầy đủ + nhóm + người tạo, giữ đúng thứ tự do SQL sắp xếp. */
-  private async attach(rows: { id: string; totalPurchase: number; currentDebt: number }[], canSeeSensitive: boolean) {
+  private async attach(
+    rows: { id: string; totalPurchase: number; currentDebt: number }[],
+    canSeeSensitive: boolean,
+    showCost: boolean,
+  ) {
     const found = await this.suppliers.findManyByIds(rows.map((r) => r.id));
     const byId = new Map(found.map((s) => [s.id, s] as const));
     return rows.flatMap((r) => {
       const supplier = byId.get(r.id);
       if (!supplier) return [];
       const visible = canSeeSensitive ? supplier : { ...supplier, idNumber: null, email: null };
-      return [{ ...visible, totalPurchase: r.totalPurchase, currentDebt: r.currentDebt }];
+      return [{ ...visible, totalPurchase: showCost ? r.totalPurchase : null, currentDebt: r.currentDebt }];
     });
   }
 
   private async scopeParams(
     actor: RequestActor,
-  ): Promise<Pick<SupplierListParams, 'branchId' | 'canSeeDebt'> & { canSeeSensitive: boolean }> {
+  ): Promise<Pick<SupplierListParams, 'branchId' | 'canSeeDebt'> & { canSeeSensitive: boolean; canSeeCost: boolean }> {
     const scope = resolveBranchScope(actor.user);
     const role = actor.user.role;
     const granted = role === AuthRole.SUPER_ADMIN ? null : await this.permissions.getGrantedCodes(role);
@@ -98,6 +106,7 @@ export class SupplierListService {
     const canSeeSensitive = !granted || granted.has(SENSITIVE_PERMISSION);
     return {
       canSeeSensitive,
+      canSeeCost: await canSeeCost(this.permissions, actor.user),
       branchId: scope.kind === 'BRANCH' ? scope.branchId : undefined,
       canSeeDebt,
     };

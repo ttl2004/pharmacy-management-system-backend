@@ -7,6 +7,8 @@ import {
   PaymentStatus,
   TransactionStatus,
 } from '@prisma/client';
+import { ErrorCode } from 'src/common/types/error-code';
+import { permissionError } from 'src/modules/feature-auth/permission/permission.error';
 import { badRequest } from 'src/modules/feature-inventory/core/inventory.error';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { toDateOnlyString } from 'src/common/utils/date-only.util';
@@ -25,6 +27,10 @@ import { orderErrors } from '../core/sales.error';
 import { PreviewAllocationRequest, VoidPaidOrderRequest } from './dtos/order.request';
 import { SalesRollupRepository } from '../../feature-report/sales-rollup.repository';
 import { OrderDetail, OrderRepository } from './repositories/order.repository';
+
+/** Hạn huỷ hoá đơn đã thu với vai trò theo chi nhánh: 7 ngày, tính 7×24 giờ từ lúc thu tiền (`completedAt`). */
+export const VOID_PAID_WINDOW_DAYS = 7;
+const VOID_PAID_WINDOW_MS = VOID_PAID_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
 /**
  * Thao tác sau bán của đơn tại quầy (như mock):
@@ -58,6 +64,15 @@ export class OrderVoidAndPreviewService {
       }
       // Kiểm tiền hoàn TRƯỚC khi chiếm đơn và trả hàng về kho: lỗi thì không đụng gì.
       const refund = this.refundOf(head.totalAmount, dto);
+      // B7: quá 7×24 giờ kể từ lúc thu thì chỉ vai trò toàn chuỗi huỷ được. Kiểm trước khi chiếm đơn/đụng kho.
+      // Thiếu completedAt (dữ liệu cũ) coi như đã quá hạn — không dùng updatedAt vì nó có thể bị đẩy lên sau khi thu.
+      const paidAt = head.completedAt;
+      if (scope.kind !== 'ALL' && (!paidAt || now.getTime() - paidAt.getTime() > VOID_PAID_WINDOW_MS)) {
+        throw permissionError(
+          ErrorCode.PERMISSION_DENIED,
+          `Hoá đơn đã thu quá ${VOID_PAID_WINDOW_DAYS} ngày — chỉ quản trị chuỗi huỷ được`,
+        );
+      }
       const claimed = await this.orders.claim(
         tx,
         id,

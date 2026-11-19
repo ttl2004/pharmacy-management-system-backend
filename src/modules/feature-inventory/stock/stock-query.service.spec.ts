@@ -26,7 +26,8 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     findMovementSummary: jest.fn().mockResolvedValue([]),
     ...overrides,
   };
-  return { service: new StockQueryService(repository as never), repository };
+  const permissions = { getGrantedCodes: jest.fn().mockResolvedValue(new Set(['goods-receipt:create'])) };
+  return { service: new StockQueryService(repository as never, permissions as never), repository };
 }
 
 describe('StockQueryService — phạm vi chi nhánh', () => {
@@ -132,5 +133,65 @@ describe('StockQueryService — nhập–xuất–tồn', () => {
       from: new Date('2026-09-30T17:00:00.000Z'),
       toExclusive: new Date('2026-10-31T17:00:00.000Z'),
     });
+  });
+});
+
+describe('StockQueryService — ẩn giá vốn (K8)', () => {
+  const STAFF = actor(AuthRole.SALES_STAFF, BRANCH_A);
+  const staffGrants = { getGrantedCodes: jest.fn().mockResolvedValue(new Set(['stock:read', 'goods-receipt:read'])) };
+  const batchRow = {
+    id: 'b1',
+    status: BatchStatus.AVAILABLE,
+    quantityOnHand: 5,
+    reservedQuantity: 0,
+    importPrice: 700,
+    expiryDate: parseDateOnly(addDaysToDateOnly(todayInVietnam(), 200)),
+  };
+  const movementRow = { id: 'm1', refId: 'r1', unitCost: 700, quantity: 5, createdAt: new Date(), type: 'IMPORT' };
+  const summaryRow = { productId: 'p1', opening: 1, openingValue: 10, inValue: 20, outValue: 5, closingValue: 25 };
+
+  function build(permissions: { getGrantedCodes: jest.Mock }) {
+    const repository = {
+      findBatchPage: jest.fn().mockResolvedValue({ hits: [batchRow], total: 1, page: 1, totalPages: 1, limit: 10 }),
+      findBatch: jest.fn().mockResolvedValue(batchRow),
+      findMovements: jest.fn().mockResolvedValue([movementRow]),
+      findRefCodes: jest.fn().mockResolvedValue(new Map()),
+      findMovementSummary: jest.fn().mockResolvedValue([summaryRow]),
+    };
+    return new StockQueryService(repository as never, permissions as never);
+  }
+
+  it('nhân viên bán hàng: importPrice, unitCost, cột giá trị = null; số lượng giữ nguyên', async () => {
+    const service = build(staffGrants);
+    const list = await service.listBatches({ page: 1, limit: 10 } as never, STAFF);
+    expect(list.hits[0]).toMatchObject({ importPrice: null, quantityOnHand: 5 });
+    expect((await service.getBatch('b1', STAFF)).importPrice).toBeNull();
+    expect((await service.nearExpiry({ page: 1, limit: 10 } as never, STAFF)).hits[0].importPrice).toBeNull();
+    const moves = await service.listMovements({ limit: 10 } as never, STAFF);
+    expect(moves.items[0]).toMatchObject({ unitCost: null, quantity: 5 });
+    const summary = await service.movementSummary({ fromDate: '2026-01-01', toDate: '2026-01-31' } as never, STAFF);
+    expect(summary.rows[0]).toMatchObject({
+      opening: 1,
+      openingValue: null,
+      inValue: null,
+      outValue: null,
+      closingValue: null,
+    });
+  });
+
+  it('PM có goods-receipt:create và SUPER_ADMIN thấy giá vốn', async () => {
+    const pm = build({ getGrantedCodes: jest.fn().mockResolvedValue(new Set(['goods-receipt:create'])) });
+    expect((await pm.listBatches({ page: 1, limit: 10 } as never, PM_A)).hits[0].importPrice).toBe(700);
+    expect((await pm.listMovements({ limit: 10 } as never, PM_A)).items[0].unitCost).toBe(700);
+    const admin = build(staffGrants);
+    const superAdmin = actor(AuthRole.SUPER_ADMIN);
+    expect((await admin.getBatch('b1', superAdmin)).importPrice).toBe(700);
+    const summary = await admin.movementSummary({ fromDate: '2026-01-01', toDate: '2026-01-31' } as never, superAdmin);
+    expect(summary.rows[0]).toMatchObject({ inValue: 20 });
+  });
+
+  it('chỉ có price-book:update cũng thấy giá vốn', async () => {
+    const service = build({ getGrantedCodes: jest.fn().mockResolvedValue(new Set(['price-book:update'])) });
+    expect((await service.getBatch('b1', PM_A)).importPrice).toBe(700);
   });
 });

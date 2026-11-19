@@ -7,6 +7,8 @@ import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth
 import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { adjustmentEvent } from 'src/providers/audit-log/audit-events';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
+import { canSeeCost } from '../core/cost-visibility';
 import { DocumentCodeService } from '../core/document-code.service';
 import {
   assertNoDuplicateBatches,
@@ -28,6 +30,7 @@ import {
   CreateAdjustmentRequest,
   UpdateAdjustmentRequest,
 } from './dtos/adjustment.request';
+import { maskAdjustmentDetail, maskAdjustmentRow, NO_RETURN_SUMMARY } from './adjustment-cost-mask';
 import { adjustmentListWhere, adjustmentOrderBy } from './adjustment-list-filters';
 import { NO_RETURN_MONEY, PurchaseReturnMoneyService, type ReturnLineInput } from './purchase-return-money.service';
 import {
@@ -145,6 +148,7 @@ export class AdjustmentService {
     private readonly audit: AuditLogService,
     private readonly intake: StockIntakeService,
     private readonly returnMoney: PurchaseReturnMoneyService,
+    private readonly permissions: PermissionService,
   ) {}
 
   /** Dòng phiếu trả cho bước tính tiền: lô đã đọc (đã chắc có — bước trước đã từ chối lô lạ) + SL đưa ra (dương). */
@@ -165,8 +169,11 @@ export class AdjustmentService {
     const branchId = scopedBranchFilter(resolveBranchScope(actor.user), query.branchId);
     const where = adjustmentListWhere(query, branchId);
     const page = await this.adjustments.findPage(where, query.page, query.limit, adjustmentOrderBy(query.sort));
-    if (query.type !== AdjustmentType.RETURN_TO_SUPPLIER) return page;
-    return { ...page, summary: await this.adjustments.returnSummary(where) };
+    // Người không thấy được giá vốn (K8): mọi cột tiền = null (phiếu loại nào cũng có cột tiền ở DB).
+    const showCost = await canSeeCost(this.permissions, actor.user);
+    const masked = showCost ? page : { ...page, hits: page.hits.map((row) => maskAdjustmentRow(row)) };
+    if (query.type !== AdjustmentType.RETURN_TO_SUPPLIER) return masked;
+    return { ...masked, summary: showCost ? await this.adjustments.returnSummary(where) : NO_RETURN_SUMMARY };
   }
 
   /** Cảnh báo lô mới / lô đổi tồn của phiếu kiểm kê (chỉ đọc). */
@@ -191,10 +198,10 @@ export class AdjustmentService {
     return { isFavourite };
   }
 
-  async getDetail(id: string, actor: RequestActor): Promise<AdjustmentDetail> {
+  async getDetail(id: string, actor: RequestActor) {
     const adjustment = await this.adjustments.findDetail(id, branchWhere(resolveBranchScope(actor.user)));
     if (!adjustment) throw errors.notFound();
-    return adjustment;
+    return (await canSeeCost(this.permissions, actor.user)) ? adjustment : maskAdjustmentDetail(adjustment);
   }
 
   async create(dto: CreateAdjustmentRequest, actor: RequestActor): Promise<AdjustmentDetail> {

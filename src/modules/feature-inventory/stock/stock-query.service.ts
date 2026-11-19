@@ -13,6 +13,8 @@ import {
   vietnamDayStartUtc,
 } from 'src/common/utils/date-only.util';
 import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
+import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
+import { canSeeCost } from '../core/cost-visibility';
 import { branchWhere } from '../core/inventory-scope';
 import { afterCursorDesc, decodeCursor, toKeysetPage } from 'src/common/utils/keyset-cursor';
 import {
@@ -29,7 +31,9 @@ import { StockBatchRow, StockQueryRepository } from './repositories/stock-query.
 const MAX_SUMMARY_DAYS = 366;
 
 /** Lô trả về client kèm các trường suy ra — client không phải tự tính hạn, tồn khả dụng. */
-export type StockBatchView = StockBatchRow & {
+export type StockBatchView = Omit<StockBatchRow, 'importPrice'> & {
+  /** Giá nhập của lô — null với người không có quyền thấy giá vốn. */
+  importPrice: number | null;
   availableQuantity: number;
   daysToExpiry: number;
   isExpired: boolean;
@@ -43,7 +47,10 @@ export type StockBatchView = StockBatchRow & {
  */
 @Injectable()
 export class StockQueryService {
-  constructor(private readonly stock: StockQueryRepository) {}
+  constructor(
+    private readonly stock: StockQueryRepository,
+    private readonly permissions: PermissionService,
+  ) {}
 
   async listBatches(query: StockBatchQuery, actor: RequestActor) {
     const branchId = scopedBranchFilter(resolveBranchScope(actor.user), query.branchId);
@@ -63,14 +70,15 @@ export class StockQueryService {
         { product: { code: { contains: escapeLike(query.search), mode: 'insensitive' } } },
       ];
     }
+    const showCost = await canSeeCost(this.permissions, actor.user);
     const page = await this.stock.findBatchPage(where, query.page, query.limit);
-    return { ...page, hits: page.hits.map((row) => this.toBatchView(row, today)) };
+    return { ...page, hits: page.hits.map((row) => this.toBatchView(row, today, showCost)) };
   }
 
   async getBatch(id: string, actor: RequestActor): Promise<StockBatchView> {
     const row = await this.stock.findBatch(id, branchWhere(resolveBranchScope(actor.user)));
     if (!row) throw new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Lô hàng không tồn tại' });
-    return this.toBatchView(row, todayInVietnam());
+    return this.toBatchView(row, todayInVietnam(), await canSeeCost(this.permissions, actor.user));
   }
 
   async listProducts(query: StockProductQuery, actor: RequestActor) {
@@ -104,7 +112,16 @@ export class StockQueryService {
     const page = toKeysetPage(rows, query.limit);
     // `refCode`: mã chứng từ đọc được (PN…, HD…, mã hàng với tồn đầu); null khi chứng từ không còn.
     const codes = await this.stock.findRefCodes(page.items);
-    return { ...page, items: page.items.map((row) => ({ ...row, refCode: codes.get(row.refId) ?? null })) };
+    // Giá vốn bút toán chỉ cho người thấy được giá vốn (K8); hình dạng JSON giữ nguyên (null).
+    const showCost = await canSeeCost(this.permissions, actor.user);
+    return {
+      ...page,
+      items: page.items.map((row) => ({
+        ...row,
+        unitCost: showCost ? row.unitCost : null,
+        refCode: codes.get(row.refId) ?? null,
+      })),
+    };
   }
 
   async lowStock(query: LowStockQuery, actor: RequestActor) {
@@ -137,14 +154,24 @@ export class StockQueryService {
       from: vietnamDayStartUtc(query.fromDate),
       toExclusive: vietnamDayStartUtc(addDaysToDateOnly(query.toDate, 1)),
     });
-    return { branchId: branchId ?? null, fromDate: query.fromDate, toDate: query.toDate, rows };
+    // Cột giá trị tiền theo giá vốn: ẩn (null) với người không thấy được giá vốn (K8).
+    const showCost = await canSeeCost(this.permissions, actor.user);
+    return {
+      branchId: branchId ?? null,
+      fromDate: query.fromDate,
+      toDate: query.toDate,
+      rows: showCost
+        ? rows
+        : rows.map((row) => ({ ...row, openingValue: null, inValue: null, outValue: null, closingValue: null })),
+    };
   }
 
-  private toBatchView(row: StockBatchRow, today: string): StockBatchView {
+  private toBatchView(row: StockBatchRow, today: string, showCost: boolean): StockBatchView {
     const daysToExpiry = daysBetweenDateOnly(today, toDateOnlyString(row.expiryDate));
     const isExpired = daysToExpiry <= 0;
     return {
       ...row,
+      importPrice: showCost ? row.importPrice : null,
       // Lô bị khoá (cách ly / thu hồi) không xuất được → khả dụng 0, dù còn tồn thực tế.
       availableQuantity: row.status === BatchStatus.AVAILABLE ? row.quantityOnHand - row.reservedQuantity : 0,
       daysToExpiry,

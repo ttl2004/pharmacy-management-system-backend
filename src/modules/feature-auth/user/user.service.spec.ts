@@ -1,4 +1,5 @@
 import { HttpException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
@@ -68,7 +69,12 @@ function makeService(
     $transaction: jest.fn((work: (tx: unknown) => unknown) =>
       work({
         $executeRaw: jest.fn(),
-        auth: { findFirst: jest.fn().mockResolvedValue({ username: 'nv01' }) },
+        auth: {
+          findFirst: jest.fn().mockResolvedValue({ username: 'nv01' }),
+          updateMany: jest.fn(),
+          update: jest.fn(),
+        },
+        user: { update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
         refreshToken: { updateMany: jest.fn() },
         ...infra.tx,
       }),
@@ -879,5 +885,198 @@ describe('UserService — đặt lại mật khẩu (L10)', () => {
     expect(await codeOf(service.resetPassword('staff-1', { newPassword: 'MatKhauMoi123' }, actorOf(ADMIN)))).toBe(
       ErrorCode.USER_NOT_FOUND,
     );
+  });
+});
+
+describe('UserService — xoá nhả giá trị unique (A9)', () => {
+  const CURRENT = {
+    id: 'u1',
+    fullName: 'Nguyễn Văn A',
+    status: 'ACTIVE',
+    branchId: CN1,
+    email: 'an.nguyen@x.vn',
+    phoneNumber: '0987654321',
+    role: { code: 'SALES_STAFF', level: 40 },
+  };
+
+  it('xoá: SĐT/email về null, username đổi _DEL_, nhật ký giữ username và giá trị gốc (đã che)', async () => {
+    const userUpdate = jest.fn();
+    const authUpdateMany = jest.fn();
+    const tx = {
+      user: { update: userUpdate },
+      auth: { findFirst: jest.fn().mockResolvedValue({ username: 'nv01' }), updateMany: authUpdateMany },
+    };
+    const service = makeService(
+      { findByIdWithRole: jest.fn().mockResolvedValue(CURRENT), softDelete: jest.fn().mockResolvedValue(true) },
+      { tx },
+    );
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+
+    await service.remove('u1', actorOf(ADMIN));
+
+    expect(userUpdate).toHaveBeenCalledWith({ where: { id: 'u1' }, data: { phoneNumber: null, email: null } });
+    const renamed = (authUpdateMany.mock.calls as [{ data: { username: string } }][])[0][0].data.username;
+    expect(renamed).toMatch(/^nv01_DEL_[0-9a-z]{6}$/);
+    expect(entriesOf(audit)[0]).toMatchObject({
+      event: 'USER.DELETED',
+      entityLabel: 'nv01',
+      searchTerms: ['Nguyễn Văn A', 'nv01'],
+      before: { email: 'a***@x.vn', phoneNumber: '******4321' },
+    });
+  });
+
+  it('username dài 50 ký tự: tên mới vẫn vừa VarChar(50)', async () => {
+    const authUpdateMany = jest.fn();
+    const tx = {
+      user: { update: jest.fn() },
+      auth: { findFirst: jest.fn().mockResolvedValue({ username: 'a'.repeat(50) }), updateMany: authUpdateMany },
+    };
+    const service = makeService(
+      { findByIdWithRole: jest.fn().mockResolvedValue(CURRENT), softDelete: jest.fn().mockResolvedValue(true) },
+      { tx },
+    );
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    await service.remove('u1', actorOf(ADMIN));
+    const renamed = (authUpdateMany.mock.calls as [{ data: { username: string } }][])[0][0].data.username;
+    expect(renamed).toHaveLength(50);
+    expect(renamed).toMatch(/_DEL_[0-9a-z]{6}$/);
+  });
+
+  it('người không có tài khoản đăng nhập: không đụng bảng auths', async () => {
+    const authUpdateMany = jest.fn();
+    const tx = {
+      user: { update: jest.fn() },
+      auth: { findFirst: jest.fn().mockResolvedValue(null), updateMany: authUpdateMany },
+    };
+    const service = makeService(
+      { findByIdWithRole: jest.fn().mockResolvedValue(CURRENT), softDelete: jest.fn().mockResolvedValue(true) },
+      { tx },
+    );
+    jest.spyOn(service, 'assertNotSuperAdminTarget').mockResolvedValue(undefined);
+    await service.remove('u1', actorOf(ADMIN));
+    expect(authUpdateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('UserService — khôi phục người dùng', () => {
+  const DELETED = {
+    id: 'u1',
+    isDeleted: true,
+    fullName: 'Nguyễn Văn A',
+    status: 'ACTIVE',
+    branchId: CN1,
+    email: null,
+    phoneNumber: null,
+    role: { code: 'SALES_STAFF', level: 40, isDeleted: false },
+  };
+
+  function setup(over: { target?: unknown; tx?: Record<string, unknown>; prisma?: Record<string, unknown> } = {}) {
+    const userUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const authUpdate = jest.fn();
+    const restoredRow = { ...DELETED, isDeleted: false, status: 'INACTIVE', phoneNumber: '0912345678' };
+    const tx = {
+      user: { updateMany: userUpdateMany, findUniqueOrThrow: jest.fn().mockResolvedValue(restoredRow) },
+      auth: { findFirst: jest.fn().mockResolvedValue({ id: 'a1', username: 'nv01_DEL_abc123' }), update: authUpdate },
+      ...over.tx,
+    };
+    const service = makeService(
+      { findAnyByIdWithRole: jest.fn().mockResolvedValue(over.target === undefined ? DELETED : over.target) },
+      {
+        tx,
+        prisma: {
+          branch: { findFirst: jest.fn().mockResolvedValue({ id: CN1 }) },
+          ...over.prisma,
+        },
+      },
+    );
+    return { service, userUpdateMany, authUpdate };
+  }
+
+  it('khôi phục: bỏ cờ xoá, INACTIVE, gán SĐT từ body, trả lại username gốc, thu hồi phiên, ghi USER.RESTORED', async () => {
+    const { service, userUpdateMany, authUpdate } = setup();
+    const result = await service.restore('u1', { phoneNumber: '0912345678' }, actorOf(ADMIN));
+
+    expect(userUpdateMany).toHaveBeenCalledWith({
+      where: { id: 'u1', isDeleted: true },
+      data: expect.objectContaining({ isDeleted: false, status: 'INACTIVE', phoneNumber: '0912345678' }) as object,
+    });
+    expect((userUpdateMany.mock.calls as [{ data: object }][])[0][0].data).not.toHaveProperty('email');
+    expect(authUpdate).toHaveBeenCalledWith({
+      where: { id: 'a1' },
+      data: expect.objectContaining({ username: 'nv01', isDeleted: false }) as object,
+    });
+    expect(result.auth).toEqual({ username: 'nv01' });
+    expect(entriesOf(audit)[0]).toMatchObject({
+      event: 'USER.RESTORED',
+      entityLabel: 'nv01',
+      after: { status: 'INACTIVE', phoneNumber: '******5678' },
+    });
+  });
+
+  it('username/SĐT đã bị người khác dùng → 1601', async () => {
+    const dup = new Prisma.PrismaClientKnownRequestError('Unique', {
+      code: 'P2002',
+      clientVersion: 'x',
+      meta: { target: ['username'] },
+    });
+    const { service } = setup({
+      tx: {
+        auth: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'a1', username: 'nv01_DEL_abc123' }),
+          update: jest.fn().mockRejectedValue(dup),
+        },
+      },
+    });
+    expect(await codeOf(service.restore('u1', {}, actorOf(ADMIN)))).toBe(ErrorCode.DUPLICATE_CODE);
+  });
+
+  it('người chưa bị xoá → 1701; không tồn tại → 1200', async () => {
+    expect(
+      await codeOf(setup({ target: { ...DELETED, isDeleted: false } }).service.restore('u1', {}, actorOf(ADMIN))),
+    ).toBe(ErrorCode.INVALID_DOCUMENT_STATE);
+    expect(await codeOf(setup({ target: null }).service.restore('u1', {}, actorOf(ADMIN)))).toBe(
+      ErrorCode.USER_NOT_FOUND,
+    );
+  });
+
+  it('ngoài chi nhánh của PM → 1200; SUPER_ADMIN → 1604; chính mình → 1605; cùng cấp → 1508', async () => {
+    const other = { ...DELETED, branchId: CN2 };
+    expect(await codeOf(setup({ target: other }).service.restore('u1', {}, actorOf(MANAGER_CN1)))).toBe(
+      ErrorCode.USER_NOT_FOUND,
+    );
+    const root = { ...DELETED, role: { code: 'SUPER_ADMIN', level: 100, isDeleted: false } };
+    expect(await codeOf(setup({ target: root }).service.restore('u1', {}, actorOf(ADMIN)))).toBe(
+      ErrorCode.SUPER_ADMIN_PROTECTED,
+    );
+    expect(await codeOf(setup().service.restore('u1', {}, actorOf(caller('u1'))))).toBe(
+      ErrorCode.SELF_OPERATION_FORBIDDEN,
+    );
+    const peer = { ...DELETED, role: { code: 'ADMIN', level: 80, isDeleted: false }, branchId: null };
+    expect(await codeOf(setup({ target: peer }).service.restore('u1', {}, actorOf(ADMIN)))).toBe(
+      ErrorCode.ROLE_LEVEL_FORBIDDEN,
+    );
+  });
+
+  it('vai trò đã bị xoá → 1602, không khôi phục', async () => {
+    const t = { ...DELETED, role: { code: 'SALES_STAFF', level: 40, isDeleted: true } };
+    const { service, userUpdateMany } = setup({ target: t });
+    expect(await codeOf(service.restore('u1', {}, actorOf(ADMIN)))).toBe(ErrorCode.INVALID_REFERENCE);
+    expect(userUpdateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('UserService.listDeleted — lọc vai trò', () => {
+  it('roleCode + excludeCustomer giữ CẢ hai điều kiện (AND), không cái sau đè cái trước', async () => {
+    const findDeletedPage = jest.fn().mockResolvedValue(EMPTY_PAGE);
+    const service = makeService({ findDeletedPage });
+    await service.listDeleted(
+      { roleCode: AuthRole.SALES_STAFF, excludeCustomer: true, page: 1, limit: 10 } as never,
+      ADMIN,
+    );
+    const [where] = findDeletedPage.mock.calls[0] as [Record<string, unknown>];
+    expect(where.AND).toEqual([
+      { role: { code: AuthRole.SALES_STAFF } },
+      { role: { code: { not: AuthRole.CUSTOMER } } },
+    ]);
   });
 });

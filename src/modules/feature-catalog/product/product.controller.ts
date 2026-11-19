@@ -8,6 +8,12 @@ import { PermissionGuard } from '../../feature-auth/permission/guards/permission
 import { CreateProductRequest, UpdateProductRequest } from './dtos/product.request';
 import { ProductQuery } from './dtos/product.query';
 import { ProductService } from './product.service';
+import { AuthRole } from 'src/common/types/common.enum';
+import { ErrorCode } from 'src/common/types/error-code';
+import type { JwtUser } from '../../feature-auth/authz/types/authz.types';
+import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+import { permissionError } from '../../feature-auth/permission/permission.error';
+import { PermissionService } from '../../feature-auth/permission/permission.service';
 
 @Controller('product')
 @ApiTags('Product')
@@ -18,7 +24,10 @@ import { ProductService } from './product.service';
 })
 @UseGuards(AuthzGuard, PermissionGuard)
 export class ProductController {
-  constructor(private readonly productService: ProductService) {}
+  constructor(
+    private readonly productService: ProductService,
+    private readonly permissions: PermissionService,
+  ) {}
 
   @RequirePermissions('product:read')
   @Get()
@@ -26,8 +35,17 @@ export class ProductController {
     description:
       'Danh sách sản phẩm kèm nhóm/hãng/đơn vị cơ bản tóm tắt. Tìm theo mã/mã vạch/tên/hoạt chất, lọc theo nhóm, hãng, đơn vị, trạng thái, dạng bào chế, thuốc kê đơn.',
   })
-  list(@Query() query: ProductQuery) {
-    return this.productService.list(query);
+  async list(@Query() query: ProductQuery, @CurrentUser() user: JwtUser) {
+    // `deleted=true` (xem hàng đã xoá để khôi phục) chỉ dành cho người có quyền xoá sản phẩm.
+    if (query.deleted) await this.assertCanDelete(user);
+    return this.productService.list(query, query.deleted === true);
+  }
+
+  private async assertCanDelete(user: JwtUser): Promise<void> {
+    if (user.role === AuthRole.SUPER_ADMIN) return;
+    if (!(await this.permissions.getGrantedCodes(user.role)).has('product:delete')) {
+      throw permissionError(ErrorCode.PERMISSION_DENIED);
+    }
   }
 
   @RequirePermissions('product:read')
@@ -66,5 +84,15 @@ export class ProductController {
   @ApiOperation({ description: 'Xoá mềm sản phẩm và toàn bộ đơn vị bán đang hoạt động trong một transaction.' })
   remove(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
     return this.productService.remove(id, actor);
+  }
+
+  @RequirePermissions('product:delete')
+  @Post(':id/restore')
+  @ApiOperation({
+    description:
+      'Khôi phục sản phẩm đã xoá mềm cùng các đơn vị bán bị xoá cùng lúc. Mã sản phẩm giữ nguyên; mã vạch đã nhả khi xoá nên rỗng, nhập lại bằng PATCH. Sản phẩm chưa xoá → 1600.',
+  })
+  restore(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
+    return this.productService.restore(id, actor);
   }
 }

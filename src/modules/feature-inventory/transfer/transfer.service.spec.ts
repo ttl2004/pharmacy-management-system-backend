@@ -65,6 +65,7 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
       .fn()
       .mockResolvedValue({ batchIdByRefItem: new Map([['i1', 'b-dest']]), movements: [], auditEntries: [] }),
     returnToBatches: jest.fn().mockResolvedValue([]),
+    assertCanIntake: jest.fn().mockResolvedValue(undefined),
   };
   const codes = { next: jest.fn().mockResolvedValue('DC000001') };
   const audit = { record: jest.fn() };
@@ -172,6 +173,17 @@ describe('TransferService — xuất/nhận/huỷ theo đúng phía', () => {
     ];
     expect(entries[0]).toMatchObject({ type: 'TRANSFER_OUT', quantity: -30, unitCost: 900, refItemId: 'i1' });
     expect(options.preLocked).toBeDefined();
+  });
+
+  it('K4: chi nhánh nhận không nhận được lô (khác hạn dùng / cách ly) → xuất bị từ chối, chưa trừ kho', async () => {
+    const { service, ledger, intake } = makeService({ findHead: jest.fn().mockResolvedValue(pendingHead) });
+    intake.assertCanIntake.mockRejectedValue(new Error('lô L1 đang có hạn 2027-01-01'));
+    await expect(service.ship('t1', PM_A)).rejects.toThrow('lô L1');
+    expect(intake.assertCanIntake).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ branchId: B, lines: [expect.objectContaining({ batchNumber: 'L1', quantity: 30 })] }),
+    );
+    expect(ledger.apply).not.toHaveBeenCalled();
   });
 
   it('lô hết hạn trong lúc chờ xuất → 1704', async () => {

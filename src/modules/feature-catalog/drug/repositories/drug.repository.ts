@@ -96,7 +96,7 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
       UPDATE "products" p
       SET "requiresPrescription" = d."isPrescription", "updatedAt" = ${syncedAt}, "updatedBy" = ${actorId}::uuid
       FROM "drugs" d
-      WHERE p."drugId" = d."id" AND p."requiresPrescription" <> d."isPrescription"
+      WHERE p."drugId" = d."id" AND p."isDeleted" = false AND p."requiresPrescription" <> d."isPrescription"
       RETURNING p."id" AS "id", p."code" AS "code", NOT d."isPrescription" AS "before", d."isPrescription" AS "after"`;
   }
 

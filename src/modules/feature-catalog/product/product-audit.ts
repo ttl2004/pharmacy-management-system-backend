@@ -108,6 +108,10 @@ export function productUpdatedEntries(
   return entries;
 }
 
+export function productRestoredEntry(id: string, row: Row): AuditEntry {
+  return { event: 'PRODUCT.RESTORED', ...base(id, row), after: pickAuditFields(row, FIELDS) };
+}
+
 export function productDeletedEntry(id: string, row: Row): AuditEntry {
   return { event: 'PRODUCT.DELETED', ...base(id, row), before: pickAuditFields(row, FIELDS) };
 }

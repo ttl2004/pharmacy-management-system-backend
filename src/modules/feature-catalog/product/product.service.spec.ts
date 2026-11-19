@@ -41,6 +41,10 @@ function makeService(
     updateUnit: jest.fn().mockResolvedValue(undefined),
     softDeleteUnits: jest.fn().mockResolvedValue(undefined),
     softDeleteProduct: jest.fn().mockResolvedValue(undefined),
+    findDeletedWith: jest.fn().mockResolvedValue(null),
+    restoreProduct: jest.fn().mockResolvedValue(1),
+    restoreUnitsDeletedAt: jest.fn().mockResolvedValue(0),
+    findLiveUnits: jest.fn().mockResolvedValue([{ unitId: 'unit-vien', conversionRate: 1, isBaseUnit: true }]),
     hasInventoryHistory: jest.fn().mockResolvedValue(false),
     hasOpenInventory: jest.fn().mockResolvedValue(false),
     findActiveDrug: jest.fn().mockResolvedValue({ id: 'drug-id', isPrescription: false }),
@@ -1114,8 +1118,17 @@ describe('ProductService — xoá', () => {
 
     await expect(service.remove('product-id', ACTOR)).resolves.toEqual({ success: true });
 
-    expect(softDeleteUnits).toHaveBeenCalledWith(expect.anything(), ['row-vien', 'row-vi'], 'caller-id');
-    expect(softDeleteProduct).toHaveBeenCalledWith(expect.anything(), 'product-id', 'caller-id');
+    // Cùng một mốc thời gian cho cả hai để khôi phục nhận ra dòng xoá cùng lúc.
+    expect(softDeleteUnits).toHaveBeenCalledWith(
+      expect.anything(),
+      ['row-vien', 'row-vi'],
+      'caller-id',
+      expect.any(Date),
+    );
+    expect(softDeleteProduct).toHaveBeenCalledWith(expect.anything(), 'product-id', 'caller-id', expect.any(Date));
+    const unitsDate = (softDeleteUnits.mock.calls[0] as unknown[])[3];
+    const productDate = (softDeleteProduct.mock.calls[0] as unknown[])[3];
+    expect(unitsDate).toBe(productDate);
   });
 
   it('lỗi khi ghi thì ném ra ngoài, không trả success', async () => {
@@ -1312,5 +1325,118 @@ describe('ProductService — nhật ký', () => {
         searchTerms: ['SP0001', 'Paracetamol 500mg'],
       }),
     ]);
+  });
+});
+
+describe('ProductService — khôi phục', () => {
+  const deletedAt = new Date('2026-11-01T00:00:00Z');
+  const deletedRow = { ...existingProduct, name: 'Paracetamol 500mg', barcode: null, updatedAt: deletedAt };
+
+  it('sản phẩm không ở trạng thái đã xoá thì báo RECORD_NOT_FOUND và không ghi gì', async () => {
+    const restoreProduct = jest.fn();
+    const restoreUnitsDeletedAt = jest.fn();
+    const audit = makeAudit();
+    const service = makeService(
+      { findDeletedWith: jest.fn().mockResolvedValue(null), restoreProduct, restoreUnitsDeletedAt },
+      {},
+      audit,
+    );
+
+    await expect(service.restore('product-id', ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.RECORD_NOT_FOUND,
+    });
+    expect(restoreProduct).not.toHaveBeenCalled();
+    expect(restoreUnitsDeletedAt).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('khôi phục Product và dòng đơn vị xoá cùng mốc thời gian, ghi PRODUCT.RESTORED', async () => {
+    const restoreProduct = jest.fn().mockResolvedValue(1);
+    const restoreUnitsDeletedAt = jest.fn().mockResolvedValue(2);
+    const audit = makeAudit();
+    const service = makeService(
+      {
+        findDeletedWith: jest.fn().mockResolvedValue(deletedRow),
+        findDetail: jest.fn().mockResolvedValue({ id: 'product-id' }),
+        findLiveUnits: jest.fn().mockResolvedValue([{ unitId: 'unit-vien', conversionRate: 1, isBaseUnit: true }]),
+        restoreProduct,
+        restoreUnitsDeletedAt,
+      },
+      {},
+      audit,
+    );
+
+    await expect(service.restore('product-id', ACTOR)).resolves.toEqual({ id: 'product-id' });
+
+    expect(restoreUnitsDeletedAt).toHaveBeenCalledWith(expect.anything(), 'product-id', deletedAt, 'caller-id');
+    expect(restoreProduct).toHaveBeenCalledWith(expect.anything(), 'product-id', 'caller-id');
+    expect(recordedEntries(audit)).toEqual([
+      expect.objectContaining({
+        event: 'PRODUCT.RESTORED',
+        entityId: 'product-id',
+        entityLabel: 'SP0001',
+        after: expect.objectContaining({ code: 'SP0001', barcode: null }) as unknown,
+      }),
+    ]);
+  });
+
+  it('không xác định được đơn vị cơ bản sau khi hồi sinh dòng → 1701, không khôi phục Product', async () => {
+    const restoreProduct = jest.fn();
+    const audit = makeAudit();
+    const service = makeService(
+      {
+        findDeletedWith: jest.fn().mockResolvedValue(deletedRow),
+        findLiveUnits: jest.fn().mockResolvedValue([]),
+        restoreProduct,
+      },
+      {},
+      audit,
+    );
+
+    await expect(service.restore('product-id', ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.INVALID_DOCUMENT_STATE,
+    });
+    expect(restoreProduct).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('thuốc liên kết không còn hiệu lực → INVALID_REFERENCE; trùng quy cách → DUPLICATE_CODE', async () => {
+    const linked = { ...deletedRow, drugId: 'drug-id' };
+    const gone = makeService({
+      findDeletedWith: jest.fn().mockResolvedValue(linked),
+      findActiveDrug: jest.fn().mockResolvedValue(null),
+    });
+    await expect(gone.restore('product-id', ACTOR)).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
+
+    const twin = makeService({
+      findDeletedWith: jest.fn().mockResolvedValue(linked),
+      findPacksByDrug: jest
+        .fn()
+        .mockResolvedValue([{ code: 'SP9', units: [{ unitId: 'unit-vien', conversionRate: 1 }] }]),
+    });
+    await expect(twin.restore('product-id', ACTOR)).rejects.toMatchObject({ errorCode: ErrorCode.DUPLICATE_CODE });
+  });
+
+  it('bị khôi phục chen ngang (updateMany trả 0) thì báo RECORD_NOT_FOUND', async () => {
+    const audit = makeAudit();
+    const service = makeService(
+      { findDeletedWith: jest.fn().mockResolvedValue(deletedRow), restoreProduct: jest.fn().mockResolvedValue(0) },
+      {},
+      audit,
+    );
+
+    await expect(service.restore('product-id', ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.RECORD_NOT_FOUND,
+    });
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('list với onlyDeleted chuyển cờ xuống repository', async () => {
+    const findPageWithSummary = jest.fn().mockResolvedValue({ hits: [], total: 0, page: 1, totalPages: 0, limit: 10 });
+    const service = makeService({ findPageWithSummary });
+
+    await service.list({ page: 1, limit: 10 }, true);
+
+    expect(findPageWithSummary).toHaveBeenCalledWith({}, expect.objectContaining({ deleted: true }));
   });
 });

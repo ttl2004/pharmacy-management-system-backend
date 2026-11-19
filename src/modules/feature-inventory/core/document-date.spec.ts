@@ -1,5 +1,5 @@
 import { ErrorCode } from 'src/common/types/error-code';
-import { assertDocumentDate, DOCUMENT_BACKDATE_DAYS } from './document-date';
+import { assertDocumentDate, DOCUMENT_BACKDATE_DAYS, parseDocumentDate } from './document-date';
 
 // 18/11/2026 10:00 giờ VN
 const NOW = new Date('2026-11-18T03:00:00.000Z');
@@ -31,5 +31,34 @@ describe('assertDocumentDate (L9): không ở tương lai, lùi tối đa 7 ngà
     expect(() => assertDocumentDate(vn('2062-01-01T00:00:00'), 'Ngày chứng từ', NOW)).toThrow(
       /Ngày chứng từ.*tương lai/,
     );
+  });
+});
+
+describe('parseDocumentDate (K5): ngày không giờ so theo ngày lịch giờ VN', () => {
+  // 20/11/2026 06:30 giờ VN = 19/11 23:30 UTC — `new Date('2026-11-20')` (07:00 VN) sẽ bị coi là tương lai.
+  const EARLY = new Date('2026-11-19T23:30:00.000Z');
+
+  it('06:30 sáng, gửi ngày hôm nay (date-only) → được, lưu đúng thời điểm hiện tại', () => {
+    expect(() => assertDocumentDate(new Date('2026-11-20'), 'Ngày chi', EARLY)).toThrow(/tương lai/);
+    expect(parseDocumentDate('2026-11-20', 'Ngày chi', EARLY)).toEqual(EARLY);
+  });
+
+  it('ngày mai → tương lai; 7 ngày trước được, 8 ngày trước bị chặn', () => {
+    expect(() => parseDocumentDate('2026-11-21', 'Ngày chi', EARLY)).toThrow(/Ngày chi không được ở tương lai/);
+    expect(parseDocumentDate('2026-11-13', 'Ngày chi', EARLY)).toEqual(new Date('2026-11-13T00:00:00.000+07:00'));
+    expect(() => parseDocumentDate('2026-11-12', 'Ngày chi', EARLY)).toThrow(/7 ngày/);
+  });
+
+  it('có giờ: giữ hành vi cũ (tương lai bị chặn)', () => {
+    expect(() => parseDocumentDate('2026-11-20T07:00:00+07:00', 'Ngày chi', EARLY)).toThrow(/tương lai/);
+    expect(parseDocumentDate('2026-11-20T06:00:00+07:00', 'Ngày chi', EARLY)).toEqual(
+      new Date('2026-11-20T06:00:00+07:00'),
+    );
+  });
+});
+
+describe('parseDocumentDate: chuỗi ngày hỏng', () => {
+  it('không phải ngày → 400 thay vì lọt xuống DB', () => {
+    expect(() => parseDocumentDate('2026-13-45T10:00:00+07:00', 'Ngày chi')).toThrow('Ngày chi không hợp lệ');
   });
 });

@@ -101,6 +101,26 @@ export class StockIntakeService {
     private readonly ledger: StockLedgerService,
   ) {}
 
+  /**
+   * Kiểm trước, KHÔNG ghi gì: hàng này đưa vào chi nhánh `branchId` có bị từ chối không? Dùng đúng luật của `intake`
+   * (lô cùng số khác hạn dùng đã có hàng/đã phát sinh sổ; lô đang cách ly) để điều chuyển báo lỗi ngay lúc XUẤT thay vì
+   * kẹt IN_TRANSIT tới lúc nhận. Đọc không khoá nên chỉ là kiểm sớm — `intake` lúc nhận vẫn kiểm lại (đua).
+   */
+  async assertCanIntake(ctx: InventoryTxContext, request: Pick<IntakeRequest, 'branchId' | 'lines'>): Promise<void> {
+    const { tx } = ctx;
+    if (!request.lines.length) return;
+    const keys = request.lines.map((line) => ({ productId: line.productId, batchNumber: line.batchNumber }));
+    const existing = await this.batches.findByKey(tx, request.branchId, keys);
+    const batchByKey = new Map(existing.map((batch) => [`${batch.productId}|${batch.batchNumber}`, batch]));
+    await this.reconcileExpiry(tx, request, batchByKey, true);
+    for (const line of request.lines) {
+      const batch = batchByKey.get(`${line.productId}|${line.batchNumber}`);
+      if (line.quantity > 0 && batch?.status === BatchStatus.QUARANTINE) {
+        throw inventoryError(ErrorCode.BATCH_NOT_AVAILABLE, `lô ${line.batchNumber} đang ${batch.status}`);
+      }
+    }
+  }
+
   async intake(ctx: InventoryTxContext, request: IntakeRequest): Promise<IntakeResult> {
     const { tx } = ctx;
     if (!request.lines.length) return { batchIdByRefItem: new Map(), movements: [], auditEntries: [] };
@@ -125,7 +145,7 @@ export class StockIntakeService {
     await this.reconcileExpiry(tx, request, batchByKey);
     const auditEntries = await this.inheritRecalls(tx, locked, new Set(newRows.map((row) => row.id)), request.actorId);
 
-    const costs: { id: string; importPrice: number }[] = [];
+    const added: { batchId: string; quantity: number; unitCost: number }[] = [];
     const batchIdByRefItem = new Map<string, string>();
     const entries = request.lines.flatMap((line) => {
       const batch = batchByKey.get(`${line.productId}|${line.batchNumber}`);
@@ -137,10 +157,7 @@ export class StockIntakeService {
       if (batch.status === BatchStatus.QUARANTINE) {
         throw inventoryError(ErrorCode.BATCH_NOT_AVAILABLE, `lô ${line.batchNumber} đang ${batch.status}`);
       }
-      costs.push({
-        id: batch.id,
-        importPrice: weightedAverageCost(batch.quantityOnHand, batch.importPrice, line.quantity, line.unitCost),
-      });
+      added.push({ batchId: batch.id, quantity: line.quantity, unitCost: line.unitCost });
       return [
         {
           batchId: batch.id,
@@ -154,6 +171,9 @@ export class StockIntakeService {
       ];
     });
 
+    // Cùng một lô xuất hiện ở nhiều dòng thì bình quân gia quyền một lần cho cả lô.
+    const lockedById = new Map(locked.map((batch) => [batch.id, batch]));
+    const costs = averageCostsPerBatch(added, (id) => lockedById.get(id) as IntakeBatch);
     await this.batches.updateCosts(tx, costs, request.actorId);
     const movements = await this.ledger.apply(ctx, entries, request.actorId, { preLocked: locked });
     return { batchIdByRefItem, movements, auditEntries };
@@ -171,14 +191,16 @@ export class StockIntakeService {
     const locked = await this.ledger.lockBatches(ctx, batchIds);
     const batchById = new Map(locked.map((batch) => [batch.id, batch]));
 
-    const costs = request.lines.map((line) => {
-      const batch = batchById.get(line.batchId);
-      if (!batch) throw new Error(`Không khoá được lô ${line.batchId} để hoàn hàng`);
-      return {
-        id: batch.id,
-        importPrice: weightedAverageCost(batch.quantityOnHand, batch.importPrice, line.quantity, line.unitCost),
-      };
-    });
+    // Một lô có thể quay về qua nhiều dòng (vd. 1 hộp + 3 viên): gộp lượng và giá trị theo lô rồi bình quân MỘT lần,
+    // nếu không mỗi dòng tính từ cùng số tồn cũ và dòng cuối ghi đè các dòng trước.
+    const costs = averageCostsPerBatch(
+      request.lines.map((line) => ({ batchId: line.batchId, quantity: line.quantity, unitCost: line.unitCost })),
+      (id) => {
+        const batch = batchById.get(id);
+        if (!batch) throw new Error(`Không khoá được lô ${id} để hoàn hàng`);
+        return batch;
+      },
+    );
     await this.batches.updateCosts(ctx.tx, costs, request.actorId);
 
     return this.ledger.apply(
@@ -286,8 +308,9 @@ export class StockIntakeService {
    */
   private async reconcileExpiry(
     tx: InventoryTxContext['tx'],
-    request: IntakeRequest,
+    request: Pick<IntakeRequest, 'lines'> & { actorId?: string },
     batchByKey: Map<string, LockedBatch>,
+    checkOnly = false,
   ): Promise<void> {
     const mismatched = request.lines.flatMap((line) => {
       const batch = batchByKey.get(`${line.productId}|${line.batchNumber}`);
@@ -309,6 +332,7 @@ export class StockIntakeService {
     );
     const established = mismatched.find(({ batch }) => used.has(batch.id));
     if (established) throw reject(established);
+    if (checkOnly) return;
 
     await this.batches.resetDates(
       tx,
@@ -317,7 +341,7 @@ export class StockIntakeService {
         expiryDate: toDateOnlyString(line.expiryDate),
         manufacturingDate: line.manufacturingDate ? toDateOnlyString(line.manufacturingDate) : null,
       })),
-      request.actorId,
+      request.actorId as string,
     );
   }
 }
@@ -330,6 +354,28 @@ export function weightedAverageCost(onHand: number, currentCost: number, addQuan
   const total = onHand + addQuantity;
   if (total <= 0) return addCost;
   return Math.round((onHand * currentCost + addQuantity * addCost) / total);
+}
+
+/**
+ * Giá vốn mới theo TỪNG LÔ khi nhiều dòng cùng đưa hàng vào một lô: cộng lượng và giá trị các dòng của lô rồi bình quân
+ * gia quyền với tồn hiện có đúng một lần (bình quân từng dòng riêng lẻ cho kết quả khác và dòng sau đè dòng trước).
+ */
+export function averageCostsPerBatch(
+  lines: readonly { batchId: string; quantity: number; unitCost: number }[],
+  batchOf: (batchId: string) => { quantityOnHand: number; importPrice: number },
+): { id: string; importPrice: number }[] {
+  const addedByBatch = new Map<string, { quantity: number; value: number }>();
+  for (const line of lines) {
+    const added = addedByBatch.get(line.batchId) ?? { quantity: 0, value: 0 };
+    added.quantity += line.quantity;
+    added.value += line.quantity * line.unitCost;
+    addedByBatch.set(line.batchId, added);
+  }
+  return [...addedByBatch].map(([id, added]) => {
+    const batch = batchOf(id);
+    const addCost = added.quantity > 0 ? added.value / added.quantity : 0;
+    return { id, importPrice: weightedAverageCost(batch.quantityOnHand, batch.importPrice, added.quantity, addCost) };
+  });
 }
 
 /**

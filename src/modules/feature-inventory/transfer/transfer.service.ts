@@ -344,6 +344,22 @@ export class TransferService {
 
       const items = await this.transfers.findItems(tx, id);
       const batchIds = items.map((item) => item.batchId);
+      // Chi nhánh nhận phải nhận được đúng các lô này (cùng luật `intake`): lô trùng số khác hạn dùng, lô đang cách ly.
+      // Lỗi ở đây để bên gửi xử lý trước khi hàng rời kho, thay vì phiếu kẹt IN_TRANSIT (chỉ ADMIN huỷ được).
+      await this.intake.assertCanIntake(ctx, {
+        branchId: head.toBranchId,
+        lines: items.map((item) => ({
+          productId: item.productId,
+          batchNumber: item.batch.batchNumber,
+          manufacturingDate: item.batch.manufacturingDate,
+          expiryDate: item.batch.expiryDate,
+          quantity: item.quantity,
+          unitCost: 0,
+          supplierId: item.batch.supplierId,
+          goodsReceiptItemId: null,
+          refItemId: item.id,
+        })),
+      });
       const locked = await this.ledger.lockBatches(ctx, batchIds);
       const batchById = new Map(locked.map((batch) => [batch.id, batch]));
       const today = todayInVietnam();

@@ -9,6 +9,7 @@ import {
   IsString,
   IsUUID,
   Matches,
+  Max,
   MaxLength,
   Min,
   ValidateIf,
@@ -43,6 +44,7 @@ export class CreateCategoryRequest {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(1_000_000, { message: 'Thứ tự tối đa 1.000.000' })
   @ApiPropertyOptional({ example: 0 })
   sortOrder?: number;
 
@@ -80,6 +82,7 @@ export class UpdateCategoryRequest {
   @ValidateIf((_, value) => value !== undefined)
   @IsInt()
   @Min(0)
+  @Max(1_000_000, { message: 'Thứ tự tối đa 1.000.000' })
   @ApiPropertyOptional()
   sortOrder?: number;
 

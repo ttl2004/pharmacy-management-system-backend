@@ -12,7 +12,7 @@ import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-bas
 import { CatalogTransactions, productWriteLocks } from '../catalog-transactions';
 import { CreateProductRequest, ProductUnitRequest, UpdateProductRequest } from './dtos/product.request';
 import { ProductQuery } from './dtos/product.query';
-import { productCreatedEntry, productDeletedEntry, productUpdatedEntries } from './product-audit';
+import { productCreatedEntry, productDeletedEntry, productRestoredEntry, productUpdatedEntries } from './product-audit';
 import { toExtraCreateData, toExtraUpdateData } from './product-extra-fields.mapper';
 import {
   DRUG_INGREDIENTS_SEARCH_FIELD,
@@ -31,7 +31,8 @@ export class ProductService extends AbstractBaseService<Product> {
     super(productRepository);
   }
 
-  async list(query: ProductQuery) {
+  /** `onlyDeleted` do controller quyết (chỉ người có quyền xoá): khi bật, chỉ trả sản phẩm ĐÃ xoá mềm. */
+  async list(query: ProductQuery, onlyDeleted = false) {
     const filter: BaseWhere<Product> = {};
     if (query.categoryId) filter.categoryId = query.categoryId;
     if (query.manufacturerId) filter.manufacturerId = query.manufacturerId;
@@ -46,6 +47,7 @@ export class ProductService extends AbstractBaseService<Product> {
       sort: query.sort,
       search: query.search,
       searchFields: ['code', 'barcode', 'name', DRUG_INGREDIENTS_SEARCH_FIELD],
+      deleted: onlyDeleted,
     });
   }
 
@@ -221,12 +223,48 @@ export class ProductService extends AbstractBaseService<Product> {
       const rows = await this.productRepository.findUnitsForReconcile(tx, id);
       const activeIds = rows.filter((row) => !row.isDeleted).map((row) => row.id);
 
-      await this.productRepository.softDeleteUnits(tx, activeIds, callerId);
-      await this.productRepository.softDeleteProduct(tx, id, callerId);
+      // Cùng một mốc thời gian cho Product và các dòng đơn vị: khôi phục dựa vào đó để biết dòng nào xoá cùng lúc.
+      // Hai hàm này đồng thời nhả mã vạch; `existing` đã đọc trước đó nên nhật ký vẫn giữ mã vạch gốc.
+      const deletedAt = new Date();
+      await this.productRepository.softDeleteUnits(tx, activeIds, callerId, deletedAt);
+      await this.productRepository.softDeleteProduct(tx, id, callerId, deletedAt);
       await this.audit.record(tx, auditActorOf(actor), [productDeletedEntry(id, existing)]);
     });
 
     return { success: true };
+  }
+
+  /**
+   * Khôi phục sản phẩm đã xoá mềm cùng các dòng đơn vị bị xoá cùng lúc (không hồi sinh dòng đã bị loại từ trước khi
+   * sửa). Mã sản phẩm giữ nguyên; mã vạch đã nhả khi xoá nên là rỗng — nhập lại bằng thao tác sửa.
+   */
+  async restore(id: string, actor: RequestActor): Promise<ProductDetail> {
+    const callerId = actor.user.userId;
+    await this.transactions.write(productWriteLocks(id, []), async (tx) => {
+      const deleted = await this.productRepository.findDeletedWith(tx, id);
+      if (!deleted) throw this.notFound();
+
+      // Thuốc liên kết phải còn hiệu lực như lúc tạo (có thể đã bị ngừng/xoá khỏi danh mục từ khi sản phẩm bị xoá).
+      if (deleted.drugId) await this.assertActiveDrug(tx, deleted.drugId);
+
+      if (deleted.updatedAt) {
+        await this.productRepository.restoreUnitsDeletedAt(tx, id, deleted.updatedAt, callerId);
+      }
+      const live = await this.productRepository.findLiveUnits(tx, id);
+      const bases = live.filter((u) => u.isBaseUnit && u.conversionRate === 1 && u.unitId === deleted.baseUnitId);
+      if (bases.length !== 1 || live.filter((u) => u.isBaseUnit).length !== 1) {
+        throw new ErrorException({
+          code: ErrorCode.INVALID_DOCUMENT_STATE,
+          message: 'Không khôi phục được sản phẩm: không xác định được đơn vị bán lúc xoá — hãy tạo sản phẩm mới',
+        });
+      }
+      // Cùng luật chống trùng quy cách như tạo/sửa (khoá `drug:<id>`), loại chính sản phẩm này.
+      if (deleted.drugId) await this.assertNoDuplicatePack(tx, deleted.drugId, live, id);
+      if ((await this.productRepository.restoreProduct(tx, id, callerId)) === 0) throw this.notFound();
+      await this.audit.record(tx, auditActorOf(actor), [productRestoredEntry(id, deleted)]);
+    });
+
+    return this.getDetail(id);
   }
 
   /** Cấu hình đơn vị bán là lỗi dữ liệu client gửi (1002), khác với tham chiếu sai (1602). */

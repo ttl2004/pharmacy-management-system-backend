@@ -59,6 +59,32 @@ export class StockBatchRepository {
   }
 
   /**
+   * Đọc (KHÔNG khoá) các lô của chi nhánh theo khoá tự nhiên — cho kiểm tra sớm "nhận được không" lúc xuất điều chuyển.
+   * Không khoá để không chen vào thứ tự khoá của xuất hàng; kiểm thật vẫn nằm ở `intake` lúc nhận.
+   */
+  findByKey(tx: Prisma.TransactionClient, branchId: string, keys: readonly BatchKey[]): Promise<LockedBatch[]> {
+    if (!keys.length) return Promise.resolve([]);
+    return tx.stockBatch.findMany({
+      where: {
+        branchId,
+        isDeleted: false,
+        OR: keys.map((key) => ({ productId: key.productId, batchNumber: key.batchNumber })),
+      },
+      select: {
+        id: true,
+        branchId: true,
+        productId: true,
+        batchNumber: true,
+        expiryDate: true,
+        quantityOnHand: true,
+        reservedQuantity: true,
+        importPrice: true,
+        status: true,
+      },
+    });
+  }
+
+  /**
    * Khoá các lô của chi nhánh theo khoá tự nhiên, thứ tự `id` — cùng thứ tự khoá với `StockLedgerRepository.lockBatches`.
    * Kèm quyết định thu hồi của cùng số lô ở chi nhánh KHÁC (nếu có) để lô vừa tạo thừa hưởng — MỘT câu lệnh. Chỉ
    * quyết định của người có phạm vi toàn chuỗi (`chainWideRoles`) mới lan sang chi nhánh khác: thu hồi của quản lý

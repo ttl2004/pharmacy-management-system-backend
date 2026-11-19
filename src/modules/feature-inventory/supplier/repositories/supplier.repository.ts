@@ -14,8 +14,8 @@ export class SupplierRepository extends PrismaBaseRepository<Supplier> {
   }
 
   /** Cột NCC + nhóm + người tạo, thứ tự tuỳ ý (caller tự xếp lại theo id). */
-  findManyByIds(ids: string[]) {
-    if (ids.length === 0) return Promise.resolve([]);
+  async findManyByIds(ids: string[]) {
+    if (ids.length === 0) return [];
     return this.prisma.supplier.findMany({
       where: { id: { in: ids }, isDeleted: false },
       include: {

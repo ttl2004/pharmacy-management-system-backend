@@ -19,7 +19,7 @@ import { resolveWriteBranch } from '../core/inventory-scope';
 import { CancelDebtDocumentRequest, CreateSupplierPaymentRequest } from './dtos/supplier-payment.request';
 import { PaymentRow, SupplierPaymentRepository } from './repositories/supplier-payment.repository';
 import { SupplierDebtRepository } from './repositories/supplier-debt.repository';
-import { assertDocumentDate } from '../core/document-date';
+import { parseDocumentDate } from '../core/document-date';
 import { assertPaymentWithinDebt } from './supplier-debt-guards';
 import { SupplierPaymentWriter } from './supplier-payment.writer';
 
@@ -30,11 +30,20 @@ function branchesOf(row: Pick<PaymentRow, 'branchId' | 'allocations'>): string[]
   return [...new Set([row.branchId, ...row.allocations.map((a) => a.receipt.branchId)])];
 }
 
-function present(row: PaymentRow, canCancel: boolean) {
-  const { cancelledAt, amount, allocations, ...rest } = row;
+/**
+ * Phiếu chi nhiều chi nhánh (ADMIN chi 30tr: 10tr cho phiếu nhập CN A, 20tr cho CN B): người có phạm vi CHI NHÁNH chỉ
+ * thấy các dòng phân bổ thuộc chi nhánh mình; `amount` là tổng các dòng đó (không lộ số tiền chi nhánh khác) và
+ * `partial: true` báo phiếu còn phần ngoài phạm vi. Phạm vi toàn chuỗi: nguyên vẹn, `partial: false`.
+ */
+function present(row: PaymentRow, canCancel: boolean, scope?: BranchScope) {
+  const { cancelledAt, amount, allocations: all, ...rest } = row;
+  const allocations = scope ? all.filter((a) => isInBranchScope(scope, a.receipt.branchId)) : all;
+  const partial = allocations.length < all.length;
+  const visibleAmount = partial ? allocations.reduce((sum, a) => sum + a.amount, 0n) : amount;
   return {
     ...rest,
-    amount: Number(amount),
+    amount: Number(visibleAmount),
+    partial,
     status: cancelledAt ? 'CANCELLED' : 'COMPLETED',
     cancelledAt,
     allocations: allocations.map((a) => ({
@@ -63,8 +72,7 @@ export class SupplierPaymentService {
   async create(dto: CreateSupplierPaymentRequest, actor: RequestActor) {
     const scope = resolveBranchScope(actor.user);
     const branchId = resolveWriteBranch(scope, dto.branchId, 'Cần chọn chi nhánh chi tiền (branchId)');
-    const paidAt = new Date(dto.paidAt);
-    assertDocumentDate(paidAt, 'Ngày chi');
+    const paidAt = parseDocumentDate(dto.paidAt, 'Ngày chi');
     const ids = dto.allocations.map((row) => row.receiptId);
     if (new Set(ids).size !== ids.length) throw invalidReference('một phiếu nhập chỉ được phân bổ một lần');
 
@@ -116,7 +124,7 @@ export class SupplierPaymentService {
       );
       await this.audit.record(tx, auditActorOf(actor), created.auditEntries);
       const row = (await this.payments.findById(created.id, tx))!;
-      return present(row, await this.canCancel(row, scope, actor));
+      return present(row, await this.canCancel(row, scope, actor), scope);
     });
   }
 
@@ -125,7 +133,7 @@ export class SupplierPaymentService {
     const scope = resolveBranchScope(actor.user);
     const row = await this.payments.findById(id);
     if (!row || !branchesOf(row).some((b) => isInBranchScope(scope, b))) throw notFound();
-    return present(row, await this.canCancel(row, scope, actor));
+    return present(row, await this.canCancel(row, scope, actor), scope);
   }
 
   /** Huỷ cần quyền trên MỌI chi nhánh liên quan (huỷ làm nợ tăng lại ở mọi phiếu được phân bổ) — không → 1506. */

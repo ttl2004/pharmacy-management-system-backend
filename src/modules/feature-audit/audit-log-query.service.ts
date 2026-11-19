@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { ErrorException } from 'src/common/exceptions/error.exception';
+import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import { addDaysToDateOnly, daysBetweenDateOnly, vietnamDayStartUtc } from 'src/common/utils/date-only.util';
 import { afterCursorDesc, decodeCursor, toKeysetPage, type KeysetCursor } from 'src/common/utils/keyset-cursor';
@@ -62,6 +63,18 @@ export function buildScopeWhere(scope: BranchScope, query: AuditLogQuery): Prism
   return { AND: and };
 }
 
+/**
+ * Cùng luật với `security_events`: ngoài SUPER_ADMIN ra không ai thấy dòng do SUPER_ADMIN thực hiện (dòng không có
+ * vai trò — hệ thống/khách — vẫn hiện). Áp cho cả danh sách, tìm kiếm và chi tiết.
+ */
+function hidesSuperAdmin(actor: RequestActor): boolean {
+  return actor.user.role !== AuthRole.SUPER_ADMIN;
+}
+
+function hideSuperAdminWhere(): Prisma.AuditLogWhereInput {
+  return { OR: [{ actorRoleCode: null }, { actorRoleCode: { not: AuthRole.SUPER_ADMIN } }] };
+}
+
 /** Khoảng ngày giờ VN → `[gte, lt)` UTC. */
 function dateRange(query: AuditLogQuery) {
   return {
@@ -100,9 +113,16 @@ export class AuditLogQueryService {
     const cursor = query.cursor ? decodeCursor(query.cursor) : undefined;
 
     const rows = term
-      ? await this.searchRows(scope, query, term, cursor)
+      ? await this.searchRows(scope, query, term, hidesSuperAdmin(actor), cursor)
       : await this.prisma.auditLog.findMany({
-          where: { AND: [scopeWhere, ...this.filterConditions(query), ...(cursor ? [afterCursorDesc(cursor)] : [])] },
+          where: {
+            AND: [
+              scopeWhere,
+              ...(hidesSuperAdmin(actor) ? [hideSuperAdminWhere()] : []),
+              ...this.filterConditions(query),
+              ...(cursor ? [afterCursorDesc(cursor)] : []),
+            ],
+          },
           select: LOG_SELECT,
           orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           take: query.limit + 1,
@@ -114,7 +134,9 @@ export class AuditLogQueryService {
   /** Chi tiết một dòng; ngoài phạm vi hoặc không tồn tại → 404 (không lộ sự tồn tại). */
   async get(id: string, actor: RequestActor) {
     const scopeWhere = buildScopeWhere(resolveBranchScope(actor.user), new AuditLogQuery());
-    const row = await this.prisma.auditLog.findFirst({ where: { AND: [{ id }, scopeWhere] }, select: LOG_SELECT });
+    const and: Prisma.AuditLogWhereInput[] = [{ id }, scopeWhere];
+    if (hidesSuperAdmin(actor)) and.push(hideSuperAdminWhere());
+    const row = await this.prisma.auditLog.findFirst({ where: { AND: and }, select: LOG_SELECT });
     if (!row) throw new NotFoundException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Không tìm thấy dòng nhật ký' });
     return (await this.present([row]))[0];
   }
@@ -143,8 +165,14 @@ export class AuditLogQueryService {
    * Tìm kiếm: MỘT câu raw mang đủ mọi điều kiện (phạm vi, ngày, bộ lọc, cursor) cùng `searchText LIKE` để index
    * trigram thu hẹp trước rồi mới lấy trang; sau đó nạp dòng theo id và giữ thứ tự của câu raw.
    */
-  private async searchRows(scope: BranchScope, query: AuditLogQuery, term: string, cursor?: KeysetCursor) {
-    const sql = this.buildSearchSql(scope, query, term, cursor);
+  private async searchRows(
+    scope: BranchScope,
+    query: AuditLogQuery,
+    term: string,
+    hideSuperAdmin: boolean,
+    cursor?: KeysetCursor,
+  ) {
+    const sql = this.buildSearchSql(scope, query, term, hideSuperAdmin, cursor);
     const ids = (await this.prisma.$queryRaw<{ id: string }[]>(sql)).map((r) => r.id);
     if (!ids.length) return [];
     const rows = await this.prisma.auditLog.findMany({ where: { id: { in: ids } }, select: LOG_SELECT });
@@ -152,9 +180,16 @@ export class AuditLogQueryService {
     return rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   }
 
-  private buildSearchSql(scope: BranchScope, query: AuditLogQuery, term: string, cursor?: KeysetCursor): Prisma.Sql {
+  private buildSearchSql(
+    scope: BranchScope,
+    query: AuditLogQuery,
+    term: string,
+    hideSuperAdmin: boolean,
+    cursor?: KeysetCursor,
+  ): Prisma.Sql {
     const { gte, lt } = dateRange(query);
     const w: Prisma.Sql[] = [Prisma.sql`"searchText" LIKE ${`%${escapeLike(term)}%`}`];
+    if (hideSuperAdmin) w.push(Prisma.sql`("actorRoleCode" IS NULL OR "actorRoleCode" <> ${AuthRole.SUPER_ADMIN})`);
     const branchId = scopedBranchFilter(scope, query.branchId);
     if (scope.kind === 'BRANCH') w.push(Prisma.sql`"branchIds" @> ARRAY[${scope.branchId}::uuid]`);
     else if (branchId) w.push(Prisma.sql`"branchIds" @> ARRAY[${branchId}::uuid]`);

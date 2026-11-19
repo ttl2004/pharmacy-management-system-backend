@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Gender, UserStatus } from '@prisma/client';
 import { Transform } from 'class-transformer';
 import {
+  IsEmail,
   IsEnum,
   IsNotEmpty,
   IsOptional,
@@ -171,4 +172,25 @@ export class ResetPasswordRequest {
     description: 'Mật khẩu mới — báo trực tiếp cho nhân viên, họ nên đổi lại',
   })
   newPassword!: string;
+}
+
+/**
+ * Khôi phục nhân viên đã xoá: SĐT/email đã được nhả khi xoá nên gửi lại nếu muốn gán lại (không gửi = để trống).
+ * Giá trị gửi lên bị người khác dùng mất rồi thì trả 1601.
+ */
+export class RestoreUserRequest {
+  @IsOptional()
+  @Transform(toVietnamPhone)
+  @IsString()
+  @Matches(VIETNAM_PHONE_PATTERN, { message: PHONE_MESSAGE })
+  @ApiPropertyOptional({ example: '0900000000' })
+  phoneNumber?: string;
+
+  @IsOptional()
+  @Transform(trimLowerCase)
+  @IsString()
+  @IsEmail({}, { message: 'Email không hợp lệ' })
+  @MaxLength(150)
+  @ApiPropertyOptional()
+  email?: string;
 }

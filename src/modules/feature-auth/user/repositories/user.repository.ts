@@ -50,4 +50,25 @@ export class UserRepository extends PrismaBaseRepository<User> {
       include: { role: true, branch: true, auth: { select: { username: true } } },
     });
   }
+
+  /** Như `findByIdWithRole` nhưng thấy cả người đã xoá mềm (dùng cho khôi phục). Không lọc vai trò đã xoá. */
+  findAnyByIdWithRole(id: string, client?: Prisma.TransactionClient): Promise<(User & { role: Role }) | null> {
+    return (client ?? this.prisma).user.findFirst({ where: { id }, include: { role: true } });
+  }
+
+  /** Danh sách người đã xoá mềm (phân trang trong DB) — base repository luôn ép `isDeleted: false` nên viết riêng. */
+  async findDeletedPage(
+    where: Prisma.UserWhereInput,
+    page: number,
+    limit: number,
+    include: Prisma.UserInclude,
+    orderBy: Prisma.UserOrderByWithRelationInput[],
+  ) {
+    const full: Prisma.UserWhereInput = { ...where, isDeleted: true };
+    const [hits, total] = await Promise.all([
+      this.prisma.user.findMany({ where: full, include, orderBy, take: limit, skip: (page - 1) * limit }),
+      this.prisma.user.count({ where: full }),
+    ]);
+    return { hits, total, page, totalPages: Math.ceil(total / limit), limit };
+  }
 }

@@ -19,7 +19,7 @@ import { branchWhere, resolveWriteBranch } from '../core/inventory-scope';
 import { InventoryTransactions, type InventoryTxContext } from '../core/inventory-transactions';
 import { StockIntakeService } from '../core/stock-intake.service';
 import { AUDIT_ENTITY, DOCUMENT_CODE_FORMATS, MAX_DOCUMENT_LINES } from '../core/inventory.constants';
-import { assertDocumentDate } from '../core/document-date';
+import { parseDocumentDate } from '../core/document-date';
 import { LedgerEntry, StockLedgerService } from '../core/stock-ledger.service';
 import {
   AdjustmentItemRequest,
@@ -110,7 +110,7 @@ function assertHeaderInput(dto: { code?: string; documentDate?: string }): void 
       `Mã ${code} trùng mẫu mã tự sinh (${DOCUMENT_CODE_FORMATS.STOCK_ADJUSTMENT.prefix} + số) — đặt mã khác hoặc bỏ trống để tự sinh`,
     );
   }
-  if (dto.documentDate) assertDocumentDate(new Date(dto.documentDate), 'Ngày chứng từ');
+  if (dto.documentDate) parseDocumentDate(dto.documentDate, 'Ngày chứng từ');
 }
 
 function adjustmentAudit(doc: { id: string; code: string; branchId: string }) {
@@ -267,7 +267,7 @@ export class AdjustmentService {
         supplierId: dto.supplierId ?? null,
         reason: dto.reason,
         note: dto.note ?? null,
-        documentDate: dto.documentDate ? new Date(dto.documentDate) : new Date(),
+        documentDate: dto.documentDate ? parseDocumentDate(dto.documentDate, 'Ngày chứng từ') : new Date(),
         handlerId: dto.handlerId ?? null,
         receiverId: dto.receiverId ?? null,
         internalUseTypeId: dto.internalUseTypeId ?? null,
@@ -375,7 +375,7 @@ export class AdjustmentService {
         supplierId: dto.supplierId ?? null,
         reason: dto.reason,
         note: dto.note ?? null,
-        ...(dto.documentDate ? { documentDate: new Date(dto.documentDate) } : {}),
+        ...(dto.documentDate ? { documentDate: parseDocumentDate(dto.documentDate, 'Ngày chứng từ') } : {}),
         handlerId: dto.handlerId ?? null,
         receiverId: dto.receiverId ?? null,
         internalUseTypeId: dto.internalUseTypeId ?? null,

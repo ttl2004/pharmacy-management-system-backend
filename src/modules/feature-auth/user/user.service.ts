@@ -6,6 +6,7 @@ import { ErrorException } from 'src/common/exceptions/error.exception';
 import { rethrowDuplicate } from 'src/common/exceptions/prisma-error';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
+import { escapeLike } from 'src/common/utils/like-pattern.util';
 import { normalizePhoneSearch } from 'src/common/utils/phone.util';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
@@ -29,11 +30,13 @@ import {
 } from '../permission/branch-scope';
 import { assertOutranks } from '../permission/role-hierarchy';
 import { assertRoleWithinCallerGrants } from '../permission/role-grant-guard';
-import { CreateUserRequest, ResetPasswordRequest, UpdateUserRequest } from './dtos/user.request';
+import { CreateUserRequest, ResetPasswordRequest, RestoreUserRequest, UpdateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserRepository } from './repositories/user.repository';
 import {
+  deletedUsername,
   maskUserSnapshot,
+  originalUsername,
   USER_AUDIT_FIELDS,
   userAuditBase,
   userSnapshot,
@@ -394,7 +397,11 @@ export class UserService extends AbstractBaseService<User> {
     return { success: true };
   }
 
-  /** Luật 13: xoá mềm + thu hồi mọi refresh token còn hiệu lực. */
+  /**
+   * Luật 13: xoá mềm + thu hồi mọi refresh token còn hiệu lực. Đồng thời nhả các giá trị unique để tạo/khôi phục
+   * người khác dùng lại được: SĐT và email về null, `username` đổi thành `<username>_DEL_<hậu tố>`. Nhật ký giữ giá trị gốc.
+   * Dòng `auths` không xoá mềm (đăng nhập đã chặn vì user bị xoá) — khôi phục chỉ cần đặt lại username.
+   */
   /** `reason` tuỳ chọn (DELETE không có body nên đi qua `?reason=`). */
   async remove(id: string, actor: RequestActor, reason?: string): Promise<{ success: true }> {
     const caller = actor.user;
@@ -412,16 +419,25 @@ export class UserService extends AbstractBaseService<User> {
 
     // Xoá mềm và thu hồi phiên cùng một transaction: không có khe hở user đã xoá mà phiên còn sống.
     await this.transactions.forUser(id, async (tx) => {
+      // Đọc username gốc TRƯỚC khi đổi tên: nhật ký phải ghi giá trị gốc, không phải bản `_DEL_`.
+      const username = await usernameOf(tx, id);
       const deleted = await this.userRepository.softDelete({ id }, tx);
       if (!deleted) {
         throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+      }
+      await tx.user.update({ where: { id }, data: { phoneNumber: null, email: null } });
+      if (username) {
+        await tx.auth.updateMany({
+          where: { userId: id },
+          data: { username: deletedUsername(username), updatedAt: new Date() },
+        });
       }
       await this.revokeRefreshTokens(tx, id);
       await this.recordSessionsRevoked(tx, id, target.role.code, actor, { trigger: 'DELETE' });
       await this.audit.record(tx, auditActorOf(actor), [
         {
           event: 'USER.DELETED',
-          ...userAuditBase(target, await usernameOf(tx, id), [target.branchId]),
+          ...userAuditBase(target, username, [target.branchId]),
           before: maskUserSnapshot(plainSnapshot(userSnapshot(target))),
           reason: reason?.trim() || null,
         },
@@ -429,6 +445,122 @@ export class UserService extends AbstractBaseService<User> {
     });
 
     return { success: true };
+  }
+
+  /**
+   * Danh sách nhân viên đã xoá (để chọn khôi phục), cùng phạm vi chi nhánh như `list`. SĐT/email đã nhả nên chỉ tìm
+   * theo họ tên; `username` trả về là bản gốc (đã bỏ hậu tố `_DEL_`). Mới xoá xếp trước.
+   */
+  async listDeleted(query: UserQuery, caller: JwtUser) {
+    const branchId = scopedBranchFilter(resolveBranchScope(caller), query.branchId);
+    const where: Prisma.UserWhereInput = {};
+    // Lọc vai trò bằng AND: chọn một vai trò kèm "loại khách" phải giữ cả hai điều kiện (CUSTOMER + loại khách → rỗng).
+    const roleFilters: Prisma.UserWhereInput[] = [];
+    if (query.roleCode) roleFilters.push({ role: { code: query.roleCode } });
+    if (query.excludeCustomer) roleFilters.push({ role: { code: { not: AuthRole.CUSTOMER } } });
+    if (roleFilters.length) where.AND = roleFilters;
+    if (branchId) where.branchId = branchId;
+    if (query.status) where.status = query.status;
+    if (query.search) where.fullName = { contains: escapeLike(query.search), mode: 'insensitive' };
+
+    const page = await this.userRepository.findDeletedPage(where, query.page, query.limit, USER_RELATIONS, [
+      { updatedAt: 'desc' },
+      { id: 'desc' },
+    ]);
+    return {
+      ...page,
+      hits: page.hits.map((u) => ({
+        ...u,
+        auth: u.auth ? { username: originalUsername((u.auth as { username: string }).username) } : null,
+      })),
+    };
+  }
+
+  /**
+   * Khôi phục nhân viên đã xoá mềm. Cùng rào với xoá (phạm vi chi nhánh → 1200, không SUPER_ADMIN, không tự mình,
+   * cấp bậc 1508). Trả về trạng thái INACTIVE (không trả lại ACTIVE tự động: mật khẩu cũ vẫn còn nên quản trị phải chủ
+   * động mở bằng PATCH status, có nhật ký). Phiên vẫn bị thu hồi — người đó đăng nhập lại; cần thì dùng reset-password.
+   * Username trả về bản gốc, SĐT/email lấy từ body (không gửi = để trống). Trùng với người khác → 1601.
+   */
+  async restore(id: string, dto: RestoreUserRequest, actor: RequestActor): Promise<UserDetail> {
+    const caller = actor.user;
+    const scope = resolveBranchScope(caller);
+    const target = await this.userRepository.findAnyByIdWithRole(id);
+    // Ngoài phạm vi chi nhánh hoặc không có → 1200 như không tồn tại (BS-05).
+    if (!target || !isInBranchScope(scope, target.branchId)) {
+      throw new ErrorException({ code: ErrorCode.USER_NOT_FOUND, message: 'Người dùng không tồn tại' });
+    }
+    if (target.role.code === SUPER_ADMIN_ROLE) {
+      throw new ErrorException({
+        code: ErrorCode.SUPER_ADMIN_PROTECTED,
+        message: 'Không thể thay đổi tài khoản quản trị tối cao',
+      });
+    }
+    this.assertNotSelfRestore(caller.userId, id);
+    assertOutranks(caller.roleLevel, target.role.level);
+    if (!target.isDeleted) {
+      throw new ErrorException({
+        code: ErrorCode.INVALID_DOCUMENT_STATE,
+        message: 'Người dùng chưa bị xoá nên không cần khôi phục',
+      });
+    }
+    // Vai trò/chi nhánh có thể đã bị xoá trong lúc người này nằm trong thùng rác → 1602, không khôi phục vào chỗ trống.
+    if (target.role.isDeleted) {
+      throw new ErrorException({ code: ErrorCode.INVALID_REFERENCE, message: 'Vai trò của người dùng đã bị xoá' });
+    }
+    await this.assertBranchRule(target.role.code, target.branchId);
+
+    try {
+      return await this.transactions.forUser(id, async (tx) => {
+        const restored = await tx.user.updateMany({
+          where: { id, isDeleted: true },
+          data: {
+            isDeleted: false,
+            status: UserStatus.INACTIVE,
+            updatedBy: caller.userId,
+            updatedAt: new Date(),
+            ...(dto.phoneNumber !== undefined ? { phoneNumber: dto.phoneNumber } : {}),
+            ...(dto.email !== undefined ? { email: dto.email } : {}),
+          },
+        });
+        if (!restored.count) {
+          throw new ErrorException({
+            code: ErrorCode.INVALID_DOCUMENT_STATE,
+            message: 'Người dùng chưa bị xoá nên không cần khôi phục',
+          });
+        }
+        const auth = await tx.auth.findFirst({ where: { userId: id }, select: { id: true, username: true } });
+        const username = auth ? originalUsername(auth.username) : null;
+        if (auth && username) {
+          await tx.auth.update({
+            where: { id: auth.id },
+            data: { username, isDeleted: false, updatedAt: new Date() },
+          });
+        }
+        const user = await tx.user.findUniqueOrThrow({ where: { id }, include: { role: true, branch: true } });
+        await this.revokeRefreshTokens(tx, id);
+        await this.audit.record(tx, auditActorOf(actor), [
+          {
+            event: 'USER.RESTORED',
+            ...userAuditBase(user, username, [user.branchId]),
+            before: maskUserSnapshot(plainSnapshot(userSnapshot(target))),
+            after: maskUserSnapshot(plainSnapshot(userSnapshot(user))),
+          },
+        ]);
+        return { ...user, auth: username ? { username } : null };
+      });
+    } catch (error) {
+      rethrowDuplicate(error);
+    }
+  }
+
+  /** Luật 15: không tự khôi phục chính mình (người đã xoá không đăng nhập được nên chỉ là rào phòng thủ). */
+  private assertNotSelfRestore(callerId: string, targetId: string): void {
+    if (callerId !== targetId) return;
+    throw new ErrorException({
+      code: ErrorCode.SELF_OPERATION_FORBIDDEN,
+      message: 'Không thể tự khôi phục tài khoản của chính mình',
+    });
   }
 
   /** Thu hồi mọi refresh token còn hiệu lực của user — phiên (`sid`) của họ chết ở lần kiểm kế tiếp. */

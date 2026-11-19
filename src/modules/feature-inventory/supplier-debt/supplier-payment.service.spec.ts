@@ -95,3 +95,39 @@ describe('SupplierPaymentService.create — trần nợ từng chi nhánh (N2)',
     expect(writer.create).not.toHaveBeenCalled();
   });
 });
+
+describe('SupplierPaymentService.getDetail — phiếu chi nhiều chi nhánh (N7)', () => {
+  const multi = {
+    ...paymentRow,
+    amount: 30_000_000n,
+    allocations: [
+      { receiptId: 'r1', amount: 10_000_000n, receipt: { id: 'r1', code: 'PN01', branchId: A } },
+      { receiptId: 'r2', amount: 20_000_000n, receipt: { id: 'r2', code: 'PN02', branchId: B } },
+    ],
+  };
+
+  it('quản lý chi nhánh A chỉ thấy dòng của A, amount = 10tr, partial = true, không canCancel', async () => {
+    const { service, payments } = makeService(() => ({ scoped: 0n, chain: 0n }));
+    payments.findById.mockResolvedValue(multi);
+    const result = await service.getDetail('pay1', actor(AuthRole.PHARMACY_MANAGER, A));
+    expect(result.allocations.map((a) => a.receiptId)).toEqual(['r1']);
+    expect(result.amount).toBe(10_000_000);
+    expect(result.partial).toBe(true);
+    expect(result.canCancel).toBe(false);
+  });
+
+  it('ADMIN thấy đủ 30tr, partial = false', async () => {
+    const { service, payments } = makeService(() => ({ scoped: 0n, chain: 0n }));
+    payments.findById.mockResolvedValue(multi);
+    const result = await service.getDetail('pay1', ADMIN);
+    expect(result.allocations).toHaveLength(2);
+    expect(result.amount).toBe(30_000_000);
+    expect(result.partial).toBe(false);
+  });
+
+  it('phiếu một chi nhánh: quản lý thấy nguyên vẹn, partial = false', async () => {
+    const { service } = makeService(() => ({ scoped: 0n, chain: 0n }));
+    const result = await service.getDetail('pay1', actor(AuthRole.PHARMACY_MANAGER, A));
+    expect(result).toMatchObject({ amount: 1_000, partial: false });
+  });
+});

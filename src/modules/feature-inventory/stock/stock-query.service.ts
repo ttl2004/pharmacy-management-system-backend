@@ -108,7 +108,7 @@ export class StockQueryService {
     if (query.toDate) conditions.push({ createdAt: { lt: vietnamDayStartUtc(addDaysToDateOnly(query.toDate, 1)) } });
     if (query.cursor) conditions.push(afterCursorDesc(decodeCursor(query.cursor)));
 
-    const rows = await this.stock.findMovements({ AND: conditions }, query.limit + 1);
+    const rows = await this.stock.findMovementsWithProductBalance({ AND: conditions }, query.limit + 1);
     const page = toKeysetPage(rows, query.limit);
     // `refCode`: mã chứng từ đọc được (PN…, HD…, mã hàng với tồn đầu); null khi chứng từ không còn.
     const codes = await this.stock.findRefCodes(page.items);

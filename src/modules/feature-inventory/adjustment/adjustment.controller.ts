@@ -33,7 +33,11 @@ export class AdjustmentController {
 
   @RequirePermissions('stock-adjustment:read')
   @Get()
-  @ApiOperation({ description: 'Phiếu kiểm kê / huỷ hàng / trả NCC / điều chỉnh khác.' })
+  @ApiOperation({
+    description:
+      'Phiếu kiểm kê / huỷ hàng / trả NCC / điều chỉnh khác. Mỗi dòng có thêm totalQuantity (Σ |SL dòng|) và totalValue ' +
+      '(huỷ/khác/kiểm kê: Σ |SL| × giá vốn đã chốt, nháp = 0; trả NCC: tổng tiền trả của phiếu; null nếu không có quyền xem giá vốn).',
+  })
   list(@Query() query: AdjustmentQuery, @CurrentActor() actor: RequestActor) {
     return this.adjustmentService.list(query, actor);
   }

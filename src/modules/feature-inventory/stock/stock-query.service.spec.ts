@@ -21,7 +21,7 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     findBatchPage: jest.fn().mockResolvedValue({ hits: [], total: 0, page: 1, totalPages: 0, limit: 10 }),
     findBatch: jest.fn(),
     findProductStockPage: jest.fn().mockResolvedValue({ hits: [], total: 0, page: 1, totalPages: 0, limit: 10 }),
-    findMovements: jest.fn().mockResolvedValue([]),
+    findMovementsWithProductBalance: jest.fn().mockResolvedValue([]),
     findLowStock: jest.fn().mockResolvedValue([]),
     findMovementSummary: jest.fn().mockResolvedValue([]),
     ...overrides,
@@ -154,7 +154,7 @@ describe('StockQueryService — ẩn giá vốn (K8)', () => {
     const repository = {
       findBatchPage: jest.fn().mockResolvedValue({ hits: [batchRow], total: 1, page: 1, totalPages: 1, limit: 10 }),
       findBatch: jest.fn().mockResolvedValue(batchRow),
-      findMovements: jest.fn().mockResolvedValue([movementRow]),
+      findMovementsWithProductBalance: jest.fn().mockResolvedValue([movementRow]),
       findRefCodes: jest.fn().mockResolvedValue(new Map()),
       findMovementSummary: jest.fn().mockResolvedValue([summaryRow]),
     };

@@ -41,6 +41,7 @@ function build(granted: string[]) {
     findPage: jest.fn().mockResolvedValue({ hits: [header], total: 1, page: 1, totalPages: 1, limit: 10 }),
     findDetail: jest.fn().mockResolvedValue(detailRow),
     returnSummary: jest.fn().mockResolvedValue(SUMMARY),
+    itemTotals: jest.fn().mockResolvedValue(new Map([['a1', { quantity: 3, value: 2100 }]])),
   };
   const permissions = { getGrantedCodes: jest.fn().mockResolvedValue(new Set(granted)) };
   const none = {} as never;
@@ -71,6 +72,40 @@ describe('AdjustmentService — ẩn tiền với người không thấy giá v�
       summary: { goodsAmount: null, discount: null, refundExpense: null, totalAmount: null, supplierPaid: null },
     });
     expect(adjustments.returnSummary).not.toHaveBeenCalled();
+  });
+
+  it('danh sách: totalQuantity luôn có; totalValue null khi bị ẩn giá vốn', async () => {
+    const { service, adjustments } = build(STAFF);
+    const page = await service.list({ page: 1, limit: 10 } as never, actor(AuthRole.SALES_STAFF));
+    expect(page.hits[0]).toMatchObject({ totalQuantity: 3, totalValue: null });
+    expect(adjustments.itemTotals).toHaveBeenCalledWith(['a1']);
+  });
+
+  it('danh sách: loại khác trả NCC lấy Σ SL × giá vốn; trả NCC lấy tổng tiền phiếu; phiếu không dòng = 0', async () => {
+    const { service, adjustments } = build(['goods-receipt:create']);
+    adjustments.findPage.mockResolvedValue({
+      hits: [
+        { ...header, id: 'a1', type: 'DISPOSE' },
+        { ...header, id: 'a2', type: 'RETURN_TO_SUPPLIER' },
+        { ...header, id: 'a3', type: 'DISPOSE' },
+      ],
+      total: 3,
+      page: 1,
+      totalPages: 1,
+      limit: 10,
+    });
+    adjustments.itemTotals.mockResolvedValue(
+      new Map([
+        ['a1', { quantity: 3, value: 2100 }],
+        ['a2', { quantity: 5, value: 9999 }],
+      ]),
+    );
+    const page = await service.list({ page: 1, limit: 10 } as never, actor(AuthRole.PHARMACY_MANAGER));
+    expect(page.hits.map((h) => [h.totalQuantity, h.totalValue])).toEqual([
+      [3, 2100],
+      [5, 96],
+      [0, 0],
+    ]);
   });
 
   it('chi tiết: giá vốn dòng, giá trả, chi phí hoàn = null; số lượng giữ', async () => {

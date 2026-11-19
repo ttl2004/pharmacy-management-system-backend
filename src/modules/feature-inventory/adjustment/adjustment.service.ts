@@ -171,7 +171,15 @@ export class AdjustmentService {
     const page = await this.adjustments.findPage(where, query.page, query.limit, adjustmentOrderBy(query.sort));
     // Người không thấy được giá vốn (K8): mọi cột tiền = null (phiếu loại nào cũng có cột tiền ở DB).
     const showCost = await canSeeCost(this.permissions, actor.user);
-    const masked = showCost ? page : { ...page, hits: page.hits.map((row) => maskAdjustmentRow(row)) };
+    // Tổng SL / giá trị từng phiếu của trang này (một câu lệnh). Trả NCC: giá trị = tổng tiền trả của phiếu (như chi tiết).
+    const totals = await this.adjustments.itemTotals(page.hits.map((row) => row.id));
+    const hits = page.hits.map((row) => {
+      const sum = totals.get(row.id);
+      const value = row.type === AdjustmentType.RETURN_TO_SUPPLIER ? Number(row.totalAmount) : (sum?.value ?? 0);
+      const base = showCost ? row : maskAdjustmentRow(row);
+      return { ...base, totalQuantity: sum?.quantity ?? 0, totalValue: showCost ? value : null };
+    });
+    const masked = { ...page, hits };
     if (query.type !== AdjustmentType.RETURN_TO_SUPPLIER) return masked;
     return { ...masked, summary: showCost ? await this.adjustments.returnSummary(where) : NO_RETURN_SUMMARY };
   }

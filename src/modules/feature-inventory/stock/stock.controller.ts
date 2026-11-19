@@ -43,7 +43,10 @@ export class StockController {
   }
 
   @Get('movements')
-  @ApiOperation({ description: 'Sổ kho, mới nhất trước. Phân trang bằng cursor (gửi lại nextCursor).' })
+  @ApiOperation({
+    description:
+      'Sổ kho, mới nhất trước. Phân trang bằng cursor (gửi lại nextCursor). Mỗi dòng có balanceAfter (tồn của riêng lô sau bút toán) và productBalanceAfter (tồn thuốc của chi nhánh, cộng mọi lô, ngay sau bút toán — tính cùng ảnh chụp dữ liệu với trang, kể cả khi lọc theo lô/loại/chứng từ).',
+  })
   movements(@Query() query: StockMovementQuery, @CurrentActor() actor: RequestActor) {
     return this.stockQueryService.listMovements(query, actor);
   }

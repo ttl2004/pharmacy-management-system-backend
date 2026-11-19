@@ -123,6 +123,24 @@ export class AdjustmentRepository {
     return { hits, total, page, totalPages: Math.ceil(total / limit), limit };
   }
 
+  /**
+   * Tổng theo phiếu cho trang danh sách, MỘT câu lệnh cho cả trang (đi theo index unique (adjustmentId, batchId)).
+   * quantity = Σ |quantity| (SL đưa ra / chênh lệch tuyệt đối); value = Σ |quantity| × unitCost (bigint, tránh tràn Int).
+   * Phiếu không có dòng nào không xuất hiện trong kết quả.
+   */
+  async itemTotals(adjustmentIds: string[]): Promise<Map<string, { quantity: number; value: number }>> {
+    if (adjustmentIds.length === 0) return new Map();
+    const rows = await this.prisma.$queryRaw<{ adjustmentId: string; quantity: bigint; value: bigint }[]>(Prisma.sql`
+      SELECT "adjustmentId",
+             SUM(ABS("quantity"))::bigint AS quantity,
+             SUM(ABS("quantity")::bigint * "unitCost"::bigint)::bigint AS value
+      FROM "stock_adjustment_items"
+      WHERE "adjustmentId" IN (${Prisma.join(adjustmentIds.map((id) => Prisma.sql`${id}::uuid`))}) AND "isDeleted" = false
+      GROUP BY "adjustmentId"
+    `);
+    return new Map(rows.map((r) => [r.adjustmentId, { quantity: Number(r.quantity), value: Number(r.value) }]));
+  }
+
   /** Dòng tổng danh sách trả NCC: Σ tiền + Σ SL trả của mọi phiếu khớp lọc, không tính phiếu huỷ. */
   async returnSummary(where: Prisma.StockAdjustmentWhereInput) {
     const live: Prisma.StockAdjustmentWhereInput = {

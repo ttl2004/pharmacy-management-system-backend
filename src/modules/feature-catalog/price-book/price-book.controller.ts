@@ -126,7 +126,8 @@ export class PriceBookController {
   @RequirePermissions('price-book:update')
   @Post(':id/apply-formula')
   @ApiOperation({
-    description: 'Áp công thức của bảng cho mọi dòng khớp bộ lọc trong body (như query của /rows). Trả {count}.',
+    description:
+      'Áp công thức của bảng cho mọi dòng khớp bộ lọc trong body (như query của /rows). Trả {count, skipped}: skipped = dòng bị bỏ qua (chưa biết giá gốc hoặc giá tính ra ≤ 0). Công thức theo giá vốn / giá nhập cuối bắt buộc chọn chi nhánh (400).',
   })
   applyFormula(
     @Param('id', new ParseUUIDPipe()) id: string,

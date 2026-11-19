@@ -5,6 +5,7 @@ import { daysBetweenDateOnly, toDateOnlyString, todayInVietnam } from 'src/commo
 import type { InventoryTxContext } from 'src/modules/feature-inventory/core/inventory-transactions';
 import { inventoryError } from 'src/modules/feature-inventory/core/inventory.error';
 import { StockAllocationService } from 'src/modules/feature-inventory/core/stock-allocation.service';
+import { StockBatchRepository } from 'src/modules/feature-inventory/core/stock-batch.repository';
 import { StockIntakeService } from 'src/modules/feature-inventory/core/stock-intake.service';
 import type { LockedBatch } from 'src/modules/feature-inventory/core/stock-ledger.repository';
 import { ReservationRef, StockLedgerService } from 'src/modules/feature-inventory/core/stock-ledger.service';
@@ -51,6 +52,7 @@ export class OrderStockService {
     private readonly ledger: StockLedgerService,
     private readonly repository: OrderStockRepository,
     private readonly intake: StockIntakeService,
+    private readonly batches: StockBatchRepository,
   ) {}
 
   /** Chọn lô FEFO + giữ hàng + ghi phân bổ: 3 câu lệnh cho cả đơn. Thiếu hàng → 1700 (caller rollback cả đơn). */
@@ -81,13 +83,19 @@ export class OrderStockService {
   }
 
   /** Huỷ đơn: nhả toàn bộ phần đang giữ. Phân bổ giữ lại làm lịch sử "đơn từng giữ hàng ở đâu". */
-  async release(ctx: InventoryTxContext, orderId: string, actorId: string): Promise<void> {
+  async release(
+    ctx: InventoryTxContext,
+    orderId: string,
+    actorId: string,
+    preLocked?: readonly LockedBatch[],
+  ): Promise<void> {
     const rows = await this.repository.findAllocations(ctx.tx, orderId);
     await this.ledger.release(
       ctx,
       rows.map((row) => ({ batchId: row.batchId, quantity: row.quantity })),
       orderRef(orderId),
       actorId,
+      preLocked ? { preLocked } : {},
     );
   }
 
@@ -103,13 +111,39 @@ export class OrderStockService {
       refId: orderId,
       actorId,
       note,
-      lines: rows.map((row) => ({ batchId: row.batchId, quantity: row.quantity, unitCost: row.unitCost, refItemId: row.id })),
+      lines: rows.map((row) => ({
+        batchId: row.batchId,
+        quantity: row.quantity,
+        unitCost: row.unitCost,
+        refItemId: row.id,
+      })),
     });
   }
 
+  /**
+   * Sửa đơn PENDING, bước 1: khoá MỘT lần, theo `id`, hợp của lô đơn đang giữ và lô bán được của các sản phẩm mới.
+   * Nếu nhả (khoá lô cũ) rồi mới giữ (khoá lô mới) thì thứ tự khoá đảo so với quầy khác → deadlock. Truyền kết quả
+   * vào `discard` và `reserve` (qua `preLocked`) — hai bước sau không khoá thêm lô nào ngoài tập này.
+   */
+  async lockForReplace(
+    ctx: InventoryTxContext,
+    orderId: string,
+    branchId: string,
+    productIds: readonly string[],
+    today: string = todayInVietnam(),
+  ): Promise<LockedBatch[]> {
+    const rows = await this.repository.findAllocations(ctx.tx, orderId);
+    return this.batches.lockSellable(ctx.tx, branchId, productIds, today, [...new Set(rows.map((row) => row.batchId))]);
+  }
+
   /** Sửa đơn PENDING: nhả rồi xoá phân bổ — caller sẽ chọn lô lại cho danh sách dòng mới. */
-  async discard(ctx: InventoryTxContext, orderId: string, actorId: string): Promise<void> {
-    await this.release(ctx, orderId, actorId);
+  async discard(
+    ctx: InventoryTxContext,
+    orderId: string,
+    actorId: string,
+    preLocked?: readonly LockedBatch[],
+  ): Promise<void> {
+    await this.release(ctx, orderId, actorId, preLocked);
     await this.repository.deleteAllocations(ctx.tx, orderId);
   }
 

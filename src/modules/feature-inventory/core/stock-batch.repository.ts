@@ -114,22 +114,31 @@ export class StockBatchRepository {
    * Khoá các lô BÁN ĐƯỢC của những sản phẩm này ở một chi nhánh: AVAILABLE, còn hạn sau `today` (`YYYY-MM-DD` giờ
    * VN — lô hết hạn đúng hôm nay là đã hết hạn), còn hàng chưa giữ. Thứ tự khoá `id`, cùng thứ tự với
    * `StockLedgerRepository.lockBatches`; thứ tự FEFO do caller tự sắp. MỘT câu lệnh cho cả đơn.
+   *
+   * `alsoBatchIds`: khoá luôn các lô này (vd. lô đơn đang giữ, sắp nhả) CÙNG câu lệnh — hợp của hai tập khoá một lần theo
+   * `id`, để không khoá lô cũ rồi mới khoá lô mới (đảo thứ tự giữa hai quầy → deadlock).
    */
   lockSellable(
     tx: Prisma.TransactionClient,
     branchId: string,
     productIds: readonly string[],
     today: string,
+    alsoBatchIds: readonly string[] = [],
   ): Promise<LockedBatch[]> {
-    if (!productIds.length) return Promise.resolve([]);
-    const ids = Prisma.join(productIds.map((id) => Prisma.sql`${id}::uuid`));
+    if (!productIds.length && !alsoBatchIds.length) return Promise.resolve([]);
+    const sellable = productIds.length
+      ? Prisma.sql`("branchId" = ${branchId}::uuid AND "productId" IN (${Prisma.join(productIds.map((id) => Prisma.sql`${id}::uuid`))})
+          AND "status" = 'AVAILABLE' AND "expiryDate" > ${today}::date
+          AND "quantityOnHand" > "reservedQuantity")`
+      : Prisma.sql`false`;
+    const extra = alsoBatchIds.length
+      ? Prisma.sql`OR "id" IN (${Prisma.join(alsoBatchIds.map((id) => Prisma.sql`${id}::uuid`))})`
+      : Prisma.empty;
     return tx.$queryRaw<LockedBatch[]>(Prisma.sql`
       SELECT "id", "branchId", "productId", "batchNumber", "expiryDate", "quantityOnHand", "reservedQuantity",
              "importPrice", "status"
       FROM "stock_batches"
-      WHERE "branchId" = ${branchId}::uuid AND "productId" IN (${ids})
-        AND "status" = 'AVAILABLE' AND "expiryDate" > ${today}::date
-        AND "quantityOnHand" > "reservedQuantity" AND "isDeleted" = false
+      WHERE (${sellable} ${extra}) AND "isDeleted" = false
       ORDER BY "id"
       FOR UPDATE`);
   }

@@ -23,8 +23,10 @@ export interface PriceRowResponse {
   name: string;
   unitName: string;
   factor: number;
-  avgCost: number;
-  lastPurchaseCost: number;
+  /** null = chưa biết (không chọn chi nhánh / không còn lô). */
+  avgCost: number | null;
+  /** null = chưa biết (không chọn chi nhánh / chưa có phiếu nhập). */
+  lastPurchaseCost: number | null;
   generalPrice: number;
   /** bookId → giá; null = hàng chưa có trong bảng đó. */
   prices: Record<string, number | null>;

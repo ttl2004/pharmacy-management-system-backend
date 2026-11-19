@@ -58,7 +58,9 @@ export class GoodsReceiptPaymentService {
           // Lập phiếu chi = ghi công nợ → cần cả `supplier-debt:write` và chịu cùng trần nợ như POST /supplier-payment.
           await this.assertCanWriteDebt(actor);
           const delta = paidAmount - head.paidAmount;
-          await assertPaymentWithinDebt(this.debts, tx, scope, head.supplierId, delta);
+          await assertPaymentWithinDebt(this.debts, tx, scope, head.supplierId, [
+            { branchId: head.branchId, amount: delta },
+          ]);
           const payment = await this.supplierPayments.createForReceipt(
             tx,
             head,

@@ -27,9 +27,20 @@ export class GoodsReceiptLocker {
     tx: Prisma.TransactionClient,
     id: string,
     scopeWhere: { branchId?: string },
-    options: { supplierWhenConfirmed?: boolean } = {},
+    options: { supplierWhenConfirmed?: boolean; supplierAlways?: boolean } = {},
   ): Promise<ReceiptHead> {
     let supplierLocked = false;
+    if (options.supplierAlways) {
+      // Xác nhận phiếu NHÁP: sinh phiếu chi + đổi công nợ nên cũng khoá NCC trước. NCC của nháp sửa được (PUT) nên sau
+      // khi khoá phiếu phải đọc lại — đổi NCC giữa chừng thì báo "vừa được xử lý" thay vì giữ nhầm khoá.
+      const peek = await this.receipts.findStatus(tx, id, scopeWhere);
+      if (!peek) throw errors.notFound();
+      await this.debts.lockSupplier(tx, peek.supplierId);
+      const head = await this.receipts.findStatusForUpdate(tx, id, scopeWhere);
+      if (!head) throw errors.notFound();
+      if (head.supplierId !== peek.supplierId) throw errors.wrongState();
+      return head;
+    }
     if (options.supplierWhenConfirmed) {
       const peek = await this.receipts.findStatus(tx, id, scopeWhere);
       if (!peek) throw errors.notFound();

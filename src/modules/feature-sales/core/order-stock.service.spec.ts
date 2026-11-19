@@ -38,11 +38,13 @@ describe('OrderStockService', () => {
     deleteAllocations: jest.fn(),
     setUnitCosts: jest.fn(),
   };
+  const batches = { lockSellable: jest.fn() };
   const service = new OrderStockService(
     allocator as never,
     ledger as never,
     repository as unknown as OrderStockRepository,
     {} as never,
+    batches as never,
   );
 
   beforeEach(() => jest.clearAllMocks());
@@ -110,6 +112,7 @@ describe('OrderStockService', () => {
       ],
       { refType: StockRefType.ORDER, refId: 'o1' },
       'u1',
+      {},
     );
     expect(repository.deleteAllocations).not.toHaveBeenCalled();
   });
@@ -119,6 +122,23 @@ describe('OrderStockService', () => {
     await service.discard(ctx, 'o1', 'u1');
     expect(ledger.release).toHaveBeenCalled();
     expect(repository.deleteAllocations).toHaveBeenCalledWith(ctx.tx, 'o1');
+  });
+
+  it('lockForReplace: khoá MỘT câu hợp lô sản phẩm mới + lô đơn đang giữ (không trùng)', async () => {
+    const locked = [batch('l1')];
+    repository.findAllocations.mockResolvedValue([allocation('a1', 'l5', 5), allocation('a2', 'l5', 2)]);
+    batches.lockSellable.mockResolvedValue(locked);
+    const result = await service.lockForReplace(ctx, 'o1', 'b1', ['p1'], TODAY);
+    expect(result).toBe(locked);
+    expect(batches.lockSellable).toHaveBeenCalledTimes(1);
+    expect(batches.lockSellable).toHaveBeenCalledWith(ctx.tx, 'b1', ['p1'], TODAY, ['l5']);
+  });
+
+  it('discard với preLocked: nhả trên lô đã khoá, không khoá lại', async () => {
+    const locked = [batch('l1')];
+    repository.findAllocations.mockResolvedValue([allocation('a1', 'l1', 5)]);
+    await service.discard(ctx, 'o1', 'u1', locked);
+    expect(ledger.release).toHaveBeenCalledWith(ctx, expect.any(Array), expect.anything(), 'u1', { preLocked: locked });
   });
 
   it('consume: chốt giá vốn hiện tại của lô, ghi SALE âm từ phần đã giữ, refItemId là dòng phân bổ', async () => {

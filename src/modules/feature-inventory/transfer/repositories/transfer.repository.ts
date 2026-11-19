@@ -158,22 +158,33 @@ export class TransferRepository {
     return tx.stockTransferItem.createMany({ data: rows });
   }
 
-  /** Ghi số thực nhận + lý do lệch từng dòng lúc nhận. */
+  /**
+   * Ghi số thực nhận + lý do lệch từng dòng lúc nhận — MỘT câu lệnh cho mọi dòng (K3: update từng dòng ~0,1 s/dòng
+   * với DB ở xa thì phiếu vài trăm dòng vượt timeout transaction, phiếu kẹt IN_TRANSIT).
+   */
   async setReceived(
     tx: Prisma.TransactionClient,
     rows: readonly { itemId: string; receivedQuantity: number; varianceReason: string | null }[],
     actorId: string,
-  ) {
-    for (const row of rows) {
-      await tx.stockTransferItem.update({
-        where: { id: row.itemId },
-        data: { receivedQuantity: row.receivedQuantity, varianceReason: row.varianceReason, updatedBy: actorId, updatedAt: new Date() },
-      });
-    }
+  ): Promise<void> {
+    if (!rows.length) return;
+    const values = Prisma.join(
+      rows.map((row) => Prisma.sql`(${row.itemId}::uuid, ${row.receivedQuantity}::int, ${row.varianceReason}::text)`),
+    );
+    await tx.$executeRaw(Prisma.sql`
+      UPDATE "stock_transfer_items" AS i
+      SET "receivedQuantity" = v."receivedQuantity", "varianceReason" = v."varianceReason",
+          "updatedBy" = ${actorId}::uuid, "updatedAt" = now()
+      FROM (VALUES ${values}) AS v("id", "receivedQuantity", "varianceReason")
+      WHERE i."id" = v."id"`);
   }
 
   /** Sửa phiếu PENDING: dòng chưa có bút toán tham chiếu (chỉ ghi lúc gửi) → xoá hẳn rồi ghi lại. */
-  async replaceItems(tx: Prisma.TransactionClient, transferId: string, rows: Prisma.StockTransferItemCreateManyInput[]) {
+  async replaceItems(
+    tx: Prisma.TransactionClient,
+    transferId: string,
+    rows: Prisma.StockTransferItemCreateManyInput[],
+  ) {
     await tx.stockTransferItem.deleteMany({ where: { transferId } });
     await tx.stockTransferItem.createMany({ data: rows });
   }

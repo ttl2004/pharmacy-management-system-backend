@@ -193,8 +193,9 @@ export class GoodsReceiptService {
 
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
-      // Khoá phiếu: paidAmount, chi phí, giảm giá, dòng hàng dưới đây là số cuối cùng — PUT/PATCH song song phải chờ.
-      const head = await this.locker.lock(tx, id, branchWhere(scope));
+      // Khoá NCC rồi khoá phiếu (lock order chung; xác nhận sinh phiếu chi + đổi công nợ nên xếp hàng cùng điều chỉnh nợ /
+      // huỷ phiếu chi). paidAmount, chi phí, giảm giá, dòng hàng dưới đây là số cuối cùng — PUT/PATCH song song phải chờ.
+      const head = await this.locker.lock(tx, id, branchWhere(scope), { supplierAlways: true });
       if (head.status !== ReceiptStatus.DRAFT) throw errors.wrongState(head.status);
       await this.draftBuilder.assertBranchActive(tx, head.branchId);
 

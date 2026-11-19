@@ -68,7 +68,13 @@ describe('OrderService', () => {
     lockAndCountPendingPos: jest.fn().mockResolvedValue(0),
   };
   const transactions = { run: jest.fn((work: (c: typeof ctx) => unknown) => work(ctx)) };
-  const stock = { reserve: jest.fn(), release: jest.fn(), discard: jest.fn(), consume: jest.fn() };
+  const stock = {
+    reserve: jest.fn(),
+    release: jest.fn(),
+    discard: jest.fn(),
+    consume: jest.fn(),
+    lockForReplace: jest.fn().mockResolvedValue([]),
+  };
   const codes = { next: jest.fn().mockResolvedValue('HD000001') };
   const audit = { record: jest.fn() };
   const priceBooks = { getUsableBook: jest.fn() };
@@ -241,11 +247,15 @@ describe('OrderService', () => {
     const calls: string[] = [];
     const track = (name: string, result?: unknown) => () => (calls.push(name), Promise.resolve(result));
     orders.claim.mockImplementation(track('claim', 1));
+    stock.lockForReplace.mockImplementation(track('lock', ['locked']));
     stock.discard.mockImplementation(track('discard'));
     orders.deleteItems.mockImplementation(track('delete'));
     stock.reserve.mockImplementation(track('reserve'));
     await service.replacePosItems('o1', { items: [{ productUnitId: 'pu1', quantity: 3 }] }, ss);
-    expect(calls).toEqual(['claim', 'discard', 'delete', 'reserve']);
+    // B1: đúng MỘT lần khoá hợp lô cũ + mới, trước khi nhả/giữ; kết quả khoá truyền cho discard.
+    expect(calls).toEqual(['claim', 'lock', 'discard', 'delete', 'reserve']);
+    expect(stock.lockForReplace).toHaveBeenCalledTimes(1);
+    expect(stock.discard).toHaveBeenCalledWith(expect.anything(), 'o1', expect.anything(), ['locked']);
   });
 
   it('replacePosItems ghi ORDER.ITEMS_REPLACED amount = tổng mới', async () => {

@@ -92,9 +92,14 @@ export class SupplierPaymentService {
         }
       }
 
-      // Kiểm cả nợ trong phạm vi người trả lẫn nợ toàn chuỗi (dùng chung với PATCH /goods-receipt/:id/payment).
-      const total = dto.allocations.reduce((sum, row) => sum + BigInt(row.amount), 0n);
-      await assertPaymentWithinDebt(this.debts, tx, scope, dto.supplierId, total);
+      // Kiểm nợ trong phạm vi người trả, nợ toàn chuỗi và nợ TỪNG chi nhánh được phân bổ (dùng chung với PATCH /goods-receipt/:id/payment).
+      await assertPaymentWithinDebt(
+        this.debts,
+        tx,
+        scope,
+        dto.supplierId,
+        dto.allocations.map((row) => ({ branchId: receipts.get(row.receiptId)!.branchId, amount: BigInt(row.amount) })),
+      );
 
       const created = await this.writer.create(
         tx,
@@ -127,6 +132,11 @@ export class SupplierPaymentService {
   async cancel(id: string, dto: CancelDebtDocumentRequest, actor: RequestActor) {
     const scope = resolveBranchScope(actor.user);
     return this.transactions.run(async ({ tx }) => {
+      // Lock order: NCC TRƯỚC (cùng huỷ phiếu nhập / điều chỉnh nợ), rồi mới phiếu chi và phiếu nhập. NCC của phiếu chi
+      // bất biến nên đọc không khoá để biết NCC là an toàn; đọc lại SAU khi khoá để có trạng thái mới nhất.
+      const peek = await this.payments.findById(id, tx);
+      if (!peek) throw notFound();
+      await this.debts.lockSupplier(tx, peek.supplierId);
       const row = await this.payments.findById(id, tx);
       if (!row || !branchesOf(row).some((b) => isInBranchScope(scope, b))) throw notFound();
       for (const branchId of branchesOf(row)) assertBranchInScope(scope, branchId);

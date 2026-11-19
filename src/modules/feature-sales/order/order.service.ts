@@ -281,7 +281,11 @@ export class OrderService {
       );
       if (!claimed) throw orderErrors.wrongState();
 
-      await this.stock.discard(ctx, id, actorId);
+      // B1: khoá MỘT lần hợp lô cũ + lô mới theo id trước khi nhả/giữ — hai lần khoá riêng đảo thứ tự giữa các quầy.
+      const locked = await this.stock.lockForReplace(ctx, id, head.branchId, [
+        ...new Set(lines.map((line) => line.productId)),
+      ]);
+      await this.stock.discard(ctx, id, actorId, locked);
       await this.orders.deleteItems(tx, id);
       await this.saveLines(ctx, { orderId: id, branchId: head.branchId, actorId }, lines);
 

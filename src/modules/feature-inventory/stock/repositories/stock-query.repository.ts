@@ -5,6 +5,13 @@ import { lockAdvisoryKeys } from 'src/common/databases/advisory-lock';
 import { parseDateOnly, toDateOnlyString, todayInVietnam, vietnamDayStartUtc } from 'src/common/utils/date-only.util';
 import { containsPattern } from 'src/common/utils/like-pattern.util';
 
+/**
+ * Lần dựng đầu trên sổ kho hàng triệu dòng vượt 5 s mặc định của Prisma → rollback, lần sau dựng lại từ đầu (không
+ * bao giờ xong). `timeout` đủ rộng cho người dựng; `maxWait` cho người chờ kết nối. Request khác chờ khoá advisory
+ * cũng nằm trong transaction cùng cấu hình nên không hết hạn trước người dựng.
+ */
+export const MONTHLY_BUILD_TX_OPTIONS = { timeout: 120_000, maxWait: 10_000 } as const;
+
 const BATCH_SELECT = {
   id: true,
   batchNumber: true,
@@ -371,7 +378,7 @@ export class StockQueryRepository {
         INSERT INTO "stock_movement_monthly_built" ("month")
         SELECT g::date FROM generate_series(${startMonth}::date, ${needUpTo}::date, interval '1 month') AS g
         ON CONFLICT DO NOTHING`);
-    });
+    }, MONTHLY_BUILD_TX_OPTIONS);
   }
 
   /**

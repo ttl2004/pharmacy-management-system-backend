@@ -39,15 +39,29 @@ export class SupplierRepository extends PrismaBaseRepository<Supplier> {
   }
 
   /**
+   * Khoá dòng NCC đến hết transaction (cùng khoá với `SupplierDebtRepository.lockSupplier`): xoá NCC xếp hàng sau điều
+   * chỉnh nợ / phiếu chi đang ghi, nên đếm chứng từ không bỏ sót phiếu vừa commit.
+   */
+  async lockRow(tx: Prisma.TransactionClient, id: string): Promise<boolean> {
+    const rows = await tx.$queryRaw<{ id: string }[]>(
+      Prisma.sql`SELECT "id" FROM "suppliers" WHERE "id" = ${id}::uuid AND "isDeleted" = false FOR UPDATE`,
+    );
+    return rows.length > 0;
+  }
+
+  /**
    * Chứng từ kho còn trỏ tới nhà cung cấp — đếm cả chứng từ đã huỷ/xoá mềm: xoá mềm không giải phóng quan hệ và
-   * lịch sử nhập hàng phải còn đọc được nhà cung cấp.
+   * lịch sử nhập hàng phải còn đọc được nhà cung cấp. Điều chỉnh nợ (kể cả đã huỷ — là lịch sử) và phiếu chi cũng tính:
+   * xoá NCC mới chỉ có nợ đầu kỳ thì khoản nợ đó không còn xem/trả/huỷ được.
    */
   async countReferences(tx: Prisma.TransactionClient, id: string): Promise<number> {
-    const [receipts, adjustments, batches] = await Promise.all([
+    const [receipts, adjustments, batches, debtAdjustments, payments] = await Promise.all([
       tx.goodsReceipt.count({ where: { supplierId: id } }),
       tx.stockAdjustment.count({ where: { supplierId: id } }),
       tx.stockBatch.count({ where: { supplierId: id } }),
+      tx.supplierDebtAdjustment.count({ where: { supplierId: id } }),
+      tx.supplierPayment.count({ where: { supplierId: id } }),
     ]);
-    return receipts + adjustments + batches;
+    return receipts + adjustments + batches + debtAdjustments + payments;
   }
 }

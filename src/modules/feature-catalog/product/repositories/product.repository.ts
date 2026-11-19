@@ -92,6 +92,17 @@ const PRODUCT_DETAIL_SELECT = {
 } satisfies Prisma.ProductSelect;
 
 export type ProductSummary = Prisma.ProductGetPayload<{ select: typeof PRODUCT_SUMMARY_SELECT }>;
+/** Dòng ProductUnit dùng cho đối chiếu replace-all (kể cả dòng đã xoá mềm). */
+export type ProductUnitRow = {
+  id: string;
+  unitId: string;
+  isDeleted: boolean;
+  conversionRate: number;
+  salePrice: number;
+  barcode: string | null;
+  unit: { name: string };
+};
+
 export type ProductDetail = Prisma.ProductGetPayload<{ select: typeof PRODUCT_DETAIL_SELECT }>;
 /** Phần thuốc trong danh mục mà hàng hoá cần khi liên kết: cờ kê đơn (chép) và văn bản điền sẵn. */
 const LINKED_DRUG_SELECT = {
@@ -364,14 +375,46 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
    * Nạp toàn bộ ProductUnit của sản phẩm, **kể cả** dòng đã xoá mềm: replace-all cần biết dòng nào
    * phải kích hoạt lại thay vì `create` mới, vì unique `(productId, unitId)` vẫn giữ chỗ.
    */
-  findUnitsForReconcile(
-    client: Prisma.TransactionClient,
-    productId: string,
-  ): Promise<{ id: string; unitId: string; isDeleted: boolean }[]> {
+  findUnitsForReconcile(client: Prisma.TransactionClient, productId: string): Promise<ProductUnitRow[]> {
     return client.productUnit.findMany({
       where: { productId },
-      select: { id: true, unitId: true, isDeleted: true },
+      select: {
+        id: true,
+        unitId: true,
+        isDeleted: true,
+        conversionRate: true,
+        salePrice: true,
+        barcode: true,
+        unit: { select: { name: true } },
+      },
     });
+  }
+
+  /**
+   * Các dòng đơn vị (id ProductUnit) đang được bảng giá dùng hoặc đã có trên dòng đơn hàng — đổi quy cách của chúng làm
+   * sai giá đã đặt / lịch sử bán. Trả hai tập id để service báo đúng lý do.
+   */
+  async findUnitsInUse(
+    client: Prisma.TransactionClient,
+    productUnitIds: string[],
+  ): Promise<{ priceBook: Set<string>; sold: Set<string> }> {
+    if (!productUnitIds.length) return { priceBook: new Set(), sold: new Set() };
+    const [priced, sold] = await Promise.all([
+      client.priceBookItem.findMany({
+        where: { productUnitId: { in: productUnitIds } },
+        select: { productUnitId: true },
+        distinct: ['productUnitId'],
+      }),
+      client.orderItem.findMany({
+        where: { productUnitId: { in: productUnitIds } },
+        select: { productUnitId: true },
+        distinct: ['productUnitId'],
+      }),
+    ]);
+    return {
+      priceBook: new Set(priced.map((row) => row.productUnitId)),
+      sold: new Set(sold.map((row) => row.productUnitId)),
+    };
   }
 
   /** Trả số dòng đã ghi; 0 nghĩa là sản phẩm không tồn tại hoặc vừa bị xoá mềm. */

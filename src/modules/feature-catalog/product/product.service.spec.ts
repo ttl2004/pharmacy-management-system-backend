@@ -47,6 +47,7 @@ function makeService(
     findLiveUnits: jest.fn().mockResolvedValue([{ unitId: 'unit-vien', conversionRate: 1, isBaseUnit: true }]),
     hasInventoryHistory: jest.fn().mockResolvedValue(false),
     hasOpenInventory: jest.fn().mockResolvedValue(false),
+    findUnitsInUse: jest.fn().mockResolvedValue({ priceBook: new Set(), sold: new Set() }),
     findActiveDrug: jest.fn().mockResolvedValue({ id: 'drug-id', isPrescription: false }),
     findPacksByDrug: jest.fn().mockResolvedValue([]),
     replaceLocations: jest.fn().mockResolvedValue(undefined),
@@ -1438,5 +1439,130 @@ describe('ProductService — khôi phục', () => {
     await service.list({ page: 1, limit: 10 }, true);
 
     expect(findPageWithSummary).toHaveBeenCalledWith({}, expect.objectContaining({ deleted: true }));
+  });
+});
+
+describe('ProductService — đổi quy cách đơn vị đang dùng (D4)', () => {
+  const rows = [
+    {
+      id: 'row-vien',
+      unitId: 'unit-vien',
+      isDeleted: false,
+      conversionRate: 1,
+      salePrice: 500,
+      barcode: null,
+      unit: { name: 'Viên' },
+    },
+    {
+      id: 'row-hop',
+      unitId: 'unit-hop',
+      isDeleted: false,
+      conversionRate: 10,
+      salePrice: 4500,
+      barcode: null,
+      unit: { name: 'Hộp' },
+    },
+  ];
+  const unitsDto = (hopRate: number) => ({
+    units: [
+      { unitId: 'unit-vien', conversionRate: 1, salePrice: 500, isBaseUnit: true },
+      { unitId: 'unit-hop', conversionRate: hopRate, salePrice: 4500, isBaseUnit: false },
+    ],
+  });
+
+  it('có kho: đổi quy cách bị chặn PRODUCT_HAS_STOCK, nêu tên đơn vị và không ghi gì', async () => {
+    const updateUnit = jest.fn();
+    const service = makeService({
+      findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+      findUnitsForReconcile: jest.fn().mockResolvedValue(rows),
+      hasInventoryHistory: jest.fn().mockResolvedValue(true),
+      updateUnit,
+    });
+
+    await expect(service.update('product-id', unitsDto(20), ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.PRODUCT_HAS_STOCK,
+      message: expect.stringContaining('Không đổi được quy cách Hộp (đang 1 = 10') as unknown,
+    });
+    expect(updateUnit).not.toHaveBeenCalled();
+  });
+
+  it('dòng đã vào bảng giá hoặc đã bán: bị chặn dù chưa có kho', async () => {
+    for (const inUse of [
+      { priceBook: new Set(['row-hop']), sold: new Set<string>() },
+      { priceBook: new Set<string>(), sold: new Set(['row-hop']) },
+    ]) {
+      const service = makeService({
+        findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+        findUnitsForReconcile: jest.fn().mockResolvedValue(rows),
+        findUnitsInUse: jest.fn().mockResolvedValue(inUse),
+      });
+      await expect(service.update('product-id', unitsDto(20), ACTOR)).rejects.toMatchObject({
+        errorCode: ErrorCode.INVALID_DOCUMENT_STATE,
+      });
+    }
+  });
+
+  it('chưa kho / bảng giá / bán: đổi quy cách được; không đổi quy cách thì không kiểm gì dù có kho', async () => {
+    const updateUnit = jest.fn().mockResolvedValue(undefined);
+    const hasInventoryHistory = jest.fn().mockResolvedValue(false);
+    const service = makeService({
+      findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+      findUnitsForReconcile: jest.fn().mockResolvedValue(rows),
+      hasInventoryHistory,
+      updateUnit,
+    });
+    await service.update('product-id', unitsDto(20), ACTOR);
+    expect(updateUnit).toHaveBeenCalledWith(
+      expect.anything(),
+      'row-hop',
+      expect.objectContaining({ conversionRate: 20 }),
+    );
+
+    const stocked = jest.fn().mockResolvedValue(true);
+    const same = makeService({
+      findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+      findUnitsForReconcile: jest.fn().mockResolvedValue(rows),
+      hasInventoryHistory: stocked,
+    });
+    await same.update('product-id', unitsDto(10), ACTOR);
+    expect(stocked).not.toHaveBeenCalled();
+  });
+
+  it('nhật ký PRODUCT.UPDATED chứa diff đơn vị: thêm, bỏ, đổi quy cách/mã vạch', async () => {
+    const audit = makeAudit();
+    const row = (id: string, rate: number, barcode: string | null = null) => ({
+      id: `row-${id}`,
+      salePrice: 500,
+      conversionRate: rate,
+      barcode,
+      unit: { id },
+    });
+    const before = { ...existingProduct, units: [row('vien', 1), row('hop', 10, 'A'), row('thung', 100)] };
+    const after = { ...existingProduct, units: [row('vien', 1), row('hop', 20, 'B'), row('vi', 5)] };
+    const service = makeService(
+      { findDetailWith: jest.fn().mockResolvedValueOnce(before).mockResolvedValueOnce(after) },
+      {},
+      audit,
+    );
+
+    await service.update('product-id', { indications: 'x' } as never, ACTOR);
+
+    expect(recordedEntries(audit)).toEqual([
+      expect.objectContaining({
+        event: 'PRODUCT.UPDATED',
+        before: {
+          units: [
+            { unitId: 'thung', conversionRate: 100, salePrice: 500, barcode: null },
+            { unitId: 'hop', conversionRate: 10, barcode: 'A' },
+          ],
+        },
+        after: {
+          units: [
+            { unitId: 'hop', conversionRate: 20, barcode: 'B' },
+            { unitId: 'vi', conversionRate: 5, salePrice: 500, barcode: null },
+          ],
+        },
+      }),
+    ]);
   });
 });

@@ -151,6 +151,30 @@ export const envSchema = z
 
 export type EnvConfig = z.infer<typeof envSchema>;
 
+/**
+ * Cảnh báo cấu hình chạy thật thiếu an toàn (chỉ cảnh báo, không chặn khởi động để không làm hỏng lần triển khai).
+ * `TRUST_PROXY` = 0 gồm cả trường hợp không khai báo.
+ */
+export function productionEnvWarnings(env: {
+  NODE_ENV?: string;
+  COOKIE_SECURE?: string;
+  TRUST_PROXY?: number;
+}): string[] {
+  if (env.NODE_ENV !== 'production') return [];
+  const warnings: string[] = [];
+  if (env.COOKIE_SECURE !== 'true') {
+    warnings.push(
+      'COOKIE_SECURE chưa bật (true) khi chạy production: cookie refresh token có thể bị gửi qua HTTP thường và bị đánh cắp. Hãy đặt COOKIE_SECURE=true khi chạy sau HTTPS.',
+    );
+  }
+  if (!env.TRUST_PROXY) {
+    warnings.push(
+      'TRUST_PROXY chưa khai báo (hoặc =0) khi chạy production: nếu app đứng sau reverse proxy/load balancer thì mọi request sẽ mang IP của proxy, làm sai giới hạn tần suất, phát hiện dò mật khẩu và nhật ký IP. Đặt TRUST_PROXY = số proxy đứng trước app (vd. 1).',
+    );
+  }
+  return warnings;
+}
+
 export function validateEnv(config: Record<string, unknown>): EnvConfig & Record<string, unknown> {
   // `dotenv` biến dòng `KEY=` thành chuỗi rỗng, còn `.optional()` của zod chỉ bỏ qua `undefined`.
   // Chuẩn hoá rỗng thành "không khai báo" để file `.env.example` để trống không làm chết ứng dụng

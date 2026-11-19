@@ -19,6 +19,7 @@ import {
   LinkedDrug,
   ProductDetail,
   ProductRepository,
+  ProductUnitRow,
 } from './repositories/product.repository';
 
 @Injectable()
@@ -507,6 +508,7 @@ export class ProductService extends AbstractBaseService<Product> {
     const existingRows = await this.productRepository.findUnitsForReconcile(client, productId);
     const existingByUnitId = new Map(existingRows.map((row) => [row.unitId, row]));
     const wantedUnitIds = new Set(units.map((unit) => unit.unitId));
+    await this.assertRatesUnchangedWhileInUse(client, productId, units, existingByUnitId);
 
     for (const unit of units) {
       const existingRow = existingByUnitId.get(unit.unitId);
@@ -551,6 +553,44 @@ export class ProductService extends AbstractBaseService<Product> {
       .filter((row) => !row.isDeleted && !wantedUnitIds.has(row.unitId))
       .map((row) => row.id);
     await this.productRepository.softDeleteUnits(client, removedIds, callerId);
+  }
+
+  /**
+   * Đổi quy cách (conversionRate) của dòng đơn vị đã có là đổi nghĩa của mọi giá/số liệu gắn với nó: bảng giá "90.000/hộp"
+   * bỗng thành 90.000 cho 20 viên, tồn/phiếu nhập/đơn cũ ghi theo tỉ lệ cũ. Nên chặn khi sản phẩm đã có kho, dòng
+   * đơn vị đã nằm trong bảng giá, hoặc đã bán — muốn quy cách khác thì thêm đơn vị mới (vd. "Hộp 20").
+   */
+  private async assertRatesUnchangedWhileInUse(
+    client: Prisma.TransactionClient,
+    productId: string,
+    units: ProductUnitRequest[],
+    existingByUnitId: Map<string, ProductUnitRow>,
+  ): Promise<void> {
+    const changed = units.flatMap((unit) => {
+      const row = existingByUnitId.get(unit.unitId);
+      return row && row.conversionRate !== unit.conversionRate ? [{ row, rate: unit.conversionRate }] : [];
+    });
+    if (!changed.length) return;
+
+    const hasInventory = await this.productRepository.hasInventoryHistory(client, productId);
+    const inUse = await this.productRepository.findUnitsInUse(
+      client,
+      changed.map(({ row }) => row.id),
+    );
+    for (const { row, rate } of changed) {
+      const reasons = [
+        hasInventory && 'tồn kho',
+        inUse.priceBook.has(row.id) && 'bảng giá',
+        inUse.sold.has(row.id) && 'đã bán',
+      ].filter(Boolean);
+      if (!reasons.length) continue;
+      throw new ErrorException({
+        code: hasInventory ? ErrorCode.PRODUCT_HAS_STOCK : ErrorCode.INVALID_DOCUMENT_STATE,
+        message:
+          `Không đổi được quy cách ${row.unit.name} (đang 1 = ${row.conversionRate}, muốn đổi thành ${rate}): ` +
+          `sản phẩm đã có ${reasons.join(' / ')} — hãy thêm đơn vị mới (vd. '${row.unit.name} ${rate}') thay vì sửa`,
+      });
+    }
   }
 
   private notFound(): ErrorException {

@@ -66,7 +66,7 @@ export class PriceBookController {
   @Get('rows')
   @ApiOperation({
     description:
-      'Trang dòng giá: mỗi dòng một (hàng, đơn vị) kèm giá vốn, giá nhập cuối theo chi nhánh, giá chung và giá các bảng trong bookIds. Trả {items, total, page, pageSize}.',
+      'Trang dòng giá: mỗi dòng một (hàng, đơn vị) kèm giá vốn, giá nhập cuối theo chi nhánh, giá chung và giá các bảng trong bookIds. Trả {items, total, page, pageSize}. Không có goods-receipt:create / price-book:update: avgCost, lastPurchaseCost = null và bỏ qua lọc theo giá vốn; không có price-book:update: pageSize tối đa 500 (400 nếu vượt).',
   })
   rows(@Query() query: PriceRowsQuery, @CurrentUser() user: JwtUser) {
     return this.rowsService.listRows(query, user);

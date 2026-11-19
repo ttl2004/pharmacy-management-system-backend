@@ -17,7 +17,7 @@ import { Logger } from 'nestjs-pino';
 import { AUTH_JWT } from './common/constants/app.constant';
 import { createFastifyAdapter } from './common/configs/fastify-adapter';
 import { swaggerEnabled } from './common/configs/logger.config';
-import { trustProxySchema } from './common/configs/env.validation';
+import { productionEnvWarnings, trustProxySchema } from './common/configs/env.validation';
 import { ResolveExceptionFilter } from './common/exceptions/resolve.exception';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { UPLOAD_ROOT } from './modules/feature-catalog/product/product-image.service';
@@ -104,6 +104,13 @@ async function bootstrap() {
   await app.listen(port, '0.0.0.0');
 
   pinoLogger.log(`App Running at: http://localhost:${port}`, 'Bootstrap');
+  for (const warning of productionEnvWarnings({
+    NODE_ENV: configService.get<string>('NODE_ENV'),
+    COOKIE_SECURE: configService.get<string>('COOKIE_SECURE'),
+    TRUST_PROXY: trustProxy,
+  })) {
+    pinoLogger.warn(warning, 'Bootstrap');
+  }
   pinoLogger.log(`trustProxy=${trustProxy || false}`, 'Bootstrap');
   pinoLogger.log(
     docsEnabled ? `Swagger at: http://localhost:${port}/docs` : 'Swagger tắt (NODE_ENV khác development)',

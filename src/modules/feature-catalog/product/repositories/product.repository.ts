@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, Product, ReceiptStatus, RecordStatus, TransferStatus } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
-import { containsPattern } from 'src/common/utils/like-pattern.util';
+import { escapeLike } from 'src/common/utils/like-pattern.util';
 import { BaseWhere, PaginationResult } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { PrismaBaseRepository } from 'src/providers/abstract-base/repositories/prisma-base.repository';
 
@@ -159,17 +159,13 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
     super(prisma, 'Product');
   }
 
-  /** Như repository nền, cộng thêm hàng hoá có thuốc liên kết khớp hoạt chất khi được yêu cầu. */
-  protected override async resolveSearchIds(search?: string, searchFields?: string[]): Promise<string[] | undefined> {
-    const ownIds = await super.resolveSearchIds(search, searchFields);
-    if (!search || !searchFields?.includes(DRUG_INGREDIENTS_SEARCH_FIELD)) return ownIds;
-
-    // `ILIKE … ESCAPE` cùng lý do với repository nền: `%`, `_` người dùng gõ là chữ, không phải ký tự đại diện.
-    const rows = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
-      SELECT p."id" FROM "products" p
-      JOIN "drugs" d ON d."id" = p."drugId"
-      WHERE p."isDeleted" = false AND d."ingredients" ILIKE ${containsPattern(search)} ESCAPE '\\'`);
-    return [...new Set([...(ownIds ?? []), ...rows.map((row) => row.id)])];
+  /** Như repository nền, cộng thêm hàng hoá có thuốc liên kết khớp hoạt chất khi được yêu cầu — cùng một câu truy vấn. */
+  protected override resolveSearchWhere(search?: string, searchFields?: string[]): Record<string, unknown> | undefined {
+    const conditions = this.searchConditions(search, searchFields);
+    if (search && searchFields?.includes(DRUG_INGREDIENTS_SEARCH_FIELD)) {
+      conditions.push({ drug: { ingredients: { contains: escapeLike(search), mode: 'insensitive' } } });
+    }
+    return conditions.length ? { OR: conditions } : undefined;
   }
 
   /**
@@ -180,8 +176,10 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
     filter: BaseWhere<Product>,
     options: ProductPageOptions,
   ): Promise<PaginationResult<ProductSummary>> {
-    const searchIds = await this.resolveSearchIds(options.search, options.searchFields);
-    const where = this.buildWhere(filter, searchIds) as Prisma.ProductWhereInput;
+    const where = this.buildWhere(
+      filter,
+      this.resolveSearchWhere(options.search, options.searchFields),
+    ) as Prisma.ProductWhereInput;
 
     const [hits, total] = await Promise.all([
       this.prisma.product.findMany({
@@ -225,8 +223,10 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
     filter: BaseWhere<Product>,
     options: ProductPageOptions,
   ): Promise<PaginationResult<PublicProductSummary>> {
-    const searchIds = await this.resolveSearchIds(options.search, options.searchFields);
-    const where = this.buildWhere(filter, searchIds) as Prisma.ProductWhereInput;
+    const where = this.buildWhere(
+      filter,
+      this.resolveSearchWhere(options.search, options.searchFields),
+    ) as Prisma.ProductWhereInput;
 
     const [hits, total] = await Promise.all([
       this.prisma.product.findMany({

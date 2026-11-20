@@ -385,6 +385,156 @@ describe('TransferService — nhật ký', () => {
     ]);
   });
 
+  describe('T1: nhận thiếu → phần thiếu ghi hao hụt ở chi nhánh nhận', () => {
+    const twoItems = () =>
+      makeService({
+        findHead: jest.fn().mockResolvedValue(transitHead),
+        findItems: jest.fn().mockResolvedValue([
+          {
+            id: 'i1',
+            quantity: 100,
+            batchId: 'b1',
+            productId: 'p1',
+            batch: { batchNumber: 'L1', manufacturingDate: null, expiryDate: FAR, supplierId: 's1' },
+          },
+          {
+            id: 'i2',
+            quantity: 10,
+            batchId: 'b2',
+            productId: 'p2',
+            batch: { batchNumber: 'L2', manufacturingDate: null, expiryDate: FAR, supplierId: 's1' },
+          },
+        ]),
+        findShipCosts: jest.fn().mockResolvedValue(
+          new Map([
+            ['i1', 50_000],
+            ['i2', 2_000],
+          ]),
+        ),
+      });
+
+    it('cộng kho nhận đúng số thực nhận; phần thiếu ghi cặp nhập chuyển + hao hụt (DISPOSE) cùng giá chốt lúc xuất', async () => {
+      const { service, intake, ledger, repository } = twoItems();
+      intake.intake.mockResolvedValue({
+        batchIdByRefItem: new Map([
+          ['i1', 'b-dest'],
+          ['i2', 'b-dest2'],
+        ]),
+        movements: [],
+        auditEntries: [],
+      });
+
+      await service.receive('t1', PM_B, {
+        lines: [
+          { itemId: 'i1', receivedQuantity: 90, varianceReason: 'Rơi vỡ' },
+          { itemId: 'i2', receivedQuantity: 0, varianceReason: 'Thất lạc' },
+        ],
+      });
+
+      const [, request] = intake.intake.mock.calls[0] as [
+        unknown,
+        { lines: { refItemId: string; quantity: number }[] },
+      ];
+      // Dòng nhận 0 vẫn đi qua intake (số lượng 0) để có lô nhận ghi hao hụt.
+      expect(request.lines.map((l) => [l.refItemId, l.quantity])).toEqual([
+        ['i1', 90],
+        ['i2', 0],
+      ]);
+      expect(ledger.apply).toHaveBeenCalledTimes(1);
+      const [, entries] = ledger.apply.mock.calls[0] as [unknown, Record<string, unknown>[]];
+      expect(entries).toEqual([
+        expect.objectContaining({
+          batchId: 'b-dest',
+          type: 'TRANSFER_IN',
+          quantity: 10,
+          unitCost: 50_000,
+          refItemId: 'i1',
+        }),
+        expect.objectContaining({
+          batchId: 'b-dest',
+          type: 'DISPOSE',
+          quantity: -10,
+          unitCost: 50_000,
+          refItemId: 'i1',
+        }),
+        expect.objectContaining({
+          batchId: 'b-dest2',
+          type: 'TRANSFER_IN',
+          quantity: 10,
+          unitCost: 2_000,
+          refItemId: 'i2',
+        }),
+        expect.objectContaining({
+          batchId: 'b-dest2',
+          type: 'DISPOSE',
+          quantity: -10,
+          unitCost: 2_000,
+          refItemId: 'i2',
+        }),
+      ]);
+      expect(entries[1].note).toContain('Rơi vỡ');
+      expect(repository.setToBatchIds).toHaveBeenCalledWith(
+        {},
+        [
+          { itemId: 'i1', toBatchId: 'b-dest' },
+          { itemId: 'i2', toBatchId: 'b-dest2' },
+        ],
+        expect.any(String),
+      );
+    });
+
+    it('nhật ký RECEIVED_SHORT ghi tiền hao hụt; ≥ 1.000.000đ → mức cao', async () => {
+      const { service, audit, intake } = twoItems();
+      intake.intake.mockResolvedValue({
+        batchIdByRefItem: new Map([
+          ['i1', 'b-dest'],
+          ['i2', 'b-dest2'],
+        ]),
+        movements: [],
+        auditEntries: [],
+      });
+      await service.receive('t1', PM_B, {
+        lines: [{ itemId: 'i1', receivedQuantity: 80, varianceReason: 'Rơi vỡ' }],
+      });
+      const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+      expect(entries[0]).toMatchObject({ event: 'TRANSFER.RECEIVED_SHORT', amount: 1_000_000n, severity: 2 });
+      expect(entries[0].metadata).toEqual({
+        shortLines: [{ itemId: 'i1', sent: 100, received: 80, short: 20, unitCost: 50_000 }],
+      });
+    });
+
+    it('thiếu ít (dưới 1.000.000đ và dưới 10% số gửi) → giữ mức nền, vẫn ghi tiền', async () => {
+      const { service, audit, intake } = twoItems();
+      intake.intake.mockResolvedValue({
+        batchIdByRefItem: new Map([
+          ['i1', 'b-dest'],
+          ['i2', 'b-dest2'],
+        ]),
+        movements: [],
+        auditEntries: [],
+      });
+      await service.receive('t1', PM_B, {
+        lines: [{ itemId: 'i2', receivedQuantity: 9, varianceReason: 'Vỡ 1' }],
+      });
+      const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+      expect(entries[0]).toMatchObject({ event: 'TRANSFER.RECEIVED_SHORT', amount: 2_000n });
+      expect(entries[0].severity).toBeUndefined();
+    });
+
+    it('thiếu ≥ 10% tổng số gửi dù tiền nhỏ → mức cao', async () => {
+      const { service, audit } = makeService({ findHead: jest.fn().mockResolvedValue(transitHead) });
+      await service.receive('t1', PM_B, { lines: [{ itemId: 'i1', receivedQuantity: 27, varianceReason: 'Vỡ' }] });
+      const [, , entries] = audit.record.mock.calls[0] as RecordCall;
+      expect(entries[0]).toMatchObject({ amount: 2_700n, severity: 2 });
+    });
+
+    it('nhận đủ → không ghi hao hụt', async () => {
+      const { service, ledger } = makeService({ findHead: jest.fn().mockResolvedValue(transitHead) });
+      await service.receive('t1', PM_B);
+      expect(ledger.apply).not.toHaveBeenCalled();
+    });
+  });
+
   it('cancel ghi TRANSFER.CANCELLED với lý do huỷ', async () => {
     const { service, audit } = makeService({ findHead: jest.fn().mockResolvedValue(pendingHead) });
     await service.cancel('t1', { reason: 'Không cần nữa' }, PM_A);

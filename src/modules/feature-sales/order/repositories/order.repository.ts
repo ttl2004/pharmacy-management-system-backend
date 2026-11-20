@@ -211,6 +211,7 @@ export class OrderRepository {
         conversionRate: true,
         salePrice: true,
         status: true,
+        allowLooseSale: true,
         unit: { select: { name: true } },
         product: { select: { id: true, name: true, status: true, requiresPrescription: true, isControlled: true } },
       },

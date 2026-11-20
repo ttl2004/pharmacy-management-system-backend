@@ -40,6 +40,7 @@ const head = (overrides: Partial<OrderHead> = {}): OrderHead => ({
 const sellable = {
   id: 'pu1',
   conversionRate: 1,
+  allowLooseSale: true,
   salePrice: 1000,
   status: RecordStatus.ACTIVE,
   unit: { name: 'Viên' },

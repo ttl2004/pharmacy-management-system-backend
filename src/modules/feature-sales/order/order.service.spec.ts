@@ -33,6 +33,8 @@ const head = (overrides: Partial<OrderHead> = {}): OrderHead => ({
   priceBookId: null,
   priceBookName: null,
   createdBy: 'u1',
+  staffId: 'u1',
+  staffName: 'Nhân viên A',
   discountAmount: 0n,
   lineCount: 1,
   prescriptionLineCount: 0,
@@ -66,6 +68,7 @@ describe('OrderService', () => {
     claim: jest.fn().mockResolvedValue(1),
     createPayment: jest.fn(),
     findAbandonedPos: jest.fn(),
+    findPage: jest.fn().mockResolvedValue({ hits: [], total: 0 }),
     lockAndCountPendingPos: jest.fn().mockResolvedValue(0),
   };
   const transactions = { run: jest.fn((work: (c: typeof ctx) => unknown) => work(ctx)) };
@@ -80,6 +83,7 @@ describe('OrderService', () => {
   const audit = { record: jest.fn() };
   const priceBooks = { getUsableBook: jest.fn() };
   const rollup = { applyOrder: jest.fn() };
+  const permissions = { getGrantedCodes: jest.fn() };
   const service = new OrderService(
     orders as unknown as OrderRepository,
     transactions as never,
@@ -88,6 +92,7 @@ describe('OrderService', () => {
     audit as never,
     priceBooks as never,
     rollup as never,
+    permissions as never,
   );
   /** Lần gọi `record` đầu tiên: actor + các entry. */
   const recorded = () => ({ actor: argOf<AuditActor>(audit.record, 1), entries: argOf<AuditEntry[]>(audit.record, 2) });
@@ -96,6 +101,7 @@ describe('OrderService', () => {
     jest.clearAllMocks();
     orders.claim.mockResolvedValue(1);
     orders.lockAndCountPendingPos.mockResolvedValue(0);
+    permissions.getGrantedCodes.mockResolvedValue(new Set());
   });
 
   it('createPos: SS lập ở chi nhánh mình, giữ hàng với id dòng tự sinh trùng id đã ghi', async () => {
@@ -385,7 +391,7 @@ describe('OrderService', () => {
 
   it('expireAbandonedPos ghi ORDER.AUTO_EXPIRED với actor.type JOB', async () => {
     orders.findAbandonedPos.mockResolvedValue([
-      { id: 'o1', code: 'HD000001', branchId: 'b1', status: OrderStatus.PENDING, updatedAt: null },
+      { id: 'o1', code: 'HD000001', branchId: 'b1', status: OrderStatus.PENDING },
     ]);
     await service.expireAbandonedPos(new Date('2026-10-16T02:00:00Z'));
     const { actor, entries } = recorded();
@@ -401,16 +407,123 @@ describe('OrderService', () => {
     ]);
   });
 
-  it('expireAbandonedPos: chỉ huỷ đơn chưa bị sửa kể từ lúc đọc; đơn vừa sửa bị bỏ qua', async () => {
-    const stale = new Date('2026-10-16T01:00:00Z');
+  it('expireAbandonedPos: hạn tính từ lúc LẬP đơn — chiếm bằng createdAt < cutoff (không dùng updatedAt); đơn đã thu/huỷ trước bị bỏ qua', async () => {
+    const now = new Date('2026-10-16T02:00:00Z');
     orders.findAbandonedPos.mockResolvedValue([
-      { id: 'o1', code: 'HD000001', branchId: 'b1', status: OrderStatus.PENDING, updatedAt: stale },
-      { id: 'o2', code: 'HD000002', branchId: 'b1', status: OrderStatus.PENDING, updatedAt: null },
+      { id: 'o1', code: 'HD000001', branchId: 'b1', status: OrderStatus.PENDING },
+      { id: 'o2', code: 'HD000002', branchId: 'b1', status: OrderStatus.PENDING },
     ]);
     orders.claim.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
-    const cancelled = await service.expireAbandonedPos(new Date('2026-10-16T02:00:00Z'));
+    const cancelled = await service.expireAbandonedPos(now);
+    const cutoff = new Date(now.getTime() - 30 * 60_000);
+    expect(orders.findAbandonedPos).toHaveBeenCalledWith(cutoff, expect.any(Number));
     expect(cancelled).toBe(1);
-    expect(argOf(orders.claim, 2)).toEqual({ status: OrderStatus.PENDING, updatedAt: stale });
+    expect(argOf(orders.claim, 2)).toEqual({
+      status: OrderStatus.PENDING,
+      channel: OrderChannel.POS,
+      createdAt: { lt: cutoff },
+    });
     expect(stock.release).toHaveBeenCalledTimes(1);
+  });
+
+  // Đơn lập 31 phút trước nhưng sửa 1 phút trước: vẫn quá hạn — claim không còn phụ thuộc updatedAt nên không bị chặn.
+  it('expireAbandonedPos: đơn lập 31 phút trước, sửa 1 phút trước vẫn bị huỷ', async () => {
+    const now = new Date('2026-10-16T02:00:00Z');
+    orders.findAbandonedPos.mockResolvedValue([
+      { id: 'o1', code: 'HD000001', branchId: 'b1', status: OrderStatus.PENDING },
+    ]);
+    expect(await service.expireAbandonedPos(now)).toBe(1);
+    expect(JSON.stringify(argOf(orders.claim, 2))).not.toContain('updatedAt');
+    expect(stock.release).toHaveBeenCalledTimes(1);
+    expect(recorded().entries[0]).not.toHaveProperty('metadata');
+  });
+
+  describe('đơn chờ của nhân viên khác (order:handle-others)', () => {
+    const mine = () => head({ staffId: 'u1' });
+    const others = () => head({ staffId: 'u9', createdBy: 'u9', staffName: 'Chị Lan' });
+    const manager = actorOf(AuthRole.PHARMACY_MANAGER, 'b1');
+    const grantHandleOthers = () => permissions.getGrantedCodes.mockResolvedValue(new Set(['order:handle-others']));
+    const items = { items: [{ productUnitId: 'pu1', quantity: 1 }] };
+
+    it('đơn của mình: không cần quyền, không tra quyền, audit không có onBehalfOf', async () => {
+      orders.findHead.mockResolvedValue(mine());
+      await service.payPos('o1', { method: PaymentMethod.CASH }, ss);
+      expect(permissions.getGrantedCodes).not.toHaveBeenCalled();
+      expect(recorded().entries[0]).not.toHaveProperty('metadata');
+    });
+
+    it.each([
+      ['replacePosItems', () => service.replacePosItems('o1', items, ss)],
+      ['payPos', () => service.payPos('o1', { method: PaymentMethod.CASH }, ss)],
+      ['cancel', () => service.cancel('o1', { reason: 'x' }, ss)],
+    ])('%s đơn người khác không có quyền → 1500, không chiếm đơn, không đụng kho', async (_name, call) => {
+      orders.findHead.mockResolvedValue(others());
+      await expect(call()).rejects.toMatchObject({
+        response: { code: ErrorCode.PERMISSION_DENIED, message: 'Chỉ quản lý được xử lý đơn chờ của nhân viên khác' },
+      });
+      expect(orders.claim).not.toHaveBeenCalled();
+      expect(stock.discard).not.toHaveBeenCalled();
+      expect(stock.release).not.toHaveBeenCalled();
+      expect(stock.consume).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('payPos đơn người khác có quyền → thu được, audit có onBehalfOf = người lập', async () => {
+      grantHandleOthers();
+      orders.findHead.mockResolvedValue(others());
+      await service.payPos('o1', { method: PaymentMethod.CASH }, manager);
+      expect(recorded().entries[0]).toMatchObject({
+        event: 'ORDER.PAID',
+        metadata: { onBehalfOf: { userId: 'u9', fullName: 'Chị Lan' } },
+      });
+    });
+
+    it('cancel đơn người khác có quyền → huỷ được, audit có onBehalfOf', async () => {
+      grantHandleOthers();
+      orders.findHead.mockResolvedValue(others());
+      await service.cancel('o1', { reason: 'x' }, manager);
+      expect(stock.release).toHaveBeenCalled();
+      expect(recorded().entries[0]).toMatchObject({
+        event: 'ORDER.CANCELLED',
+        metadata: { onBehalfOf: { userId: 'u9', fullName: 'Chị Lan' } },
+      });
+    });
+
+    it('replacePosItems đơn người khác có quyền → sửa được, audit có onBehalfOf', async () => {
+      grantHandleOthers();
+      orders.findHead.mockResolvedValue(others());
+      await service.replacePosItems('o1', items, manager);
+      expect(recorded().entries[0]).toMatchObject({
+        event: 'ORDER.ITEMS_REPLACED',
+        metadata: { onBehalfOf: { userId: 'u9', fullName: 'Chị Lan' } },
+      });
+    });
+
+    it('SUPER_ADMIN bỏ qua kiểm tra quyền', async () => {
+      orders.findHead.mockResolvedValue(others());
+      await service.cancel('o1', { reason: 'x' }, actorOf(AuthRole.SUPER_ADMIN, null));
+      expect(permissions.getGrantedCodes).not.toHaveBeenCalled();
+      expect(stock.release).toHaveBeenCalled();
+    });
+
+    it('thiếu staffId (dữ liệu cũ) dùng createdBy để xác định người lập', async () => {
+      orders.findHead.mockResolvedValue(head({ staffId: null, createdBy: 'u1' }));
+      await service.cancel('o1', { reason: 'x' }, ss);
+      expect(stock.release).toHaveBeenCalled();
+    });
+
+    it('list: không có quyền → chỉ đơn chờ POS của mình, hoá đơn đã thu/huỷ không bị giới hạn', async () => {
+      await service.list({ page: 1, limit: 20, status: OrderStatus.PENDING } as never, ss);
+      const where = argOf<{ AND: unknown[] }>(orders.findPage, 0);
+      expect(where.AND).toContainEqual({
+        OR: [{ status: { not: OrderStatus.PENDING } }, { channel: { not: OrderChannel.POS } }, { staffId: 'u1' }],
+      });
+    });
+
+    it('list: có quyền (quản lý) → thấy cả chi nhánh, không thêm điều kiện người lập', async () => {
+      grantHandleOthers();
+      await service.list({ page: 1, limit: 20, status: OrderStatus.PENDING } as never, manager);
+      expect(JSON.stringify(argOf(orders.findPage, 0))).not.toContain('staffId');
+    });
   });
 });

@@ -348,7 +348,9 @@ describe('cập nhật tổng hợp trong thu tiền / huỷ hoá đơn (db)', (
     const repo = new OrderRepository(prisma as unknown as PrismaService);
     const transactions = new InventoryTransactions(prisma as unknown as PrismaService);
     const rollup = new SalesRollupRepository();
-    orders = new OrderService(repo, transactions, stock as never, {} as never, audit as never, {} as never, rollup);
+    orders = new OrderService(repo, transactions, stock as never, {} as never, audit as never, {} as never, rollup, {
+      getGrantedCodes: () => Promise.resolve(new Set(['order:handle-others'])),
+    } as never);
     voids = new OrderVoidAndPreviewService(
       repo,
       transactions,

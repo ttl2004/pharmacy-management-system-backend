@@ -40,6 +40,8 @@ const ORDER_DETAIL_SELECT = {
   cancelReason: true,
   confirmedAt: true,
   updatedAt: true,
+  // Chỉ để suy ra `cancelledByUser` (xem `toDetail`) — không lộ ra response dưới tên này.
+  updatedByUser: USER_BRIEF,
   items: {
     where: { isDeleted: false },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -76,11 +78,27 @@ const ORDER_DETAIL_SELECT = {
       transactionCode: true,
       paidAt: true,
       createdAt: true,
+      createdByUser: USER_BRIEF,
     },
   },
 } satisfies Prisma.OrderSelect;
 
-export type OrderDetail = Prisma.OrderGetPayload<{ select: typeof ORDER_DETAIL_SELECT }>;
+type OrderDetailRow = Prisma.OrderGetPayload<{ select: typeof ORDER_DETAIL_SELECT }>;
+
+/** Chi tiết đơn: `cancelledByUser` = người huỷ (chỉ khi CANCELLED, ngược lại null). */
+export type OrderDetail = Omit<OrderDetailRow, 'updatedByUser'> & {
+  cancelledByUser: { id: string; fullName: string } | null;
+};
+
+/**
+ * Người huỷ = `updatedByUser` của đơn, chỉ khi đơn CANCELLED — không thêm cột. Đúng vì huỷ (kể cả huỷ hoá đơn đã thu và
+ * job tự huỷ) là lần ghi CUỐI lên đơn: mọi thao tác ghi đơn đều là `claim` yêu cầu PENDING/COMPLETED, nên đơn CANCELLED
+ * không còn bị ghi lại (rollup/yêu thích chỉ ghi bảng khác).
+ */
+function toDetail(row: OrderDetailRow): OrderDetail {
+  const { updatedByUser, ...rest } = row;
+  return { ...rest, cancelledByUser: row.status === OrderStatus.CANCELLED ? updatedByUser : null };
+}
 
 /** Kết quả tìm-hoặc-tạo hồ sơ người mua tại quầy. */
 export interface WalkInCustomer {
@@ -117,6 +135,9 @@ export interface OrderHead {
   /** Khách mua gắn với đơn (null = khách lẻ) và số dòng thuốc kiểm soát — thuốc kiểm soát phải có khách (M1). */
   customerId: string | null;
   controlledLineCount: number;
+  /** Người lập đơn (`staffId`, gán lúc tạo) và tên — để kiểm quyền xử lý đơn của người khác và ghi `onBehalfOf`. */
+  staffId: string | null;
+  staffName: string | null;
 }
 
 @Injectable()
@@ -138,11 +159,16 @@ export class OrderRepository {
     return { hits, total, page, totalPages: Math.ceil(total / limit), limit };
   }
 
-  findDetail(id: string, scopeWhere: Prisma.OrderWhereInput, client: Prisma.TransactionClient = this.prisma) {
-    return client.order.findFirst({
+  async findDetail(
+    id: string,
+    scopeWhere: Prisma.OrderWhereInput,
+    client: Prisma.TransactionClient = this.prisma,
+  ): Promise<OrderDetail | null> {
+    const row = await client.order.findFirst({
       where: { AND: [{ id, isDeleted: false }, scopeWhere] },
       select: ORDER_DETAIL_SELECT,
     });
+    return row ? toDetail(row) : null;
   }
 
   async findHead(
@@ -168,6 +194,8 @@ export class OrderRepository {
         priceBookName: true,
         createdBy: true,
         customerId: true,
+        staffId: true,
+        staff: { select: { fullName: true } },
         _count: { select: { items: { where: { isDeleted: false } } } },
       },
     });
@@ -176,8 +204,14 @@ export class OrderRepository {
       tx.orderItem.count({ where: { orderId: id, isDeleted: false, product: { requiresPrescription: true } } }),
       tx.orderItem.count({ where: { orderId: id, isDeleted: false, product: { isControlled: true } } }),
     ]);
-    const { _count, ...head } = row;
-    return { ...head, lineCount: _count.items, prescriptionLineCount, controlledLineCount };
+    const { _count, staff, ...head } = row;
+    return {
+      ...head,
+      staffName: staff?.fullName ?? null,
+      lineCount: _count.items,
+      prescriptionLineCount,
+      controlledLineCount,
+    };
   }
 
   findBranch(tx: Prisma.TransactionClient, id: string) {
@@ -269,16 +303,16 @@ export class OrderRepository {
     });
   }
 
-  /** Đơn tại quầy PENDING không ai đụng tới từ trước `cutoff`. */
+  /** Đơn tại quầy PENDING được LẬP từ trước `cutoff` — hạn tính từ lúc lập đơn, sửa đơn không gia hạn. */
   findAbandonedPos(cutoff: Date, take: number) {
     return this.prisma.order.findMany({
       where: {
         isDeleted: false,
         channel: OrderChannel.POS,
         status: OrderStatus.PENDING,
-        OR: [{ updatedAt: { lt: cutoff } }, { updatedAt: null, createdAt: { lt: cutoff } }],
+        createdAt: { lt: cutoff },
       },
-      select: { id: true, code: true, branchId: true, status: true, updatedAt: true },
+      select: { id: true, code: true, branchId: true, status: true },
       orderBy: { createdAt: 'asc' },
       take,
     });

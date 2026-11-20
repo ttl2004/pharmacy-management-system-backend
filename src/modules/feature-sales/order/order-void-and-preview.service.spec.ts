@@ -28,6 +28,8 @@ const head = (overrides: Partial<OrderHead> = {}): OrderHead => ({
   priceBookId: null,
   priceBookName: null,
   createdBy: 'u1',
+  staffId: 'u1',
+  staffName: 'Nhân viên A',
   lineCount: 1,
   prescriptionLineCount: 0,
   customerId: null,
@@ -87,6 +89,22 @@ describe('OrderVoidAndPreviewService', () => {
         reason: 'Khách trả hàng',
       });
     }
+  });
+
+  it('voidPaid: người huỷ khác người lập → cả hai dòng nhật ký có onBehalfOf (PAYMENT.REFUNDED giữ metadata tiền)', async () => {
+    orders.findHead.mockResolvedValue(head({ staffId: 'u9', createdBy: 'u9', staffName: 'Chị Lan' }));
+    await service.voidPaid('o1', full, { ...ss, user: { ...ss.user, role: AuthRole.ADMIN, branchId: null } } as never);
+    const { entries } = recorded();
+    for (const entry of entries) {
+      expect(entry.metadata).toMatchObject({ onBehalfOf: { userId: 'u9', fullName: 'Chị Lan' } });
+    }
+    expect(entries[1].metadata).toMatchObject({ totalAmount: '12000', refundAmount: '12000' });
+  });
+
+  it('voidPaid: tự huỷ đơn của mình → không có onBehalfOf', async () => {
+    orders.findHead.mockResolvedValue(head());
+    await service.voidPaid('o1', full, ss);
+    expect(recorded().entries[0]).not.toHaveProperty('metadata');
   });
 
   it('đơn 100k: refundAmount 100000 CASH → payment REFUND 100000; audit PAYMENT.REFUNDED 100000n, severity 1', async () => {

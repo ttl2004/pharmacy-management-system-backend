@@ -39,7 +39,10 @@ export class OrderController {
 
   @RequirePermissions('order:read')
   @Get()
-  @ApiOperation({ description: 'Đơn hàng. PM/SS chỉ thấy chi nhánh mình; tìm theo mã đơn hoặc SĐT khách.' })
+  @ApiOperation({
+    description:
+      'Đơn hàng. PM/SS chỉ thấy chi nhánh mình; tìm theo mã đơn hoặc SĐT khách. Đơn tại quầy đang PENDING: người không có `order:handle-others` chỉ thấy đơn chờ do chính mình lập (hoá đơn đã thu/huỷ không bị giới hạn).',
+  })
   list(@Query() query: OrderQuery, @CurrentActor() actor: RequestActor) {
     return this.orderService.list(query, actor);
   }
@@ -67,7 +70,10 @@ export class OrderController {
 
   @RequirePermissions('order:read')
   @Get(':id')
-  @ApiOperation({ description: 'Chi tiết đơn: dòng, lô đã giữ/đã trừ kèm giá vốn, thanh toán.' })
+  @ApiOperation({
+    description:
+      'Chi tiết đơn: dòng, lô đã giữ/đã trừ kèm giá vốn, thanh toán (kèm người thu `createdByUser`), người lập `staff`, người huỷ `cancelledByUser` (chỉ khi CANCELLED, ngược lại null).',
+  })
   detail(@Param('id', new ParseUUIDPipe()) id: string, @CurrentActor() actor: RequestActor) {
     return this.orderService.getDetail(id, actor);
   }
@@ -81,7 +87,10 @@ export class OrderController {
 
   @RequirePermissions('order:create')
   @Put(':id/items')
-  @ApiOperation({ description: 'Thay toàn bộ dòng của đơn tại quầy đang PENDING — chọn lô lại.' })
+  @ApiOperation({
+    description:
+      'Thay toàn bộ dòng của đơn tại quầy đang PENDING — chọn lô lại. Đơn của nhân viên khác cần `order:handle-others` (không đủ quyền → 1500).',
+  })
   replaceItems(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: ReplaceOrderItemsRequest,
@@ -92,14 +101,20 @@ export class OrderController {
 
   @RequirePermissions('order:pay')
   @Post(':id/pay')
-  @ApiOperation({ description: 'Thu tiền một lần đủ tổng (tiền mặt/chuyển khoản) — trừ kho, đơn COMPLETED.' })
+  @ApiOperation({
+    description:
+      'Thu tiền một lần đủ tổng (tiền mặt/chuyển khoản) — trừ kho, đơn COMPLETED. Đơn chờ của nhân viên khác cần `order:handle-others` (không đủ quyền → 1500).',
+  })
   pay(@Param('id', new ParseUUIDPipe()) id: string, @Body() dto: PayOrderRequest, @CurrentActor() actor: RequestActor) {
     return this.orderService.payPos(id, dto, actor);
   }
 
   @RequirePermissions('order:cancel')
   @Post(':id/cancel')
-  @ApiOperation({ description: 'Huỷ đơn tại quầy đang PENDING — nhả hàng đang giữ.' })
+  @ApiOperation({
+    description:
+      'Huỷ đơn tại quầy đang PENDING — nhả hàng đang giữ. Đơn của nhân viên khác cần `order:handle-others` (không đủ quyền → 1500).',
+  })
   cancel(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: CancelOrderRequest,

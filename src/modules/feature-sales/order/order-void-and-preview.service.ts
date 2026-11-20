@@ -22,6 +22,7 @@ import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { bookPriceOf, buildOrderLines, toBookPricing } from '../core/order-lines';
 import { OrderStockService } from '../core/order-stock.service';
+import { onBehalfOfMetadata } from '../core/order-ownership';
 import { SALES_AUDIT_ENTITY } from '../core/sales.constants';
 import { orderErrors } from '../core/sales.error';
 import { PreviewAllocationRequest, VoidPaidOrderRequest } from './dtos/order.request';
@@ -113,6 +114,7 @@ export class OrderVoidAndPreviewService {
         searchTerms: [head.code],
         amount: head.totalAmount,
         reason: dto.reason,
+        ...onBehalfOfMetadata(head, actorId),
       };
       const entries: AuditEntry[] = [
         {
@@ -130,7 +132,11 @@ export class OrderVoidAndPreviewService {
           amount: refund.amount,
           severity: 1,
           after: { paymentStatus: PaymentStatus.REFUNDED, refundedAmount: refund.amount.toString() },
-          metadata: { totalAmount: head.totalAmount.toString(), refundAmount: refund.amount.toString() },
+          metadata: {
+            ...common.metadata,
+            totalAmount: head.totalAmount.toString(),
+            refundAmount: refund.amount.toString(),
+          },
         });
       }
       await this.audit.record(tx, auditActorOf(actor), entries);

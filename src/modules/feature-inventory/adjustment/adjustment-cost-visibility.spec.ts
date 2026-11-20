@@ -108,6 +108,81 @@ describe('AdjustmentService — ẩn tiền với người không thấy giá v�
     ]);
   });
 
+  describe('danh sách: số liệu giữ dấu của phiếu kiểm kê', () => {
+    const stats = {
+      quantity: 10,
+      value: 4000,
+      lineCount: 2,
+      totalActual: 37,
+      diffUp: 5,
+      diffDown: 5,
+      diffUpValue: 1500,
+      diffDownValue: 2500,
+    };
+    const prime = (adjustments: ReturnType<typeof build>['adjustments']) => {
+      adjustments.findPage.mockResolvedValue({
+        hits: [
+          { ...header, id: 'a1', type: 'STOCK_TAKE' },
+          { ...header, id: 'a2', type: 'DISPOSE' },
+          { ...header, id: 'a3', type: 'STOCK_TAKE' },
+        ],
+        total: 3,
+        page: 1,
+        totalPages: 1,
+        limit: 10,
+      });
+      adjustments.itemTotals.mockResolvedValue(
+        new Map([
+          ['a1', stats],
+          ['a2', stats],
+        ]),
+      );
+    };
+
+    it('chỉ dòng KIỂM KÊ có 6 trường mới; loại khác không có khoá; kiểm kê không dòng = 0', async () => {
+      const { service, adjustments } = build(['goods-receipt:create']);
+      prime(adjustments);
+      const page = await service.list({ page: 1, limit: 10 } as never, actor(AuthRole.PHARMACY_MANAGER));
+      const [take, other, empty] = page.hits as Record<string, unknown>[];
+      expect(take).toMatchObject({
+        totalQuantity: 10,
+        totalValue: 4000,
+        lineCount: 2,
+        totalActual: 37,
+        diffUp: 5,
+        diffDown: 5,
+        diffUpValue: 1500,
+        diffDownValue: 2500,
+      });
+      for (const key of ['lineCount', 'totalActual', 'diffUp', 'diffDown', 'diffUpValue', 'diffDownValue']) {
+        expect(other).not.toHaveProperty(key);
+      }
+      expect(empty).toMatchObject({
+        lineCount: 0,
+        totalActual: 0,
+        diffUp: 0,
+        diffDown: 0,
+        diffUpValue: 0,
+        diffDownValue: 0,
+      });
+    });
+
+    it('không có quyền xem giá vốn: giá trị = null, số lượng giữ', async () => {
+      const { service, adjustments } = build(STAFF);
+      prime(adjustments);
+      const page = await service.list({ page: 1, limit: 10 } as never, actor(AuthRole.SALES_STAFF));
+      expect(page.hits[0]).toMatchObject({
+        lineCount: 2,
+        totalActual: 37,
+        diffUp: 5,
+        diffDown: 5,
+        diffUpValue: null,
+        diffDownValue: null,
+      });
+      expect(page.hits[2]).toMatchObject({ diffUp: 0, diffUpValue: null, diffDownValue: null });
+    });
+  });
+
   it('chi tiết: giá vốn dòng, giá trả, chi phí hoàn = null; số lượng giữ', async () => {
     const { service } = build(STAFF);
     const detail = await service.getDetail('a1', actor(AuthRole.SALES_STAFF));

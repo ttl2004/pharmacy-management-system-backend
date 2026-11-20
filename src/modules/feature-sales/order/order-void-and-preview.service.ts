@@ -124,19 +124,13 @@ export class OrderVoidAndPreviewService {
       ];
       // Đơn 0đ không có lượt thu nào (xem `payPos`) nên không có tiền để hoàn.
       if (refund) {
-        // Hoàn ít hơn tổng mà hàng vẫn về kho đủ → nổi bật (severity 2) để quản lý soát.
-        const partial = refund.amount < head.totalAmount;
         entries.push({
           event: 'PAYMENT.REFUNDED',
           ...common,
           amount: refund.amount,
-          severity: partial ? 2 : 1,
+          severity: 1,
           after: { paymentStatus: PaymentStatus.REFUNDED, refundedAmount: refund.amount.toString() },
-          metadata: {
-            totalAmount: head.totalAmount.toString(),
-            refundAmount: refund.amount.toString(),
-            ...(partial ? { partialRefund: true } : {}),
-          },
+          metadata: { totalAmount: head.totalAmount.toString(), refundAmount: refund.amount.toString() },
         });
       }
       await this.audit.record(tx, auditActorOf(actor), entries);
@@ -146,17 +140,17 @@ export class OrderVoidAndPreviewService {
     });
   }
 
-  /** Đơn > 0đ: `0 < refundAmount ≤ tổng` + hình thức hoàn; đơn 0đ: không được gửi tiền hoàn. */
+  /** Đơn > 0đ: `refundAmount` = ĐÚNG tổng hoá đơn (huỷ là hoàn toàn bộ) + hình thức hoàn; đơn 0đ: không được gửi tiền hoàn. */
   private refundOf(total: bigint, dto: VoidPaidOrderRequest): { amount: bigint; method: PaymentMethod } | null {
     if (total === 0n) {
       if (dto.refundAmount) throw badRequest('Đơn 0đ không có tiền để hoàn');
       return null;
     }
-    if (!dto.refundAmount || dto.refundAmount <= 0) throw badRequest('Cần nhập số tiền đã hoàn cho khách (lớn hơn 0)');
-    const amount = BigInt(dto.refundAmount);
-    if (amount > total) throw badRequest('Số tiền hoàn không được vượt tổng hoá đơn');
+    if (!dto.refundAmount || BigInt(dto.refundAmount) !== total) {
+      throw badRequest(`Số tiền hoàn phải bằng đúng tổng hoá đơn (${total}đ) — huỷ hoá đơn là hoàn toàn bộ`);
+    }
     if (!dto.refundMethod) throw badRequest('Cần chọn hình thức hoàn tiền');
-    return { amount, method: dto.refundMethod };
+    return { amount: total, method: dto.refundMethod };
   }
 
   /**

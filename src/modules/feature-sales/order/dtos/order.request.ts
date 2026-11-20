@@ -192,13 +192,16 @@ export class CancelOrderRequest {
   reason: string;
 }
 
-/** Huỷ hoá đơn ĐÃ THU: ngoài lý do còn phải khai số tiền đã hoàn cho khách (kiểm ở service). */
+/** Huỷ hoá đơn ĐÃ THU: ngoài lý do còn phải khai số tiền đã hoàn cho khách = đúng tổng hoá đơn (kiểm ở service). */
 export class VoidPaidOrderRequest extends CancelOrderRequest {
   @IsOptional()
   @IsInt()
   @Min(0)
   @Max(MAX_MONEY)
-  @ApiPropertyOptional({ example: 100000, description: 'Bắt buộc khi đơn > 0đ: 0 < refundAmount ≤ tổng đơn' })
+  @ApiPropertyOptional({
+    example: 100000,
+    description: 'Bắt buộc khi đơn > 0đ và phải BẰNG ĐÚNG tổng đơn (huỷ là hoàn toàn bộ); đơn 0đ không gửi',
+  })
   refundAmount?: number;
 
   @IsOptional()

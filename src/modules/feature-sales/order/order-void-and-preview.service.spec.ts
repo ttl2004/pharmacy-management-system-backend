@@ -110,34 +110,30 @@ describe('OrderVoidAndPreviewService', () => {
     expect(refund?.metadata).not.toHaveProperty('partialRefund');
   });
 
-  it('đơn 100k hoàn 60000 → payment REFUND 60000; severity 2, metadata.partialRefund true, totalAmount "100000"', async () => {
+  it.each([
+    ['hoàn 60000 (một phần)', 60000],
+    ['hoàn 99999', 99999],
+    ['hoàn 100001', 100001],
+  ])('đơn 100k %s → 1002, không claim / hoàn kho / ghi payment / audit', async (_name, refundAmount) => {
     orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));
-    await service.voidPaid(
-      'o1',
-      { reason: 'Khách trả', refundAmount: 60000, refundMethod: PaymentMethod.BANK_TRANSFER },
-      ss,
-    );
-
-    expect(orders.createPayment).toHaveBeenCalledWith(
-      tx,
-      expect.objectContaining({ kind: 'REFUND', amount: 60000n, method: PaymentMethod.BANK_TRANSFER }),
-    );
-    const refund = recorded().entries.find((entry) => entry.event === 'PAYMENT.REFUNDED');
-    expect(refund).toMatchObject({
-      amount: 60000n,
-      severity: 2,
-      metadata: { totalAmount: '100000', refundAmount: '60000', partialRefund: true },
+    await expect(
+      service.voidPaid('o1', { reason: 'Khách trả', refundAmount, refundMethod: PaymentMethod.CASH }, ss),
+    ).rejects.toMatchObject({
+      errorCode: ErrorCode.HTTP_BAD_REQUEST,
+      message: expect.stringContaining('bằng đúng tổng hoá đơn (100000đ)') as unknown,
     });
+    expect(orders.claim).not.toHaveBeenCalled();
+    expect(stock.restock).not.toHaveBeenCalled();
+    expect(orders.createPayment).not.toHaveBeenCalled();
+    expect(rollup.applyOrder).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
   });
 
-  it.each([
-    [100000, 100000n],
-    [60000, 60000n],
-  ])('voidPaid đơn 100k hoàn %i → applyOrder(tx, id, -1, -%sn)', async (refundAmount, refund) => {
+  it('voidPaid đơn 100k hoàn 100000 → applyOrder(tx, id, -1, -100000n) sau khi ghi payment', async () => {
     orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));
-    await service.voidPaid('o1', { reason: 'Khách trả', refundAmount, refundMethod: PaymentMethod.CASH }, ss);
+    await service.voidPaid('o1', { reason: 'Khách trả', refundAmount: 100000, refundMethod: PaymentMethod.CASH }, ss);
     expect(rollup.applyOrder).toHaveBeenCalledTimes(1);
-    expect(rollup.applyOrder).toHaveBeenCalledWith(tx, 'o1', -1, -refund);
+    expect(rollup.applyOrder).toHaveBeenCalledWith(tx, 'o1', -1, -100000n);
     expect(orders.createPayment.mock.invocationCallOrder[0]).toBeLessThan(
       rollup.applyOrder.mock.invocationCallOrder[0],
     );
@@ -152,7 +148,6 @@ describe('OrderVoidAndPreviewService', () => {
   it.each([
     ['thiếu refundAmount', { reason: 'x', refundMethod: PaymentMethod.CASH }],
     ['refundAmount 0', { reason: 'x', refundAmount: 0, refundMethod: PaymentMethod.CASH }],
-    ['refundAmount 100001', { reason: 'x', refundAmount: 100001, refundMethod: PaymentMethod.CASH }],
     ['thiếu refundMethod', { reason: 'x', refundAmount: 100000 }],
   ])('đơn 100k %s → 1002', async (_name, dto) => {
     orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));

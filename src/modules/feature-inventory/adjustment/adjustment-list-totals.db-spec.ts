@@ -1,4 +1,4 @@
-import { PrismaClient, ProductType } from '@prisma/client';
+import { PrismaClient, Product, ProductType } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthRole } from 'src/common/types/common.enum';
 import { createTestPrisma, resetSchema } from 'src/test-support/db-test';
@@ -106,5 +106,110 @@ describe('danh sách phiếu điều chỉnh — totalQuantity / totalValue (db)
     const disposeDetail = await repository.findDetail(dispose.id, {});
     const value = disposeDetail!.items.reduce((s, it) => s + Math.abs(it.quantity) * it.unitCost, 0);
     expect(byCode.get('XH1')!.totalValue).toBe(value);
+  });
+
+  it('kiểm kê: số liệu giữ dấu (+5, −3, −2 trên 2 sản phẩm, 1 sản phẩm 2 lô) + dòng xoá mềm bị loại', async () => {
+    const role = await prisma.role.create({ data: { code: 'ADMIN', name: 'Quản trị', level: 90 } });
+    const user = await prisma.user.create({ data: { fullName: 'Người lập', roleId: role.id } });
+    const branch = await prisma.branch.create({
+      data: { code: 'CN01', name: 'Chi nhánh 1', phone: '0900000001', address: 'Hà Nội' },
+    });
+    const unit = await prisma.unit.create({ data: { code: 'VIEN', name: 'Viên' } });
+    const category = await prisma.category.create({ data: { name: 'Thuốc' } });
+    const products: Product[] = [];
+    for (const code of ['SP01', 'SP02']) {
+      products.push(
+        await prisma.product.create({
+          data: { code, name: code, type: ProductType.GOODS, categoryId: category.id, baseUnitId: unit.id },
+        }),
+      );
+    }
+    const expiryDate = new Date('2030-01-01');
+    const mkBatch = (p: number, batchNumber: string) =>
+      prisma.stockBatch.create({
+        data: { branchId: branch.id, productId: products[p].id, batchNumber, expiryDate, importPrice: 700 },
+      });
+    const [a1, a2, b1, gone] = [
+      await mkBatch(0, 'A1'),
+      await mkBatch(0, 'A2'),
+      await mkBatch(1, 'B1'),
+      await mkBatch(1, 'B2'),
+    ];
+    const take = await prisma.stockAdjustment.create({
+      data: { branchId: branch.id, reason: 'x', createdBy: user.id, code: 'KK1', type: 'STOCK_TAKE' },
+    });
+    await prisma.stockAdjustment.create({
+      data: { branchId: branch.id, reason: 'x', createdBy: user.id, code: 'KK2', type: 'STOCK_TAKE' },
+    });
+    const line = (
+      batchId: string,
+      productId: string,
+      system: number,
+      actual: number,
+      unitCost: number,
+      isDeleted = false,
+    ) => ({
+      adjustmentId: take.id,
+      batchId,
+      productId,
+      systemQuantity: system,
+      actualQuantity: actual,
+      quantity: actual - system,
+      unitCost,
+      isDeleted,
+    });
+    await prisma.stockAdjustmentItem.createMany({
+      data: [
+        line(a1.id, products[0].id, 10, 15, 1_000_000_000), // +5
+        line(a2.id, products[0].id, 10, 7, 700), // −3
+        line(b1.id, products[1].id, 10, 8, 1000), // −2
+        line(gone.id, products[1].id, 10, 99, 999, true), // xoá mềm: bị loại
+      ],
+    });
+
+    const run = (permitted: boolean) => {
+      const perms = { getGrantedCodes: () => Promise.resolve(new Set(permitted ? ['goods-receipt:create'] : [])) };
+      const none = {} as never;
+      const svc = new AdjustmentService(repository, none, none, none, none, none, none, perms as never);
+      return svc.list(
+        { page: 1, limit: 10 } as never,
+        {
+          user: { userId: user.id, role: AuthRole.ADMIN, branchId: null, email: null, sid: 's', roleLevel: 90 },
+          ip: null,
+          userAgent: null,
+          requestId: null,
+        } as unknown as RequestActor,
+      );
+    };
+    const byCode = async (permitted: boolean) =>
+      new Map((await run(permitted)).hits.map((h) => [h.code, h as Record<string, unknown>]));
+
+    const full = await byCode(true);
+    expect(full.get('KK1')).toMatchObject({
+      lineCount: 2,
+      totalActual: 15 + 7 + 8,
+      diffUp: 5,
+      diffDown: 5,
+      diffUpValue: 5_000_000_000, // vượt Int32 vẫn đúng
+      diffDownValue: 3 * 700 + 2 * 1000,
+      totalQuantity: 10,
+    });
+    expect(full.get('KK2')).toMatchObject({
+      lineCount: 0,
+      totalActual: 0,
+      diffUp: 0,
+      diffDown: 0,
+      diffUpValue: 0,
+      diffDownValue: 0,
+    });
+
+    const masked = await byCode(false);
+    expect(masked.get('KK1')).toMatchObject({
+      lineCount: 2,
+      diffUp: 5,
+      diffDown: 5,
+      diffUpValue: null,
+      diffDownValue: null,
+    });
   });
 });

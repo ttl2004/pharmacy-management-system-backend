@@ -177,7 +177,18 @@ export class AdjustmentService {
       const sum = totals.get(row.id);
       const value = row.type === AdjustmentType.RETURN_TO_SUPPLIER ? Number(row.totalAmount) : (sum?.value ?? 0);
       const base = showCost ? row : maskAdjustmentRow(row);
-      return { ...base, totalQuantity: sum?.quantity ?? 0, totalValue: showCost ? value : null };
+      const common = { ...base, totalQuantity: sum?.quantity ?? 0, totalValue: showCost ? value : null };
+      if (row.type !== AdjustmentType.STOCK_TAKE) return common;
+      // Kiểm kê: số liệu GIỮ DẤU (tăng/giảm tách riêng) để danh sách hiện đủ như mock; giá trị ẩn theo quyền giá vốn.
+      return {
+        ...common,
+        lineCount: sum?.lineCount ?? 0,
+        totalActual: sum?.totalActual ?? 0,
+        diffUp: sum?.diffUp ?? 0,
+        diffDown: sum?.diffDown ?? 0,
+        diffUpValue: showCost ? (sum?.diffUpValue ?? 0) : null,
+        diffDownValue: showCost ? (sum?.diffDownValue ?? 0) : null,
+      };
     });
     const masked = { ...page, hits };
     if (query.type !== AdjustmentType.RETURN_TO_SUPPLIER) return masked;

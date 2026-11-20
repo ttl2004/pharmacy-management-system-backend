@@ -13,8 +13,8 @@ export class ReconcileRequest {
 
   @IsDateOnly()
   @ApiProperty({
-    description: 'Đến hết ngày (giờ VN), YYYY-MM-DD; không quá hôm nay, tối đa 31 ngày',
-    example: '2026-11-05',
+    description: 'Đến hết ngày (giờ VN), YYYY-MM-DD; tối đa là hôm qua, khoảng tối đa 31 ngày',
+    example: '2026-11-04',
   })
   toDate!: string;
 }

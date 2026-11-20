@@ -12,13 +12,14 @@ import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-bas
 import { CatalogTransactions, productWriteLocks } from '../catalog-transactions';
 import { CreateProductRequest, ProductUnitRequest, UpdateProductRequest } from './dtos/product.request';
 import { ProductQuery } from './dtos/product.query';
-import { productCreatedEntry, productDeletedEntry, productUpdatedEntries } from './product-audit';
+import { productCreatedEntry, productDeletedEntry, productRestoredEntry, productUpdatedEntries } from './product-audit';
 import { toExtraCreateData, toExtraUpdateData } from './product-extra-fields.mapper';
 import {
   DRUG_INGREDIENTS_SEARCH_FIELD,
   LinkedDrug,
   ProductDetail,
   ProductRepository,
+  ProductUnitRow,
 } from './repositories/product.repository';
 
 @Injectable()
@@ -31,7 +32,8 @@ export class ProductService extends AbstractBaseService<Product> {
     super(productRepository);
   }
 
-  async list(query: ProductQuery) {
+  /** `onlyDeleted` do controller quyết (chỉ người có quyền xoá): khi bật, chỉ trả sản phẩm ĐÃ xoá mềm. */
+  async list(query: ProductQuery, onlyDeleted = false) {
     const filter: BaseWhere<Product> = {};
     if (query.categoryId) filter.categoryId = query.categoryId;
     if (query.manufacturerId) filter.manufacturerId = query.manufacturerId;
@@ -46,6 +48,7 @@ export class ProductService extends AbstractBaseService<Product> {
       sort: query.sort,
       search: query.search,
       searchFields: ['code', 'barcode', 'name', DRUG_INGREDIENTS_SEARCH_FIELD],
+      deleted: onlyDeleted,
     });
   }
 
@@ -94,6 +97,10 @@ export class ProductService extends AbstractBaseService<Product> {
           minStockLevel: dto.minStockLevel ?? 0,
           status: dto.status ?? RecordStatus.ACTIVE,
           ...toExtraCreateData(dto),
+          // D3: thuốc thuộc danh mục kiểm soát đặc biệt → cờ kiểm soát luôn bật (đặt SAU toExtraCreateData để ghi đè).
+          ...(drug && this.isControlledByCatalog(drug)
+            ? { isControlled: this.controlledOf(drug, dto.isControlled) }
+            : {}),
           createdBy: callerId,
         });
         await this.productRepository.replaceLocations(tx, product.id, locationIds);
@@ -182,6 +189,10 @@ export class ProductService extends AbstractBaseService<Product> {
 
         const data = this.toUpdateData(dto, callerId);
         if (linkedDrug) data.requiresPrescription = this.prescriptionOf(linkedDrug, dto.requiresPrescription);
+        // D3: thuốc liên kết (mới hoặc cũ) thuộc danh mục kiểm soát đặc biệt → ép bật cờ; thuốc thường → giữ giá trị thủ công.
+        if (linkedDrug && this.isControlledByCatalog(linkedDrug)) {
+          data.isControlled = this.controlledOf(linkedDrug, dto.isControlled);
+        }
         if (newDrug && !existing.drugId) Object.assign(data, prefillFromDrug(newDrug, dto, existing));
         const written = await this.productRepository.updateProduct(tx, id, data);
         if (!written) throw this.notFound();
@@ -221,12 +232,53 @@ export class ProductService extends AbstractBaseService<Product> {
       const rows = await this.productRepository.findUnitsForReconcile(tx, id);
       const activeIds = rows.filter((row) => !row.isDeleted).map((row) => row.id);
 
-      await this.productRepository.softDeleteUnits(tx, activeIds, callerId);
-      await this.productRepository.softDeleteProduct(tx, id, callerId);
+      // Cùng một mốc thời gian cho Product và các dòng đơn vị: khôi phục dựa vào đó để biết dòng nào xoá cùng lúc.
+      // Hai hàm này đồng thời nhả mã vạch; `existing` đã đọc trước đó nên nhật ký vẫn giữ mã vạch gốc.
+      const deletedAt = new Date();
+      await this.productRepository.softDeleteUnits(tx, activeIds, callerId, deletedAt);
+      await this.productRepository.softDeleteProduct(tx, id, callerId, deletedAt);
       await this.audit.record(tx, auditActorOf(actor), [productDeletedEntry(id, existing)]);
     });
 
     return { success: true };
+  }
+
+  /**
+   * Khôi phục sản phẩm đã xoá mềm cùng các dòng đơn vị bị xoá cùng lúc (không hồi sinh dòng đã bị loại từ trước khi
+   * sửa). Mã sản phẩm giữ nguyên; mã vạch đã nhả khi xoá nên là rỗng — nhập lại bằng thao tác sửa.
+   */
+  async restore(id: string, actor: RequestActor): Promise<ProductDetail> {
+    const callerId = actor.user.userId;
+    await this.transactions.write(productWriteLocks(id, []), async (tx) => {
+      const deleted = await this.productRepository.findDeletedWith(tx, id);
+      if (!deleted) throw this.notFound();
+
+      // Thuốc liên kết phải còn hiệu lực như lúc tạo (có thể đã bị ngừng/xoá khỏi danh mục từ khi sản phẩm bị xoá).
+      const drug = deleted.drugId ? await this.assertActiveDrug(tx, deleted.drugId) : null;
+      // D3: thuốc nay thuộc danh mục kiểm soát (sync/migration bỏ qua hàng đã xoá) → khôi phục kèm bật cờ kiểm soát.
+      const forceControlled = !!drug && this.isControlledByCatalog(drug) && !deleted.isControlled;
+
+      if (deleted.updatedAt) {
+        await this.productRepository.restoreUnitsDeletedAt(tx, id, deleted.updatedAt, callerId);
+      }
+      const live = await this.productRepository.findLiveUnits(tx, id);
+      const bases = live.filter((u) => u.isBaseUnit && u.conversionRate === 1 && u.unitId === deleted.baseUnitId);
+      if (bases.length !== 1 || live.filter((u) => u.isBaseUnit).length !== 1) {
+        throw new ErrorException({
+          code: ErrorCode.INVALID_DOCUMENT_STATE,
+          message: 'Không khôi phục được sản phẩm: không xác định được đơn vị bán lúc xoá — hãy tạo sản phẩm mới',
+        });
+      }
+      // Cùng luật chống trùng quy cách như tạo/sửa (khoá `drug:<id>`), loại chính sản phẩm này.
+      if (deleted.drugId) await this.assertNoDuplicatePack(tx, deleted.drugId, live, id);
+      if ((await this.productRepository.restoreProduct(tx, id, callerId)) === 0) throw this.notFound();
+      if (forceControlled) await this.productRepository.updateProduct(tx, id, { isControlled: true });
+      await this.audit.record(tx, auditActorOf(actor), [
+        productRestoredEntry(id, forceControlled ? { ...deleted, isControlled: true } : deleted),
+      ]);
+    });
+
+    return this.getDetail(id);
   }
 
   /** Cấu hình đơn vị bán là lỗi dữ liệu client gửi (1002), khác với tham chiếu sai (1602). */
@@ -426,6 +478,24 @@ export class ProductService extends AbstractBaseService<Product> {
     return drug.isPrescription;
   }
 
+  /** Thuốc có `controlType` (không rỗng sau trim) trong danh mục quốc gia → hàng hoá luôn là thuốc kiểm soát. */
+  private isControlledByCatalog(drug: { controlType: string | null }): boolean {
+    return (drug.controlType ?? '').trim() !== '';
+  }
+
+  /**
+   * D3: cờ kiểm soát của hàng gắn thuốc thuộc danh mục kiểm soát đặc biệt bị KHOÁ ở bật — client gửi `false` thì từ
+   * chối (rõ ràng hơn là lặng lẽ bỏ qua). Thuốc không có `controlType` thì cờ do dược sĩ tự quyết, không qua hàm này.
+   */
+  private controlledOf(drug: { controlType: string | null }, requested: boolean | undefined): true {
+    if (requested === false) {
+      throw this.badRequest(
+        `Thuốc thuộc danh mục kiểm soát đặc biệt (${(drug.controlType ?? '').trim()}) — không bỏ được cờ kiểm soát`,
+      );
+    }
+    return true;
+  }
+
   /**
    * Chống trùng (chốt 2026-10-30): một thuốc có nhiều sản phẩm (mỗi quy cách một sản phẩm) nhưng không được hai sản phẩm
    * cùng bộ đơn vị `(đơn vị, tỉ lệ quy đổi)`. Khoá theo thuốc để hai ADMIN tạo cùng lúc vẫn chạy nối tiếp — lấy SAU mọi
@@ -469,6 +539,7 @@ export class ProductService extends AbstractBaseService<Product> {
     const existingRows = await this.productRepository.findUnitsForReconcile(client, productId);
     const existingByUnitId = new Map(existingRows.map((row) => [row.unitId, row]));
     const wantedUnitIds = new Set(units.map((unit) => unit.unitId));
+    await this.assertRatesUnchangedWhileInUse(client, productId, units, existingByUnitId);
 
     for (const unit of units) {
       const existingRow = existingByUnitId.get(unit.unitId);
@@ -513,6 +584,44 @@ export class ProductService extends AbstractBaseService<Product> {
       .filter((row) => !row.isDeleted && !wantedUnitIds.has(row.unitId))
       .map((row) => row.id);
     await this.productRepository.softDeleteUnits(client, removedIds, callerId);
+  }
+
+  /**
+   * Đổi quy cách (conversionRate) của dòng đơn vị đã có là đổi nghĩa của mọi giá/số liệu gắn với nó: bảng giá "90.000/hộp"
+   * bỗng thành 90.000 cho 20 viên, tồn/phiếu nhập/đơn cũ ghi theo tỉ lệ cũ. Nên chặn khi sản phẩm đã có kho, dòng
+   * đơn vị đã nằm trong bảng giá, hoặc đã bán — muốn quy cách khác thì thêm đơn vị mới (vd. "Hộp 20").
+   */
+  private async assertRatesUnchangedWhileInUse(
+    client: Prisma.TransactionClient,
+    productId: string,
+    units: ProductUnitRequest[],
+    existingByUnitId: Map<string, ProductUnitRow>,
+  ): Promise<void> {
+    const changed = units.flatMap((unit) => {
+      const row = existingByUnitId.get(unit.unitId);
+      return row && row.conversionRate !== unit.conversionRate ? [{ row, rate: unit.conversionRate }] : [];
+    });
+    if (!changed.length) return;
+
+    const hasInventory = await this.productRepository.hasInventoryHistory(client, productId);
+    const inUse = await this.productRepository.findUnitsInUse(
+      client,
+      changed.map(({ row }) => row.id),
+    );
+    for (const { row, rate } of changed) {
+      const reasons = [
+        hasInventory && 'tồn kho',
+        inUse.priceBook.has(row.id) && 'bảng giá',
+        inUse.sold.has(row.id) && 'đã bán',
+      ].filter(Boolean);
+      if (!reasons.length) continue;
+      throw new ErrorException({
+        code: hasInventory ? ErrorCode.PRODUCT_HAS_STOCK : ErrorCode.INVALID_DOCUMENT_STATE,
+        message:
+          `Không đổi được quy cách ${row.unit.name} (đang 1 = ${row.conversionRate}, muốn đổi thành ${rate}): ` +
+          `sản phẩm đã có ${reasons.join(' / ')} — hãy thêm đơn vị mới (vd. '${row.unit.name} ${rate}') thay vì sửa`,
+      });
+    }
   }
 
   private notFound(): ErrorException {

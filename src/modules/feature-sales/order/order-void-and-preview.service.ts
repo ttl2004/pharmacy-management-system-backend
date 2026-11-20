@@ -7,6 +7,8 @@ import {
   PaymentStatus,
   TransactionStatus,
 } from '@prisma/client';
+import { ErrorCode } from 'src/common/types/error-code';
+import { permissionError } from 'src/modules/feature-auth/permission/permission.error';
 import { badRequest } from 'src/modules/feature-inventory/core/inventory.error';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { toDateOnlyString } from 'src/common/utils/date-only.util';
@@ -20,11 +22,16 @@ import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
 import { bookPriceOf, buildOrderLines, toBookPricing } from '../core/order-lines';
 import { OrderStockService } from '../core/order-stock.service';
+import { onBehalfOfMetadata } from '../core/order-ownership';
 import { SALES_AUDIT_ENTITY } from '../core/sales.constants';
 import { orderErrors } from '../core/sales.error';
 import { PreviewAllocationRequest, VoidPaidOrderRequest } from './dtos/order.request';
 import { SalesRollupRepository } from '../../feature-report/sales-rollup.repository';
 import { OrderDetail, OrderRepository } from './repositories/order.repository';
+
+/** Hạn huỷ hoá đơn đã thu với vai trò theo chi nhánh: 7 ngày, tính 7×24 giờ từ lúc thu tiền (`completedAt`). */
+export const VOID_PAID_WINDOW_DAYS = 7;
+const VOID_PAID_WINDOW_MS = VOID_PAID_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
 /**
  * Thao tác sau bán của đơn tại quầy (như mock):
@@ -58,6 +65,15 @@ export class OrderVoidAndPreviewService {
       }
       // Kiểm tiền hoàn TRƯỚC khi chiếm đơn và trả hàng về kho: lỗi thì không đụng gì.
       const refund = this.refundOf(head.totalAmount, dto);
+      // B7: quá 7×24 giờ kể từ lúc thu thì chỉ vai trò toàn chuỗi huỷ được. Kiểm trước khi chiếm đơn/đụng kho.
+      // Thiếu completedAt (dữ liệu cũ) coi như đã quá hạn — không dùng updatedAt vì nó có thể bị đẩy lên sau khi thu.
+      const paidAt = head.completedAt;
+      if (scope.kind !== 'ALL' && (!paidAt || now.getTime() - paidAt.getTime() > VOID_PAID_WINDOW_MS)) {
+        throw permissionError(
+          ErrorCode.PERMISSION_DENIED,
+          `Hoá đơn đã thu quá ${VOID_PAID_WINDOW_DAYS} ngày — chỉ quản trị chuỗi huỷ được`,
+        );
+      }
       const claimed = await this.orders.claim(
         tx,
         id,
@@ -98,6 +114,7 @@ export class OrderVoidAndPreviewService {
         searchTerms: [head.code],
         amount: head.totalAmount,
         reason: dto.reason,
+        ...onBehalfOfMetadata(head, actorId),
       };
       const entries: AuditEntry[] = [
         {
@@ -109,18 +126,16 @@ export class OrderVoidAndPreviewService {
       ];
       // Đơn 0đ không có lượt thu nào (xem `payPos`) nên không có tiền để hoàn.
       if (refund) {
-        // Hoàn ít hơn tổng mà hàng vẫn về kho đủ → nổi bật (severity 2) để quản lý soát.
-        const partial = refund.amount < head.totalAmount;
         entries.push({
           event: 'PAYMENT.REFUNDED',
           ...common,
           amount: refund.amount,
-          severity: partial ? 2 : 1,
+          severity: 1,
           after: { paymentStatus: PaymentStatus.REFUNDED, refundedAmount: refund.amount.toString() },
           metadata: {
+            ...common.metadata,
             totalAmount: head.totalAmount.toString(),
             refundAmount: refund.amount.toString(),
-            ...(partial ? { partialRefund: true } : {}),
           },
         });
       }
@@ -131,17 +146,17 @@ export class OrderVoidAndPreviewService {
     });
   }
 
-  /** Đơn > 0đ: `0 < refundAmount ≤ tổng` + hình thức hoàn; đơn 0đ: không được gửi tiền hoàn. */
+  /** Đơn > 0đ: `refundAmount` = ĐÚNG tổng hoá đơn (huỷ là hoàn toàn bộ) + hình thức hoàn; đơn 0đ: không được gửi tiền hoàn. */
   private refundOf(total: bigint, dto: VoidPaidOrderRequest): { amount: bigint; method: PaymentMethod } | null {
     if (total === 0n) {
       if (dto.refundAmount) throw badRequest('Đơn 0đ không có tiền để hoàn');
       return null;
     }
-    if (!dto.refundAmount || dto.refundAmount <= 0) throw badRequest('Cần nhập số tiền đã hoàn cho khách (lớn hơn 0)');
-    const amount = BigInt(dto.refundAmount);
-    if (amount > total) throw badRequest('Số tiền hoàn không được vượt tổng hoá đơn');
+    if (!dto.refundAmount || BigInt(dto.refundAmount) !== total) {
+      throw badRequest(`Số tiền hoàn phải bằng đúng tổng hoá đơn (${total}đ) — huỷ hoá đơn là hoàn toàn bộ`);
+    }
     if (!dto.refundMethod) throw badRequest('Cần chọn hình thức hoàn tiền');
-    return { amount, method: dto.refundMethod };
+    return { amount: total, method: dto.refundMethod };
   }
 
   /**

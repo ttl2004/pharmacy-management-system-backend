@@ -92,11 +92,23 @@ const PRODUCT_DETAIL_SELECT = {
 } satisfies Prisma.ProductSelect;
 
 export type ProductSummary = Prisma.ProductGetPayload<{ select: typeof PRODUCT_SUMMARY_SELECT }>;
+/** Dòng ProductUnit dùng cho đối chiếu replace-all (kể cả dòng đã xoá mềm). */
+export type ProductUnitRow = {
+  id: string;
+  unitId: string;
+  isDeleted: boolean;
+  conversionRate: number;
+  salePrice: number;
+  barcode: string | null;
+  unit: { name: string };
+};
+
 export type ProductDetail = Prisma.ProductGetPayload<{ select: typeof PRODUCT_DETAIL_SELECT }>;
 /** Phần thuốc trong danh mục mà hàng hoá cần khi liên kết: cờ kê đơn (chép) và văn bản điền sẵn. */
 const LINKED_DRUG_SELECT = {
   id: true,
   isPrescription: true,
+  controlType: true,
   indications: true,
   dosage: true,
   storage: true,
@@ -148,6 +160,8 @@ export interface ProductPageOptions {
   sort?: string;
   search?: string;
   searchFields?: string[];
+  /** Chỉ lấy sản phẩm đã xoá mềm (cho người có quyền xoá, để khôi phục). */
+  deleted?: boolean;
 }
 
 /** Trường tìm kiếm ảo: hoạt chất nằm ở thuốc liên kết (`drugs.ingredients`), không còn là cột của hàng hoá. */
@@ -176,10 +190,9 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
     filter: BaseWhere<Product>,
     options: ProductPageOptions,
   ): Promise<PaginationResult<ProductSummary>> {
-    const where = this.buildWhere(
-      filter,
-      this.resolveSearchWhere(options.search, options.searchFields),
-    ) as Prisma.ProductWhereInput;
+    const built = this.buildWhere(filter, this.resolveSearchWhere(options.search, options.searchFields));
+    // `buildWhere` luôn ép `isDeleted: false`; danh sách "đã xoá" (để khôi phục) đảo cờ ở phần gốc điều kiện.
+    const where = (options.deleted ? this.onlyDeleted(built) : built) as Prisma.ProductWhereInput;
 
     const [hits, total] = await Promise.all([
       this.prisma.product.findMany({
@@ -199,6 +212,14 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
       totalPages: Math.ceil(total / options.limit),
       limit: options.limit,
     };
+  }
+
+  private onlyDeleted(where: Record<string, unknown>): Record<string, unknown> {
+    if (Array.isArray(where.AND)) {
+      const [base, ...rest] = where.AND as Record<string, unknown>[];
+      return { AND: [{ ...base, isDeleted: true }, ...rest] };
+    }
+    return { ...where, isDeleted: true };
   }
 
   /** Chi tiết Product kèm cấu hình đơn vị bán đang hoạt động. */
@@ -314,8 +335,8 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
   }
 
   /**
-   * Mã vạch đã bị dùng chưa. Quét **cả** bản ghi đã xoá mềm vì unique index của PostgreSQL là toàn
-   * cục, và quét cả hai bảng vì ràng buộc unique chéo `products`/`product_units` không có ở tầng CSDL.
+   * Mã vạch đã bị dùng chưa. Xoá mềm nhả mã vạch (null) nên bản ghi đã xoá không còn giữ chỗ; vẫn quét không lọc
+   * `isDeleted` để chắc chắn với dữ liệu cũ. Quét cả hai bảng vì ràng buộc unique chéo `products`/`product_units` không có ở tầng CSDL (unique của DB chỉ chặn trong từng bảng).
    */
   async findBarcodeConflict(
     client: Prisma.TransactionClient,
@@ -355,14 +376,46 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
    * Nạp toàn bộ ProductUnit của sản phẩm, **kể cả** dòng đã xoá mềm: replace-all cần biết dòng nào
    * phải kích hoạt lại thay vì `create` mới, vì unique `(productId, unitId)` vẫn giữ chỗ.
    */
-  findUnitsForReconcile(
-    client: Prisma.TransactionClient,
-    productId: string,
-  ): Promise<{ id: string; unitId: string; isDeleted: boolean }[]> {
+  findUnitsForReconcile(client: Prisma.TransactionClient, productId: string): Promise<ProductUnitRow[]> {
     return client.productUnit.findMany({
       where: { productId },
-      select: { id: true, unitId: true, isDeleted: true },
+      select: {
+        id: true,
+        unitId: true,
+        isDeleted: true,
+        conversionRate: true,
+        salePrice: true,
+        barcode: true,
+        unit: { select: { name: true } },
+      },
     });
+  }
+
+  /**
+   * Các dòng đơn vị (id ProductUnit) đang được bảng giá dùng hoặc đã có trên dòng đơn hàng — đổi quy cách của chúng làm
+   * sai giá đã đặt / lịch sử bán. Trả hai tập id để service báo đúng lý do.
+   */
+  async findUnitsInUse(
+    client: Prisma.TransactionClient,
+    productUnitIds: string[],
+  ): Promise<{ priceBook: Set<string>; sold: Set<string> }> {
+    if (!productUnitIds.length) return { priceBook: new Set(), sold: new Set() };
+    const [priced, sold] = await Promise.all([
+      client.priceBookItem.findMany({
+        where: { productUnitId: { in: productUnitIds } },
+        select: { productUnitId: true },
+        distinct: ['productUnitId'],
+      }),
+      client.orderItem.findMany({
+        where: { productUnitId: { in: productUnitIds } },
+        select: { productUnitId: true },
+        distinct: ['productUnitId'],
+      }),
+    ]);
+    return {
+      priceBook: new Set(priced.map((row) => row.productUnitId)),
+      sold: new Set(sold.map((row) => row.productUnitId)),
+    };
   }
 
   /** Trả số dòng đã ghi; 0 nghĩa là sản phẩm không tồn tại hoặc vừa bị xoá mềm. */
@@ -384,12 +437,68 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
     await client.productUnit.update({ where: { id }, data });
   }
 
-  /** Xoá mềm Product. Ghi được `updatedBy` nên không dùng `softDelete` của repository nền. */
-  async softDeleteProduct(client: Prisma.TransactionClient, id: string, actorId: string): Promise<void> {
+  /**
+   * Xoá mềm Product. Ghi được `updatedBy` nên không dùng `softDelete` của repository nền. Mã vạch được **nhả** (null) vì
+   * nó gắn với hàng thật, hàng mới có thể dùng lại; mã sản phẩm thì giữ (đã in trên chứng từ cũ). `deletedAt` do
+   * service truyền để Product và các dòng đơn vị xoá cùng lúc có chung `updatedAt` — dấu để khôi phục đúng dòng.
+   */
+  async softDeleteProduct(
+    client: Prisma.TransactionClient,
+    id: string,
+    actorId: string,
+    deletedAt: Date = new Date(),
+  ): Promise<void> {
     await client.product.update({
       where: { id },
-      data: { isDeleted: true, updatedBy: actorId, updatedAt: new Date() },
+      data: { isDeleted: true, barcode: null, updatedBy: actorId, updatedAt: deletedAt },
     });
+  }
+
+  /** Product đã xoá mềm (để khôi phục); `updatedAt` chính là dấu thời điểm xoá. */
+  findDeletedWith(client: Prisma.TransactionClient, id: string): Promise<Product | null> {
+    return client.product.findFirst({ where: { id, isDeleted: true } });
+  }
+
+  /** Các dòng đơn vị đang hoạt động của sản phẩm (để kiểm bất biến sau khi khôi phục). */
+  findLiveUnits(
+    client: Prisma.TransactionClient,
+    productId: string,
+  ): Promise<{ unitId: string; conversionRate: number; isBaseUnit: boolean }[]> {
+    return client.productUnit.findMany({
+      where: { productId, isDeleted: false },
+      select: { unitId: true, conversionRate: true, isBaseUnit: true },
+    });
+  }
+
+  /** Khôi phục Product đã xoá mềm; trả số dòng ghi (0 = không còn ở trạng thái đã xoá). Mã vạch giữ null. */
+  async restoreProduct(client: Prisma.TransactionClient, id: string, actorId: string): Promise<number> {
+    const result = await client.product.updateMany({
+      where: { id, isDeleted: true },
+      data: { isDeleted: false, updatedBy: actorId, updatedAt: new Date() },
+    });
+    return result.count;
+  }
+
+  /**
+   * Khôi phục các dòng đơn vị đã xoá cùng lúc với Product, không đụng dòng bị loại từ trước. Lần xoá mới ghi cùng một
+   * mốc, nhưng dòng xoá trước khi có quy ước đó lệch vài ms (và đồng bộ thuốc có thể làm xê dịch `updatedAt` của
+   * Product) nên nhận trong cửa sổ [mốc − 5 s, mốc + 1 s].
+   */
+  async restoreUnitsDeletedAt(
+    client: Prisma.TransactionClient,
+    productId: string,
+    deletedAt: Date,
+    actorId: string,
+  ): Promise<number> {
+    const result = await client.productUnit.updateMany({
+      where: {
+        productId,
+        isDeleted: true,
+        updatedAt: { gte: new Date(deletedAt.getTime() - 5_000), lte: new Date(deletedAt.getTime() + 1_000) },
+      },
+      data: { isDeleted: false, updatedBy: actorId, updatedAt: new Date() },
+    });
+    return result.count;
   }
 
   /**
@@ -429,12 +538,18 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
   }
 
   /** Xoá mềm dòng bị loại khỏi payload. Ghi được `updatedBy` nên không dùng `softDeleteMany` của base. */
-  async softDeleteUnits(client: Prisma.TransactionClient, ids: string[], actorId: string): Promise<void> {
+  async softDeleteUnits(
+    client: Prisma.TransactionClient,
+    ids: string[],
+    actorId: string,
+    deletedAt: Date = new Date(),
+  ): Promise<void> {
     if (!ids.length) return;
 
+    // Nhả mã vạch cùng lúc xoá: mã gắn với hàng thật, dòng đã xoá không được giữ chỗ.
     await client.productUnit.updateMany({
       where: { id: { in: ids }, isDeleted: false },
-      data: { isDeleted: true, updatedBy: actorId, updatedAt: new Date() },
+      data: { isDeleted: true, barcode: null, updatedBy: actorId, updatedAt: deletedAt },
     });
   }
 }

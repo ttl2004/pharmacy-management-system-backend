@@ -16,8 +16,10 @@ export interface RawPriceRow {
   unitName: string;
   factor: number;
   generalPrice: number;
-  avgCost: number;
-  lastPurchaseCost: number;
+  /** `null` = không tính được (không có chi nhánh / không còn lô AVAILABLE) — KHÔNG phải 0. */
+  avgCost: number | null;
+  /** `null` = chưa có phiếu nhập CONFIRMED ở chi nhánh (hoặc không có chi nhánh). */
+  lastPurchaseCost: number | null;
 }
 
 const COMPARE_SQL: Record<PriceCompareOp, Prisma.Sql> = {
@@ -33,7 +35,8 @@ const COMPARE_SQL: Record<PriceCompareOp, Prisma.Sql> = {
  *
  * Giá vốn (D3) = bình quân `importPrice` theo SỐ CÒN LẠI của các lô AVAILABLE ở chi nhánh, tính theo đơn vị gốc, rồi
  * × hệ số đơn vị. Giá nhập cuối (D11) = (đơn giá − giảm giá) / hệ số của dòng phiếu nhập CONFIRMED gần nhất ở chi nhánh.
- * Không có `branchId` → hai giá đó = 0 và lọc tồn bị bỏ qua.
+ * Không tính được (không có `branchId`, không còn lô / chưa có phiếu nhập) → hai giá đó = NULL (không phải 0, để
+ * công thức không ghi giá 0); không có `branchId` thì lọc tồn bị bỏ qua.
  */
 @Injectable()
 export class PriceBookRowsRepository {
@@ -78,9 +81,8 @@ export class PriceBookRowsRepository {
       WITH cost AS (
         SELECT b."productId",
                COALESCE(SUM(b."quantityOnHand"), 0)::int AS "onHand",
-               COALESCE(
-                 SUM(b."importPrice"::float8 * b."quantityOnHand") FILTER (WHERE b."status" = 'AVAILABLE')
-                 / NULLIF(SUM(b."quantityOnHand") FILTER (WHERE b."status" = 'AVAILABLE'), 0), 0) AS "avgBase"
+               SUM(b."importPrice"::float8 * b."quantityOnHand") FILTER (WHERE b."status" = 'AVAILABLE')
+                 / NULLIF(SUM(b."quantityOnHand") FILTER (WHERE b."status" = 'AVAILABLE'), 0) AS "avgBase"
         FROM "stock_batches" b
         WHERE b."branchId" = ${branchId}::uuid AND b."isDeleted" = false
         GROUP BY b."productId"
@@ -95,8 +97,8 @@ export class PriceBookRowsRepository {
       SELECT t.* FROM (
         SELECT pu."id" AS "productUnitId", p."id" AS "productId", pu."unitId", p."code", p."name", u."name" AS "unitName",
                pu."conversionRate" AS "factor", pu."salePrice" AS "generalPrice",
-               ROUND(COALESCE(c."avgBase", 0) * pu."conversionRate")::float8 AS "avgCost",
-               ROUND(COALESCE(l."netBase", 0) * pu."conversionRate")::float8 AS "lastPurchaseCost"
+               ROUND(c."avgBase" * pu."conversionRate")::float8 AS "avgCost",
+               ROUND(l."netBase" * pu."conversionRate")::float8 AS "lastPurchaseCost"
         FROM "product_units" pu
         JOIN "products" p ON p."id" = pu."productId"
         JOIN "units" u ON u."id" = pu."unitId"

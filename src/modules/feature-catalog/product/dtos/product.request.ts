@@ -13,6 +13,7 @@ import {
   IsString,
   IsUUID,
   Matches,
+  Max,
   MaxLength,
   Min,
   ValidateIf,
@@ -22,6 +23,9 @@ import { ProductExtraFieldsRequest } from './product-extra-fields.request';
 
 const CODE_PATTERN = /^[A-Z0-9_-]+$/;
 const MAX_IMAGE_URLS = 10;
+/** Cột `Int` của PostgreSQL tối đa 2.147.483.647; chặn ở 400 thay vì để Prisma ném 500. */
+const MAX_MONEY = 1_000_000_000;
+const MAX_CONVERSION_RATE = 1_000_000;
 /** URL ảnh ngoài, hoặc đường dẫn ảnh do `POST /product-image` trả về (tên tệp UUID + đuôi ảnh). */
 const IMAGE_URL_PATTERN = /^(https?:\/\/\S+|\/uploads\/products\/[0-9a-f-]{36}\.(png|jpg|webp|gif))$/;
 
@@ -36,11 +40,13 @@ export class ProductUnitRequest {
 
   @IsInt()
   @Min(1)
+  @Max(MAX_CONVERSION_RATE, { message: `Quy đổi tối đa ${MAX_CONVERSION_RATE.toLocaleString('en-US')}` })
   @ApiProperty({ description: 'Số đơn vị cơ bản trong một đơn vị này; dòng cơ bản phải bằng 1' })
   conversionRate: number;
 
   @IsInt()
   @Min(0)
+  @Max(MAX_MONEY, { message: `Giá bán tối đa ${MAX_MONEY.toLocaleString('en-US')} đồng` })
   @ApiProperty({ description: 'Giá bán theo đơn vị này, đơn vị đồng' })
   salePrice: number;
 
@@ -145,6 +151,7 @@ export class CreateProductRequest extends ProductExtraFieldsRequest {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(MAX_MONEY, { message: `Định mức tồn tối thiểu tối đa ${MAX_MONEY.toLocaleString('en-US')}` })
   @ApiPropertyOptional()
   minStockLevel?: number;
 
@@ -248,6 +255,7 @@ export class UpdateProductRequest extends ProductExtraFieldsRequest {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(MAX_MONEY, { message: `Định mức tồn tối thiểu tối đa ${MAX_MONEY.toLocaleString('en-US')}` })
   @ApiPropertyOptional()
   minStockLevel?: number;
 

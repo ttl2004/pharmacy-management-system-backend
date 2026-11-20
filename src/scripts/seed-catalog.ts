@@ -1,3 +1,5 @@
+// Nạp .env TRƯỚC khi kiểm NODE_ENV: ts-node không tự nạp, ConfigModule chỉ nạp khi dựng app (sau bước kiểm).
+import 'dotenv/config';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Prisma, ProductType, RecordStatus } from '@prisma/client';
@@ -12,15 +14,15 @@ import { seedPriceBooks } from './seed-catalog-price-books';
 type IdByCode = Map<string, string>;
 
 /**
- * Tìm theo `code` chứ không dùng `upsert`: cột `code` là UNIQUE nhưng bản ghi đã xoá mềm vẫn giữ giá
- * trị đó, nên upsert sẽ đâm vào ràng buộc thay vì phục hồi bản ghi cũ.
+ * Chỉ TẠO bản ghi chưa có theo `code`; bản ghi đã có (kể cả đã tắt hoạt động hoặc xoá mềm) giữ nguyên — chạy lại seed
+ * không được ghi đè dữ liệu thật hay bật lại thứ người dùng đã tắt/xoá. Tìm theo `code` chứ không dùng `upsert` vì
+ * `code` là UNIQUE và bản ghi xoá mềm vẫn giữ giá trị đó.
  */
 async function upsertDictionary<T extends { code: string }, TRecord extends { id: string }>(
   items: readonly T[],
   handlers: {
     find: (code: string) => Promise<TRecord | null>;
     create: (item: T) => Promise<TRecord>;
-    update: (id: string, item: T) => Promise<TRecord>;
   },
   label: string,
   logger: Logger,
@@ -29,9 +31,9 @@ async function upsertDictionary<T extends { code: string }, TRecord extends { id
 
   for (const item of items) {
     const existing = await handlers.find(item.code);
-    const record = existing ? await handlers.update(existing.id, item) : await handlers.create(item);
+    const record = existing ?? (await handlers.create(item));
     idByCode.set(item.code, record.id);
-    logger.log(`${existing ? 'Cập nhật' : 'Tạo'} ${label} ${item.code}`);
+    logger.log(`${existing ? 'Giữ nguyên' : 'Tạo'} ${label} ${item.code}`);
   }
 
   return idByCode;
@@ -43,8 +45,6 @@ async function seedBranches(prisma: PrismaService, logger: Logger): Promise<void
     {
       find: (code) => prisma.branch.findFirst({ where: { code } }),
       create: (branch) => prisma.branch.create({ data: { ...branch } }),
-      update: (id, branch) =>
-        prisma.branch.update({ where: { id }, data: { ...branch, isDeleted: false, updatedAt: new Date() } }),
     },
     'chi nhánh',
     logger,
@@ -57,11 +57,6 @@ async function seedCategories(prisma: PrismaService, logger: Logger): Promise<Id
     {
       find: (code) => prisma.category.findFirst({ where: { code } }),
       create: (category) => prisma.category.create({ data: { ...category, createdBy: SYSTEM_ACTOR_ID } }),
-      update: (id, category) =>
-        prisma.category.update({
-          where: { id },
-          data: { ...category, isDeleted: false, updatedBy: SYSTEM_ACTOR_ID, updatedAt: new Date() },
-        }),
     },
     'nhóm sản phẩm',
     logger,
@@ -74,11 +69,6 @@ async function seedManufacturers(prisma: PrismaService, logger: Logger): Promise
     {
       find: (code) => prisma.manufacturer.findFirst({ where: { code } }),
       create: (manufacturer) => prisma.manufacturer.create({ data: { ...manufacturer, createdBy: SYSTEM_ACTOR_ID } }),
-      update: (id, manufacturer) =>
-        prisma.manufacturer.update({
-          where: { id },
-          data: { ...manufacturer, isDeleted: false, updatedBy: SYSTEM_ACTOR_ID, updatedAt: new Date() },
-        }),
     },
     'hãng sản xuất',
     logger,
@@ -91,11 +81,6 @@ async function seedUnits(prisma: PrismaService, logger: Logger): Promise<IdByCod
     {
       find: (code) => prisma.unit.findFirst({ where: { code } }),
       create: (unit) => prisma.unit.create({ data: { ...unit, createdBy: SYSTEM_ACTOR_ID } }),
-      update: (id, unit) =>
-        prisma.unit.update({
-          where: { id },
-          data: { ...unit, isDeleted: false, updatedBy: SYSTEM_ACTOR_ID, updatedAt: new Date() },
-        }),
     },
     'đơn vị tính',
     logger,
@@ -187,6 +172,12 @@ async function seedProducts(
     const baseUnitId = references.units.get(product.baseUnitCode);
     if (!categoryId || !baseUnitId) throw new Error(`Thiếu tham chiếu cho sản phẩm ${product.code}`);
 
+    // Sản phẩm đã có (kể cả xoá mềm/tắt hoạt động) giữ nguyên hoàn toàn: không đụng giá, trạng thái, đơn vị bán.
+    if (await prisma.product.findFirst({ where: { code: product.code }, select: { id: true } })) {
+      logger.log(`Giữ nguyên sản phẩm ${product.code}`);
+      continue;
+    }
+
     const manufacturerId = product.manufacturerCode
       ? (references.manufacturers.get(product.manufacturerCode) ?? null)
       : null;
@@ -217,24 +208,47 @@ async function seedProducts(
     // Sản phẩm và cấu hình đơn vị bán của nó là một khối: lỗi giữa chừng không được để lại sản phẩm
     // thiếu đơn vị. Đi qua `CatalogTransactions` cho cùng khoá mã vạch với `ProductService`.
     const locks = productWriteLocks(null, [product.barcode, ...product.units.map((unit) => unit.barcode)]);
-    const existed = await transactions.write(locks, async (tx) => {
-      const existing = await tx.product.findFirst({ where: { code: product.code } });
-      const saved = existing
-        ? await tx.product.update({
-            where: { id: existing.id },
-            data: { ...data, isDeleted: false, updatedBy: SYSTEM_ACTOR_ID, updatedAt: new Date() },
-          })
-        : await tx.product.create({ data: { ...data, createdBy: SYSTEM_ACTOR_ID } });
-
+    await transactions.write(locks, async (tx) => {
+      const saved = await tx.product.create({ data: { ...data, createdBy: SYSTEM_ACTOR_ID } });
       await reconcileUnits(tx, saved.id, product.units, references.units, logger);
-      return Boolean(existing);
     });
 
-    logger.log(`${existed ? 'Cập nhật' : 'Tạo'} sản phẩm ${product.code}`);
+    logger.log(`Tạo sản phẩm ${product.code}`);
   }
 }
 
+/** Seed đè dữ liệu mẫu lên CSDL thật là việc nguy hiểm: production phải xác nhận rõ bằng ALLOW_SEED_IN_PRODUCTION=true. */
+export function seedBlockedReason(env: { NODE_ENV?: string; ALLOW_SEED_IN_PRODUCTION?: string }): string | null {
+  // Thiếu NODE_ENV coi là production — cùng quy ước với app (env.validation mặc định 'production').
+  const isProduction = !env.NODE_ENV || env.NODE_ENV === 'production';
+  if (isProduction && env.ALLOW_SEED_IN_PRODUCTION !== 'true') {
+    return 'Từ chối chạy seed:catalog khi NODE_ENV=production (hoặc chưa đặt NODE_ENV) vì đây là dữ liệu mẫu. Máy dev: đặt NODE_ENV=development trong .env. Nếu thật sự cần chạy trên production, đặt ALLOW_SEED_IN_PRODUCTION=true.';
+  }
+  return null;
+}
+
+/** Toàn bộ seed catalog, chỉ tạo bản ghi chưa có. Tách khỏi bootstrap để test gọi được với Prisma của schema test. */
+export async function runCatalogSeed(
+  prisma: PrismaService,
+  transactions: CatalogTransactions,
+  logger: Logger,
+): Promise<void> {
+  await seedBranches(prisma, logger);
+  const categories = await seedCategories(prisma, logger);
+  const manufacturers = await seedManufacturers(prisma, logger);
+  const units = await seedUnits(prisma, logger);
+  await seedProducts(prisma, transactions, { categories, manufacturers, units }, logger);
+  await seedPriceBooks(prisma, logger);
+}
+
 async function bootstrap() {
+  const blocked = seedBlockedReason(process.env);
+  if (blocked) {
+    new Logger('SeedCatalogScript').error(blocked);
+    process.exitCode = 1;
+    return;
+  }
+
   const app = await NestFactory.createApplicationContext(AppModule);
   const logger = new Logger('SeedCatalogScript');
 
@@ -242,12 +256,7 @@ async function bootstrap() {
     const prisma = app.get(PrismaService);
     const transactions = app.get(CatalogTransactions);
 
-    await seedBranches(prisma, logger);
-    const categories = await seedCategories(prisma, logger);
-    const manufacturers = await seedManufacturers(prisma, logger);
-    const units = await seedUnits(prisma, logger);
-    await seedProducts(prisma, transactions, { categories, manufacturers, units }, logger);
-    await seedPriceBooks(prisma, logger);
+    await runCatalogSeed(prisma, transactions, logger);
 
     logger.log('Catalog seed completed');
   } catch (error) {
@@ -258,4 +267,5 @@ async function bootstrap() {
   }
 }
 
-void bootstrap();
+// Chỉ tự chạy khi gọi bằng `npm run seed:catalog`; import từ test không chạy gì.
+if (require.main === module) void bootstrap();

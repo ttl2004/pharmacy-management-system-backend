@@ -15,8 +15,7 @@ import { CancelDebtDocumentRequest } from './dtos/supplier-payment.request';
 import { assertBranchDebtNotNegative } from './supplier-debt-guards';
 import { AdjustmentRow, SupplierDebtAdjustmentRepository } from './repositories/supplier-debt-adjustment.repository';
 import { SupplierDebtRepository } from './repositories/supplier-debt.repository';
-
-const FUTURE_TOLERANCE_MS = 60_000;
+import { parseDocumentDate } from '../core/document-date';
 
 const notFound = () =>
   new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Phiếu điều chỉnh nợ không tồn tại' });
@@ -52,17 +51,14 @@ export class SupplierDebtAdjustmentService {
   async create(dto: CreateSupplierDebtAdjustmentRequest, actor: RequestActor) {
     const scope = resolveBranchScope(actor.user);
     const branchId = resolveWriteBranch(scope, dto.branchId, 'Cần chọn chi nhánh điều chỉnh (branchId)');
-    const adjustedAt = new Date(dto.adjustedAt);
-    if (adjustedAt.getTime() > Date.now() + FUTURE_TOLERANCE_MS) {
-      throw badRequest('Ngày điều chỉnh không được ở tương lai');
-    }
+    const adjustedAt = parseDocumentDate(dto.adjustedAt, 'Ngày điều chỉnh');
     const actorId = actor.user.userId;
 
     return this.transactions.run(async ({ tx }) => {
       // Khoá NCC: hai điều chỉnh cùng lúc xếp hàng, mỗi cái thấy nợ đã gồm cái trước.
       if (!(await this.debts.lockSupplier(tx, dto.supplierId))) throw invalidReference('nhà cung cấp không tồn tại');
       if (!(await this.debts.branchUsable(tx, branchId))) {
-        throw invalidReference('chi nhánh không tồn tại hoặc đã ngừng hoạt động');
+        throw invalidReference('chi nhánh không tồn tại');
       }
       // Nợ của đúng chi nhánh này; số người dùng đã thấy phải còn khớp (đã khoá NCC nên không ai chen vào nữa).
       const { scoped: current } = await this.debts.debtOf(dto.supplierId, branchId, tx);

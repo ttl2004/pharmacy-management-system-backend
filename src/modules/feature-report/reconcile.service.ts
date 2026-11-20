@@ -14,8 +14,11 @@ export type ReconcileTrigger = 'CRON' | 'MANUAL';
 
 /** `rebuild` chờ khoá ngày của đơn đang thu dở; chừa thời gian rộng cho transaction. */
 const RECONCILE_TX_TIMEOUT_MS = 5 * 60_000;
-/** Dòng RUNNING cũ hơn mức này coi như tiến trình đã chết giữa chừng. */
-const STALE_RUNNING_MS = 60 * 60_000;
+/**
+ * Dòng RUNNING cũ hơn mức này coi như tiến trình đã chết giữa chừng. Một lần chạy không thể quá
+ * `RECONCILE_TX_TIMEOUT_MS` (5 phút) + chờ khoá, nên 15 phút là chắc chắn đã chết — không bắt ADMIN chờ cả giờ.
+ */
+const STALE_RUNNING_MS = 15 * 60_000;
 const BUSY_MESSAGE = 'Đối soát đang chạy';
 
 /**
@@ -25,7 +28,7 @@ const BUSY_MESSAGE = 'Đối soát đang chạy';
  * Chống chạy chồng: transaction ngắn đầu tiên lấy `pg_try_advisory_xact_lock('sales-reconcile')`, kiểm tra chưa có dòng
  * RUNNING còn mới rồi mới chèn dòng RUNNING và commit. Khoá chỉ cần giữ tới lúc dòng RUNNING hiện ra (mọi lần chạy khác
  * nhìn thấy dòng đó, kể cả từ instance khác); suốt thời gian chạy chính dòng RUNNING là "khoá". Tiến trình chết giữa chừng
- * → dòng RUNNING bị coi là hỏng sau 1 giờ, lần chạy sau dọn và chạy tiếp.
+ * → dòng RUNNING bị coi là hỏng sau 15 phút, lần chạy sau dọn và chạy tiếp.
  */
 @Injectable()
 export class ReconcileService {

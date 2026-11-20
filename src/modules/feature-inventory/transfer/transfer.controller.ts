@@ -92,7 +92,10 @@ export class TransferController {
 
   @RequirePermissions('transfer:cancel')
   @Post(':id/cancel')
-  @ApiOperation({ description: 'Huỷ. Đang trên đường thì hoàn hàng về đúng lô gửi.' })
+  @ApiOperation({
+    description:
+      'Huỷ. Chưa xuất (PENDING): chi nhánh gửi huỷ được. Đã xuất (IN_TRANSIT): chỉ quản trị chuỗi (ADMIN) — hoàn hàng về đúng lô gửi; chi nhánh khác → 1500.',
+  })
   cancel(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: CancelTransferRequest,

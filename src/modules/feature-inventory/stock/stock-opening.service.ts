@@ -6,6 +6,7 @@ import { ErrorCode } from 'src/common/types/error-code';
 import { assertBranchInScope, resolveBranchScope } from 'src/modules/feature-auth/permission/branch-scope';
 import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import { lockAdvisoryKeys } from 'src/common/databases/advisory-lock';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { StockIntakeService } from '../core/stock-intake.service';
 import { OpeningStockRequest } from './dtos/opening-stock.request';
@@ -47,6 +48,9 @@ export class StockOpeningService {
       if (product.trackBatches) {
         throw this.error(ErrorCode.HTTP_BAD_REQUEST, 'Hàng quản lý theo lô nhập tồn qua phiếu nhập kho (có số lô)');
       }
+      // M4: khoá số lô TRƯỚC khi đếm — cùng khoá `StockIntakeService` dùng — nên bấm đúp chạy nối tiếp: lần sau đếm
+      // thấy lô lần trước vừa tạo và bị chặn, không gộp thêm vào lô (tồn bị cộng hai lần).
+      await lockAdvisoryKeys(tx, [`stock-batch:${dto.productId}|${NO_LOT_BATCH}`]);
       const existing = await tx.stockBatch.count({ where: { productId: dto.productId, branchId: dto.branchId } });
       if (existing > 0) {
         throw this.error(

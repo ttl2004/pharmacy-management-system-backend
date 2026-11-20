@@ -11,6 +11,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
@@ -56,6 +57,7 @@ export class ProductExtraFieldsRequest {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(1_000_000_000, { message: 'Định mức tồn tối đa quá lớn (tối đa 1.000.000.000)' })
   @ApiPropertyOptional({ nullable: true, description: 'Định mức tồn tối đa; null = không giới hạn' })
   maxStockLevel?: number | null;
 
@@ -68,6 +70,7 @@ export class ProductExtraFieldsRequest {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 3 })
   @Min(0)
+  @Max(999_999_999, { message: 'Trọng lượng tối đa 999.999.999' })
   @ApiPropertyOptional({ nullable: true })
   weight?: number | null;
 

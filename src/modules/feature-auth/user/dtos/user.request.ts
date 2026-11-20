@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Gender, UserStatus } from '@prisma/client';
 import { Transform } from 'class-transformer';
 import {
+  IsEmail,
   IsEnum,
   IsNotEmpty,
   IsOptional,
@@ -157,4 +158,39 @@ export class UpdateUserRequest {
   @MaxLength(500)
   @ApiPropertyOptional({ maxLength: 500 })
   reason?: string;
+}
+
+/** Body của `POST /user/:id/reset-password` (L10): ADMIN/PM đặt mật khẩu mới cho nhân viên quên mật khẩu. */
+export class ResetPasswordRequest {
+  /** Cùng luật với đổi mật khẩu: 8–72 ký tự (bcrypt bỏ phần vượt 72 byte). */
+  @IsString()
+  @MinLength(8, { message: '$property phải có ít nhất $constraint1 ký tự' })
+  @MaxLength(72, { message: '$property không được vượt quá $constraint1 ký tự' })
+  @ApiProperty({
+    minLength: 8,
+    maxLength: 72,
+    description: 'Mật khẩu mới — báo trực tiếp cho nhân viên, họ nên đổi lại',
+  })
+  newPassword!: string;
+}
+
+/**
+ * Khôi phục nhân viên đã xoá: SĐT/email đã được nhả khi xoá nên gửi lại nếu muốn gán lại (không gửi = để trống).
+ * Giá trị gửi lên bị người khác dùng mất rồi thì trả 1601.
+ */
+export class RestoreUserRequest {
+  @IsOptional()
+  @Transform(toVietnamPhone)
+  @IsString()
+  @Matches(VIETNAM_PHONE_PATTERN, { message: PHONE_MESSAGE })
+  @ApiPropertyOptional({ example: '0900000000' })
+  phoneNumber?: string;
+
+  @IsOptional()
+  @Transform(trimLowerCase)
+  @IsString()
+  @IsEmail({}, { message: 'Email không hợp lệ' })
+  @MaxLength(150)
+  @ApiPropertyOptional()
+  email?: string;
 }

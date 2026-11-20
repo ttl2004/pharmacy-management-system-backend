@@ -79,6 +79,24 @@ describe('SupplierDebtAdjustmentService — nhật ký', () => {
     ]);
   });
 
+  // L9: ghi lùi quá 7 ngày làm đổi số báo cáo kỳ đã chốt.
+  it('ngày điều chỉnh lùi quá 7 ngày → 1002, không ghi', async () => {
+    const { service, audit } = makeService();
+    await expect(
+      service.create(
+        {
+          supplierId: 's1',
+          adjustedAt: new Date(Date.now() - 9 * 86_400_000).toISOString(),
+          expectedDebtBefore: 10_000,
+          debtAfter: 7_000,
+          note: 'Đối chiếu',
+        } as never,
+        PM_A,
+      ),
+    ).rejects.toThrow(/7 ngày/);
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
   it('huỷ: SUPPLIER_DEBT.ADJUSTMENT_CANCELLED, amount = delta, lý do của lệnh huỷ', async () => {
     const { service, audit } = makeService();
     await service.cancel('adj1', { reason: ' Nhập nhầm ' }, PM_A);
@@ -163,6 +181,24 @@ describe('SupplierPaymentService — nhật ký', () => {
     const [, auditActor, entries] = audit.record.mock.calls[0] as RecordCall;
     expect(auditActor).toMatchObject({ userId: 'pm-a', type: 'USER' });
     expect(entries.map((entry) => entry.event)).toEqual(['SUPPLIER_PAYMENT.CREATED', 'GOODS_RECEIPT.PAYMENT_UPDATED']);
+  });
+
+  it('ngày chi lùi quá 7 ngày hoặc ở tương lai → 1002, không ghi (L9)', async () => {
+    const { service, writer } = makeService();
+    for (const paidAt of [new Date(Date.now() - 9 * 86_400_000), new Date(Date.now() + 3_600_000)]) {
+      await expect(
+        service.create(
+          {
+            supplierId: 's1',
+            paidAt: paidAt.toISOString(),
+            method: PaymentMethod.CASH,
+            allocations: [{ receiptId: 'r1', amount: 5_000 }],
+          } as never,
+          PM_A,
+        ),
+      ).rejects.toMatchObject({ errorCode: 1002 });
+    }
+    expect(writer.create).not.toHaveBeenCalled();
   });
 
   it('huỷ phiếu chi: record MỘT lần với entry writer trả về', async () => {

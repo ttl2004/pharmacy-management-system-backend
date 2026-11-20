@@ -2,10 +2,9 @@ import { Injectable } from '@nestjs/common';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
-import { isInBranchScope, resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
+import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
 import { LedgerQuery, OpenReceiptsQuery } from './dtos/supplier-debt.query';
 import { SupplierDebtRepository } from './repositories/supplier-debt.repository';
-import { buildLedger } from './supplier-debt-ledger.builder';
 
 const supplierNotFound = () =>
   new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Nhà cung cấp không tồn tại' });
@@ -21,28 +20,15 @@ export class SupplierDebtLedgerService {
     if (!(await this.debts.supplierExists(supplierId))) throw supplierNotFound();
     const branchId = scope.kind === 'BRANCH' ? scope.branchId : undefined;
 
-    const [receipts, payments, adjustments, returns] = await Promise.all([
-      this.debts.findLedgerReceipts(supplierId, branchId),
-      this.debts.findLedgerPayments(supplierId),
-      this.debts.findLedgerAdjustments(supplierId),
-      this.debts.findLedgerReturns(supplierId, branchId),
-    ]);
-    const rows = buildLedger({
-      receipts,
-      payments,
-      adjustments,
-      returns,
-      inScope: (id) => isInBranchScope(scope, id),
-    }).filter((row) => !query.kind || row.kind === query.kind);
-
-    const start = (query.page - 1) * query.limit;
-    return {
-      hits: rows.slice(start, start + query.limit),
-      total: rows.length,
-      page: query.page,
-      totalPages: Math.ceil(rows.length / query.limit),
+    // L7: một trang tính trong DB — không tải toàn bộ lịch sử chứng từ của NCC mỗi lần xem.
+    const { rows, total } = await this.debts.findLedgerPage({
+      supplierId,
+      branchId,
+      kind: query.kind,
       limit: query.limit,
-    };
+      offset: (query.page - 1) * query.limit,
+    });
+    return { hits: rows, total, page: query.page, totalPages: Math.ceil(total / query.limit), limit: query.limit };
   }
 
   /** Phiếu còn nợ (cũ trước) + `payCap` = mức trả tối đa thật + `debt` của chi nhánh đang xem. */
@@ -74,7 +60,10 @@ export class SupplierDebtLedgerService {
   /** Từng lần trả của một phiếu nhập (kể cả đã huỷ). Phiếu ngoài phạm vi = không tồn tại. */
   async receiptPayments(receiptId: string, actor: RequestActor) {
     const scope = resolveBranchScope(actor.user);
-    const receipt = await this.debts.findReceiptInScope(receiptId, scope.kind === 'BRANCH' ? scope.branchId : undefined);
+    const receipt = await this.debts.findReceiptInScope(
+      receiptId,
+      scope.kind === 'BRANCH' ? scope.branchId : undefined,
+    );
     if (!receipt) {
       throw new ErrorException({ code: ErrorCode.RECORD_NOT_FOUND, message: 'Phiếu nhập không tồn tại' });
     }

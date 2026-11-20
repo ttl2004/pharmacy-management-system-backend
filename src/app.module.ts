@@ -1,8 +1,9 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
 import configuration from './common/configs/configuration';
 import { validateEnv } from './common/configs/env.validation';
+import { pinoHttpOptions } from './common/configs/logger.config';
 import { FeatureAuthzModule } from './modules/feature-auth/feature-auth.module';
 import { BranchModule } from './modules/feature-branch/branch.module';
 import { EndOfDayReportModule } from './modules/feature-report/end-of-day/end-of-day-report.module';
@@ -30,25 +31,9 @@ import { ScheduleModule } from '@nestjs/schedule';
     ScheduleModule.forRoot(),
     DatabaseModule.forRoot({ driver: 'prisma' }),
 
-    LoggerModule.forRoot({
-      pinoHttp: {
-        redact: [
-          'req.headers.authorization',
-          'req.headers.cookie',
-          'res.headers["set-cookie"]',
-          'req.body.password',
-          'req.body.refreshToken',
-        ],
-        level: 'info',
-        transport: {
-          target: 'pino-pretty',
-          options: {
-            colorize: true,
-            singleLine: true,
-            translateTime: 'SYS:standard',
-          },
-        },
-      },
+    LoggerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({ pinoHttp: pinoHttpOptions(config.get<string>('NODE_ENV')) }),
     }),
 
     //- Module chính

@@ -25,13 +25,15 @@ describe('ReconcileRunsController', () => {
   afterEach(() => jest.useRealTimers());
 
   it('POST khoảng hợp lệ → chạy đồng bộ với trigger MANUAL', async () => {
-    await controller.trigger({ fromDate: '2026-11-01', toDate: '2026-11-05' }, actor);
-    expect(reconcile.run).toHaveBeenCalledWith('MANUAL', actor, '2026-11-01', '2026-11-05');
+    await controller.trigger({ fromDate: '2026-11-01', toDate: '2026-11-04' }, actor);
+    expect(reconcile.run).toHaveBeenCalledWith('MANUAL', actor, '2026-11-01', '2026-11-04');
   });
 
   it.each([
     ['khoảng 32 ngày', '2026-10-01', '2026-11-01'],
     ['toDate tương lai', '2026-11-05', '2026-11-06'],
+    // L6: đối soát tay khoá dòng tổng hợp của ngày đang bán → quầy phải chờ. Chỉ cho tới hôm qua.
+    ['toDate là hôm nay', '2026-11-03', '2026-11-05'],
     ['from sau to', '2026-11-04', '2026-11-03'],
   ])('POST %s → 1002', async (_name, fromDate, toDate) => {
     await expect(controller.trigger({ fromDate, toDate }, actor)).rejects.toMatchObject({
@@ -41,7 +43,7 @@ describe('ReconcileRunsController', () => {
   });
 
   it('đúng 31 ngày được chấp nhận', async () => {
-    await controller.trigger({ fromDate: '2026-10-06', toDate: '2026-11-05' }, actor);
+    await controller.trigger({ fromDate: '2026-10-05', toDate: '2026-11-04' }, actor);
     expect(reconcile.run).toHaveBeenCalled();
   });
 

@@ -39,6 +39,10 @@ export const trustProxySchema = z.coerce
 export const envSchema = z
   .object({
     //- Ứng dụng
+    // Không khai báo = coi như chạy thật (production): Swagger tắt, log JSON. Máy dev đặt NODE_ENV=development.
+    NODE_ENV: z
+      .enum(['development', 'production', 'test'], { error: 'NODE_ENV chỉ nhận development, production hoặc test' })
+      .default('production'),
     PORT: z.coerce.number().int().positive().default(3790),
     // Origin được gọi API kèm cookie, ngăn cách bằng dấu phẩy. Để trống: không cho trình duyệt gọi chéo origin.
     CORS_ORIGINS: z
@@ -133,7 +137,10 @@ export const envSchema = z
     //- Trợ lý hỏi đáp thuốc (RAG service: projects/base-rag/api.py hoặc bản RAG hoàn chỉnh cùng hợp đồng)
     RAG_SERVICE_URL: z
       .string()
-      .refine((url) => URL.canParse(url) && /^https?:$/.test(new URL(url).protocol), 'RAG_SERVICE_URL phải là URL http(s)')
+      .refine(
+        (url) => URL.canParse(url) && /^https?:$/.test(new URL(url).protocol),
+        'RAG_SERVICE_URL phải là URL http(s)',
+      )
       .default('http://127.0.0.1:8790'),
     // Gửi qua header X-Internal-Key; phải trùng RAG_INTERNAL_KEY bên RAG service. Bỏ trống = không gửi.
     RAG_INTERNAL_KEY: z.string().optional(),
@@ -143,6 +150,30 @@ export const envSchema = z
   });
 
 export type EnvConfig = z.infer<typeof envSchema>;
+
+/**
+ * Cảnh báo cấu hình chạy thật thiếu an toàn (chỉ cảnh báo, không chặn khởi động để không làm hỏng lần triển khai).
+ * `TRUST_PROXY` = 0 gồm cả trường hợp không khai báo.
+ */
+export function productionEnvWarnings(env: {
+  NODE_ENV?: string;
+  COOKIE_SECURE?: string;
+  TRUST_PROXY?: number;
+}): string[] {
+  if (env.NODE_ENV !== 'production') return [];
+  const warnings: string[] = [];
+  if (env.COOKIE_SECURE !== 'true') {
+    warnings.push(
+      'COOKIE_SECURE chưa bật (true) khi chạy production: cookie refresh token có thể bị gửi qua HTTP thường và bị đánh cắp. Hãy đặt COOKIE_SECURE=true khi chạy sau HTTPS.',
+    );
+  }
+  if (!env.TRUST_PROXY) {
+    warnings.push(
+      'TRUST_PROXY chưa khai báo (hoặc =0) khi chạy production: nếu app đứng sau reverse proxy/load balancer thì mọi request sẽ mang IP của proxy, làm sai giới hạn tần suất, phát hiện dò mật khẩu và nhật ký IP. Đặt TRUST_PROXY = số proxy đứng trước app (vd. 1).',
+    );
+  }
+  return warnings;
+}
 
 export function validateEnv(config: Record<string, unknown>): EnvConfig & Record<string, unknown> {
   // `dotenv` biến dòng `KEY=` thành chuỗi rỗng, còn `.optional()` của zod chỉ bỏ qua `undefined`.

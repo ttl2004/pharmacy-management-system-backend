@@ -152,13 +152,16 @@ export class SupplierService {
   /** Còn chứng từ kho trỏ tới thì từ chối — muốn ngừng hợp tác thì chuyển `status` sang INACTIVE. */
   async remove(id: string, actor: RequestActor): Promise<{ success: true }> {
     await this.transactions.run(async ({ tx }) => {
+      // Khoá NCC trước khi đếm: điều chỉnh nợ đầu kỳ ghi song song phải commit xong (hoặc thấy NCC đã xoá) — không lọt nợ mồ côi.
+      if (!(await this.suppliers.lockRow(tx, id))) throw this.notFound();
       const existing = await this.suppliers.findActiveWith(tx, id);
       if (!existing) throw this.notFound();
 
       if ((await this.suppliers.countReferences(tx, id)) > 0) {
         throw new ErrorException({
           code: ErrorCode.INVALID_REFERENCE,
-          message: 'Nhà cung cấp đã có chứng từ kho, không thể xoá — hãy chuyển sang ngừng hợp tác (INACTIVE)',
+          message:
+            'Nhà cung cấp đã có chứng từ kho hoặc công nợ (phiếu nhập, điều chỉnh nợ, phiếu chi), không thể xoá — hãy chuyển sang ngừng hợp tác (INACTIVE)',
         });
       }
 

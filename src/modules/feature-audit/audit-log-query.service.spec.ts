@@ -177,3 +177,39 @@ describe('AuditLogQueryService.get / nhãn', () => {
     expect(firstArg(priceBook.findMany).where).toEqual({ id: { in: ['pb1'] } });
   });
 });
+
+describe('AuditLogQueryService — ẩn dòng của SUPER_ADMIN (A13)', () => {
+  const superAdmin = actorOf(AuthRole.SUPER_ADMIN, null);
+  const HIDE = { OR: [{ actorRoleCode: null }, { actorRoleCode: { not: AuthRole.SUPER_ADMIN } }] };
+
+  it('ADMIN: list thêm điều kiện ẩn SUPER_ADMIN; SUPER_ADMIN thì không', async () => {
+    const a = setup();
+    await a.service.list(q({}), admin);
+    expect((firstArg(a.prisma.auditLog.findMany).where as { AND: unknown[] }).AND).toContainEqual(HIDE);
+    const b = setup();
+    await b.service.list(q({}), superAdmin);
+    expect((firstArg(b.prisma.auditLog.findMany).where as { AND: unknown[] }).AND).not.toContainEqual(HIDE);
+  });
+
+  it('ADMIN: đường search (SQL raw) cũng loại actorRoleCode SUPER_ADMIN', async () => {
+    const a = setup();
+    await a.service.list(q({ search: 'Hủy', fromDate: '2026-01-01', toDate: '2026-01-31' }), admin);
+    const sql = firstArg(a.prisma.$queryRaw) as unknown as Prisma.Sql;
+    expect(sql.sql).toContain('"actorRoleCode" IS NULL OR "actorRoleCode" <>');
+    expect(sql.values).toContain(AuthRole.SUPER_ADMIN);
+    const b = setup();
+    await b.service.list(q({ search: 'Hủy', fromDate: '2026-01-01', toDate: '2026-01-31' }), superAdmin);
+    expect((firstArg(b.prisma.$queryRaw) as unknown as Prisma.Sql).sql).not.toContain('actorRoleCode');
+  });
+
+  it('ADMIN: detail cũng áp điều kiện ẩn; SUPER_ADMIN thì không', async () => {
+    const a = setup();
+    await expect(a.service.get('11111111-1111-4111-8111-111111111111', admin)).rejects.toMatchObject({ status: 404 });
+    expect((firstArg(a.prisma.auditLog.findFirst).where as { AND: unknown[] }).AND).toContainEqual(HIDE);
+    const b = setup();
+    await expect(b.service.get('11111111-1111-4111-8111-111111111111', superAdmin)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect((firstArg(b.prisma.auditLog.findFirst).where as { AND: unknown[] }).AND).not.toContainEqual(HIDE);
+  });
+});

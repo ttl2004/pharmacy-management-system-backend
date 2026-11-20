@@ -85,7 +85,10 @@ describe('PriceBookItemsService — nhật ký', () => {
     }));
     const { service, rowsRepository } = makeService(book(), rows);
 
-    await expect(service.applyFormulaToFilter('book-1', {} as never, ADMIN_ACTOR)).resolves.toEqual({ count: 300 });
+    await expect(service.applyFormulaToFilter('book-1', {} as never, ADMIN_ACTOR)).resolves.toEqual({
+      count: 300,
+      skipped: 0,
+    });
 
     expect(rowsRepository.upsertItems).toHaveBeenCalledTimes(1);
     expect(entriesOf(audit)).toEqual([
@@ -103,7 +106,10 @@ describe('PriceBookItemsService — nhật ký', () => {
   it('applyFormula không có dòng nào khớp thì không ghi entry', async () => {
     const { service } = makeService(book(), []);
 
-    await expect(service.applyFormulaToFilter('book-1', {} as never, ADMIN_ACTOR)).resolves.toEqual({ count: 0 });
+    await expect(service.applyFormulaToFilter('book-1', {} as never, ADMIN_ACTOR)).resolves.toEqual({
+      count: 0,
+      skipped: 0,
+    });
 
     expect(audit.record).not.toHaveBeenCalled();
   });
@@ -139,7 +145,7 @@ describe('PriceBookItemsService — kiểm lại giá gốc lúc áp công thứ
   it('apply-formula: base toàn chuỗi → áp được', async () => {
     const { service, rowsRepository } = setup([]);
     rowsRepository.findBookPrices.mockResolvedValue([{ productUnitId: 'pu-1', price: 1000 }]);
-    await expect(service.applyFormulaToFilter('book-1', {} as never, PM_A)).resolves.toEqual({ count: 1 });
+    await expect(service.applyFormulaToFilter('book-1', {} as never, PM_A)).resolves.toEqual({ count: 1, skipped: 0 });
   });
 
   it('reapplyExisting: base ngoài phạm vi đọc → 403, không ghi giá', async () => {
@@ -149,5 +155,68 @@ describe('PriceBookItemsService — kiểm lại giá gốc lúc áp công thứ
       service.reapplyExisting({} as never, own, undefined, { kind: 'BRANCH', branchId: 'bA' }),
     ).rejects.toMatchObject({ response: { code: ErrorCode.BRANCH_ACCESS_DENIED } });
     expect(rowsRepository.upsertItems).not.toHaveBeenCalled();
+  });
+});
+
+describe('PriceBookItemsService — chặn ghi giá 0 (D1)', () => {
+  const costBook = (base: string, over: Partial<PriceBookRow> = {}) =>
+    book({ formulaBase: base, formulaOp: '+', formulaAmount: '10' as never, formulaUnit: '%', ...over });
+  const upserted = (r: { upsertItems: jest.Mock }) => (r.upsertItems.mock.calls as unknown[][])[0]?.[2];
+
+  it('giá gốc null bị bỏ qua, dòng có giá vẫn ghi: 20.000 + 10% = 22.000', async () => {
+    const rows = [
+      { productUnitId: 'pu-a', avgCost: 20000, lastPurchaseCost: null },
+      { productUnitId: 'pu-b', avgCost: null, lastPurchaseCost: null },
+    ];
+    const { service, rowsRepository } = makeService(costBook('avgCost'), rows);
+
+    await expect(service.applyFormulaToFilter('book-1', { branchId: 'b1' } as never, ADMIN_ACTOR)).resolves.toEqual({
+      count: 1,
+      skipped: 1,
+    });
+    expect(upserted(rowsRepository)).toEqual([{ productUnitId: 'pu-a', price: 22000 }]);
+  });
+
+  it('giá tính ra <= 0 (gốc 0, hoặc trừ quá tay) bị bỏ qua, không ghi 0', async () => {
+    const rows = [
+      { productUnitId: 'pu-zero', generalPrice: 0 },
+      { productUnitId: 'pu-neg', generalPrice: 5 },
+      { productUnitId: 'pu-ok', generalPrice: 1000 },
+    ];
+    const { service, rowsRepository } = makeService(
+      book({ formulaBase: 'general', formulaOp: '-', formulaAmount: '100' as never, formulaUnit: '%' }),
+      rows.slice(0, 2),
+    );
+    await expect(service.applyFormulaToFilter('book-1', {} as never, ADMIN_ACTOR)).resolves.toEqual({
+      count: 0,
+      skipped: 2,
+    });
+    expect(rowsRepository.upsertItems).toHaveBeenCalledWith(TX, 'book-1', []);
+  });
+
+  it.each(['avgCost', 'lastPurchaseCost'])('%s không chọn chi nhánh → 400, không ghi giá', async (base) => {
+    const { service, rowsRepository } = makeService(costBook(base), [{ productUnitId: 'pu-a', avgCost: null }]);
+    await expect(service.applyFormulaToFilter('book-1', {} as never, ADMIN_ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.HTTP_BAD_REQUEST,
+      message: expect.stringContaining('chọn chi nhánh') as unknown,
+    });
+
+    expect(rowsRepository.upsertItems).not.toHaveBeenCalled();
+  });
+
+  it('reapplyExisting với giá vốn mà không có chi nhánh → 400', async () => {
+    const { service, rowsRepository } = makeService(costBook('avgCost'));
+    await expect(
+      service.reapplyExisting({} as never, costBook('avgCost'), undefined, { kind: 'ALL' }),
+    ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+    expect(rowsRepository.upsertItems).not.toHaveBeenCalled();
+  });
+
+  it('công thức theo giá chung không cần chi nhánh vẫn áp được', async () => {
+    const { service } = makeService(costBook('general'), [{ productUnitId: 'pu-a', generalPrice: 1000 }]);
+    await expect(service.applyFormulaToFilter('book-1', {} as never, ADMIN_ACTOR)).resolves.toEqual({
+      count: 1,
+      skipped: 0,
+    });
   });
 });

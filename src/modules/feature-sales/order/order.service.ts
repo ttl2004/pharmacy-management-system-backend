@@ -17,6 +17,9 @@ import { escapeLike } from 'src/common/utils/like-pattern.util';
 import { maskPhone } from 'src/common/utils/mask.util';
 import { normalizePhoneSearch } from 'src/common/utils/phone.util';
 import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth/permission/branch-scope';
+import { permissionError } from 'src/modules/feature-auth/permission/permission.error';
+import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
+import { AuthRole } from 'src/common/types/common.enum';
 import { DocumentCodeService } from 'src/modules/feature-inventory/core/document-code.service';
 import { branchWhere, resolveWriteBranch } from 'src/modules/feature-inventory/core/inventory-scope';
 import { InventoryTransactions, InventoryTxContext } from 'src/modules/feature-inventory/core/inventory-transactions';
@@ -24,10 +27,16 @@ import { badRequest, inventoryError, invalidReference } from 'src/modules/featur
 import { ApplicableBook, PriceBookService } from 'src/modules/feature-catalog/price-book/price-book.service';
 import { AuditActor, auditActorOf, jobActor } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
-import type { AuditEntry } from 'src/providers/audit-log/audit-log.types';
+import type { AuditEntry, AuditJson } from 'src/providers/audit-log/audit-log.types';
 import { buildOrderLines, deletedPriceBookError, OrderLine, orderTotals, toBookPricing } from '../core/order-lines';
 import { OrderStockService } from '../core/order-stock.service';
-import { EXPIRY_BATCH_SIZE, POS_ABANDON_MINUTES, SALES_AUDIT_ENTITY } from '../core/sales.constants';
+import {
+  EXPIRY_BATCH_SIZE,
+  MAX_PENDING_POS_PER_STAFF,
+  POS_ABANDON_MINUTES,
+  SALES_AUDIT_ENTITY,
+} from '../core/sales.constants';
+import { HANDLE_OTHERS_PERMISSION, isOwnOrder, onBehalfOfMetadata } from '../core/order-ownership';
 import { orderErrors, salesError } from '../core/sales.error';
 import {
   CancelOrderRequest,
@@ -47,7 +56,7 @@ const CANCELLABLE: Record<OrderChannel, readonly OrderStatus[]> = {
   [OrderChannel.ONLINE]: [],
 };
 
-const ABANDONED_REASON = `Tự huỷ: đơn tại quầy bỏ dở quá ${POS_ABANDON_MINUTES} phút`;
+const ABANDONED_REASON = `Tự huỷ: đơn tại quầy chưa thu sau ${POS_ABANDON_MINUTES} phút kể từ lúc lập`;
 
 /** Cột đơn thuốc từ DTO; không gửi thì `{}` để giữ nguyên giá trị cũ khi sửa đơn. */
 function prescriptionData(prescription: PrescriptionRequest | undefined) {
@@ -96,6 +105,10 @@ function overrideEntries(
   ];
 }
 
+function controlledNeedsCustomer() {
+  return badRequest('Đơn có thuốc kiểm soát đặc biệt phải nhập SĐT khách mua');
+}
+
 function isDuplicateTransactionCode(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
 }
@@ -117,15 +130,27 @@ export class OrderService {
     private readonly audit: AuditLogService,
     private readonly priceBooks: PriceBookService,
     private readonly rollup: SalesRollupRepository,
+    private readonly permissions: PermissionService,
   ) {}
 
-  list(query: OrderQuery, actor: RequestActor) {
+  async list(query: OrderQuery, actor: RequestActor) {
     const scope = resolveBranchScope(actor.user);
     const branchId = scopedBranchFilter(scope, query.branchId);
     const conditions: Prisma.OrderWhereInput[] = [];
     if (branchId) conditions.push({ branchId });
     if (query.channel) conditions.push({ channel: query.channel });
     if (query.status) conditions.push({ status: query.status });
+    // Đơn CHỜ THU tại quầy là việc của người lập: không có `order:handle-others` thì chỉ thấy đơn chờ của chính mình.
+    // Chỉ giới hạn đơn POS đang PENDING — hoá đơn đã thu/đã huỷ vẫn tra cứu được (phạm vi chi nhánh áp như cũ).
+    if (!(await this.canHandleOthers(actor))) {
+      conditions.push({
+        OR: [
+          { status: { not: OrderStatus.PENDING } },
+          { channel: { not: OrderChannel.POS } },
+          { staffId: actor.user.userId },
+        ],
+      });
+    }
     if (query.fromDate) conditions.push({ createdAt: { gte: vietnamDayStartUtc(query.fromDate) } });
     if (query.toDate) conditions.push({ createdAt: { lt: vietnamDayStartUtc(addDaysToDateOnly(query.toDate, 1)) } });
     if (query.search?.trim()) {
@@ -154,6 +179,13 @@ export class OrderService {
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
       await this.assertBranchActive(tx, branchId);
+      // L12: trần đơn chờ thu mỗi nhân viên — chặn giữ hết hàng bằng đơn chờ.
+      const pending = await this.orders.lockAndCountPendingPos(tx, actorId);
+      if (pending >= MAX_PENDING_POS_PER_STAFF) {
+        throw badRequest(
+          `Bạn đang có ${pending} đơn chờ thu (tối đa ${MAX_PENDING_POS_PER_STAFF}) — thu tiền hoặc huỷ bớt đơn trước khi lập đơn mới`,
+        );
+      }
       const customer = dto.customerPhone
         ? await this.walkInCustomerOf(tx, dto.customerPhone, dto.customerName, actorId)
         : null;
@@ -166,9 +198,7 @@ export class OrderService {
       );
       const totals = orderTotals(lines);
       // Thuốc kiểm soát đặc biệt: phải biết người mua (như mock — chặn khách lẻ).
-      if (!customer && lines.some((line) => line.isControlled)) {
-        throw badRequest('Đơn có thuốc kiểm soát đặc biệt phải nhập SĐT khách mua');
-      }
+      if (!customer && lines.some((line) => line.isControlled)) throw controlledNeedsCustomer();
 
       const code = await this.codes.next(tx, 'ORDER');
       const { id } = await this.orders.createHeader(tx, {
@@ -234,6 +264,7 @@ export class OrderService {
     return this.transactions.run(async (ctx) => {
       const { tx } = ctx;
       const head = await this.loadEditablePos(tx, id, branchWhere(scope));
+      await this.assertCanHandle(head, actor);
       // D10: đơn đã gắn bảng thì kiểm lại bảng (theo người tạo + chi nhánh đơn); lỗi -> 1802, giữ nguyên bảng của đơn.
       let book: ApplicableBook | null = null;
       if (head.priceBookId) {
@@ -247,6 +278,8 @@ export class OrderService {
         book ? toBookPricing(book) : undefined,
       );
       const totals = orderTotals(lines);
+      // M1: sửa đơn khách lẻ thành đơn có thuốc kiểm soát cũng phải bị chặn như lúc lập đơn.
+      if (!head.customerId && lines.some((line) => line.isControlled)) throw controlledNeedsCustomer();
 
       // Chiếm trước khi đụng kho: request thu tiền/huỷ cùng lúc phải chờ, rồi thấy đơn đã đổi.
       const claimed = await this.orders.claim(
@@ -265,7 +298,11 @@ export class OrderService {
       );
       if (!claimed) throw orderErrors.wrongState();
 
-      await this.stock.discard(ctx, id, actorId);
+      // B1: khoá MỘT lần hợp lô cũ + lô mới theo id trước khi nhả/giữ — hai lần khoá riêng đảo thứ tự giữa các quầy.
+      const locked = await this.stock.lockForReplace(ctx, id, head.branchId, [
+        ...new Set(lines.map((line) => line.productId)),
+      ]);
+      await this.stock.discard(ctx, id, actorId, locked);
       await this.orders.deleteItems(tx, id);
       await this.saveLines(ctx, { orderId: id, branchId: head.branchId, actorId }, lines);
 
@@ -273,6 +310,7 @@ export class OrderService {
         {
           event: 'ORDER.ITEMS_REPLACED',
           ...orderAudit(head),
+          ...onBehalfOfMetadata(head, actorId),
           amount: totals.totalAmount,
           before: {
             lines: head.lineCount,
@@ -302,7 +340,8 @@ export class OrderService {
       return await this.transactions.run(async (ctx) => {
         const { tx } = ctx;
         // Kiểm phạm vi/kênh/trạng thái để báo lỗi rõ ràng; số liệu ghi sổ đọc lại sau khi chiếm.
-        await this.loadEditablePos(tx, id, branchWhere(scope));
+        const preHead = await this.loadEditablePos(tx, id, branchWhere(scope));
+        await this.assertCanHandle(preHead, actor);
         const claimed = await this.orders.claim(
           tx,
           id,
@@ -321,6 +360,8 @@ export class OrderService {
         if (head.prescriptionLineCount > 0 && (!head.prescriptionCode || !head.prescriberName)) {
           throw salesError(ErrorCode.PRESCRIPTION_REQUIRED);
         }
+        // M1: chốt chặn cuối — đơn khách lẻ không được thu tiền nếu có thuốc kiểm soát (dữ liệu cũ, đường sửa khác).
+        if (head.controlledLineCount > 0 && !head.customerId) throw controlledNeedsCustomer();
 
         // Đơn 0đ (giảm giá hết): không có lượt thu nào — CHECK `payments_amount_positive_chk`.
         if (head.totalAmount > 0n) {
@@ -344,6 +385,7 @@ export class OrderService {
           {
             event: 'ORDER.PAID',
             ...orderAudit(head),
+            ...onBehalfOfMetadata(head, actorId),
             amount: head.totalAmount,
             before: { status: OrderStatus.PENDING },
             after: { status: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.PAID, method: dto.method },
@@ -363,19 +405,30 @@ export class OrderService {
   /** Huỷ (S7): chỉ đơn tại quầy PENDING; nhả toàn bộ phần đang giữ, không ghi sổ kho. */
   async cancel(id: string, dto: CancelOrderRequest, actor: RequestActor): Promise<OrderDetail> {
     const scope = resolveBranchScope(actor.user);
+    const auditActor = auditActorOf(actor);
 
     return this.transactions.run(async (ctx) => {
       const head = await this.orders.findHead(ctx.tx, id, branchWhere(scope));
       if (!head) throw orderErrors.notFound();
       if (!CANCELLABLE[head.channel].includes(head.status)) throw orderErrors.wrongState(head.status);
-      await this.cancelInTx(ctx, head, { status: head.status }, dto.reason, auditActorOf(actor), 'ORDER.CANCELLED');
+      await this.assertCanHandle(head, actor);
+      await this.cancelInTx(
+        ctx,
+        head,
+        { status: head.status },
+        dto.reason,
+        auditActor,
+        'ORDER.CANCELLED',
+        onBehalfOfMetadata(head, auditActor.userId),
+      );
       return this.mustFind(ctx.tx, id);
     });
   }
 
   /**
-   * Job tự huỷ (S8). Mỗi đơn một transaction riêng — một đơn lỗi không chặn các đơn khác. Điều kiện chiếm có `updatedAt`
-   * lúc đọc: nhân viên vừa sửa đơn giữa lúc job đọc và lúc job huỷ thì đơn không bị huỷ.
+   * Job tự huỷ (S8): đơn PENDING quá hạn tính từ lúc LẬP đơn (sửa đơn không gia hạn). Mỗi đơn một transaction riêng — một
+   * đơn lỗi không chặn các đơn khác. Điều kiện chiếm lặp lại `createdAt < cutoff` thay vì `updatedAt`: sửa đơn commit trước
+   * không chặn việc huỷ, còn thu tiền/huỷ tay commit trước thì đơn không còn PENDING → chiếm trả 0 → bỏ qua.
    */
   async expireAbandonedPos(now: Date = new Date()): Promise<number> {
     const cutoff = new Date(now.getTime() - POS_ABANDON_MINUTES * 60_000);
@@ -387,7 +440,7 @@ export class OrderService {
           this.cancelInTx(
             ctx,
             order,
-            { status: OrderStatus.PENDING, updatedAt: order.updatedAt },
+            { status: OrderStatus.PENDING, channel: OrderChannel.POS, createdAt: { lt: cutoff } },
             ABANDONED_REASON,
             jobActor(),
             'ORDER.AUTO_EXPIRED',
@@ -410,6 +463,7 @@ export class OrderService {
     reason: string,
     actor: AuditActor,
     event: 'ORDER.CANCELLED' | 'ORDER.AUTO_EXPIRED',
+    extra: { metadata?: { [key: string]: AuditJson } } = {},
   ): Promise<void> {
     const actorId = actor.userId;
     const now = new Date();
@@ -426,6 +480,7 @@ export class OrderService {
       {
         event,
         ...orderAudit(order),
+        ...extra,
         before: { status: order.status },
         after: { status: OrderStatus.CANCELLED },
         reason,
@@ -475,6 +530,18 @@ export class OrderService {
     }
     if (head.status !== OrderStatus.PENDING) throw orderErrors.wrongState(head.status);
     return head;
+  }
+
+  /** Có quyền xử lý đơn của người khác? SUPER_ADMIN luôn có; vai trò khác tra quyền (có cache). */
+  private async canHandleOthers(actor: RequestActor): Promise<boolean> {
+    if (actor.user.role === AuthRole.SUPER_ADMIN) return true;
+    return (await this.permissions.getGrantedCodes(actor.user.role)).has(HANDLE_OTHERS_PERMISSION);
+  }
+
+  /** Sửa/thu/huỷ đơn chờ thu của nhân viên khác chỉ quản lý — kiểm TRƯỚC khi chiếm đơn hay đụng kho. */
+  private async assertCanHandle(head: OrderHead, actor: RequestActor): Promise<void> {
+    if (isOwnOrder(head, actor.user.userId) || (await this.canHandleOthers(actor))) return;
+    throw permissionError(ErrorCode.PERMISSION_DENIED, 'Chỉ quản lý được xử lý đơn chờ của nhân viên khác');
   }
 
   private async mustHead(tx: Prisma.TransactionClient, id: string): Promise<OrderHead> {

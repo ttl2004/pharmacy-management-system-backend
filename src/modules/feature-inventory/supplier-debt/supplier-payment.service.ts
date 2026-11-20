@@ -13,17 +13,15 @@ import {
 import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
 import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
-import { badRequest, inventoryError, invalidReference } from '../core/inventory.error';
+import { inventoryError, invalidReference } from '../core/inventory.error';
 import { InventoryTransactions } from '../core/inventory-transactions';
 import { resolveWriteBranch } from '../core/inventory-scope';
 import { CancelDebtDocumentRequest, CreateSupplierPaymentRequest } from './dtos/supplier-payment.request';
 import { PaymentRow, SupplierPaymentRepository } from './repositories/supplier-payment.repository';
 import { SupplierDebtRepository } from './repositories/supplier-debt.repository';
+import { parseDocumentDate } from '../core/document-date';
 import { assertPaymentWithinDebt } from './supplier-debt-guards';
 import { SupplierPaymentWriter } from './supplier-payment.writer';
-
-/** Cho lệch đồng hồ client: `paidAt` được vượt hiện tại tối đa chừng này (như mock). */
-const FUTURE_TOLERANCE_MS = 60_000;
 
 const money = (value: bigint | number) => Number(value).toLocaleString('vi-VN');
 
@@ -32,11 +30,20 @@ function branchesOf(row: Pick<PaymentRow, 'branchId' | 'allocations'>): string[]
   return [...new Set([row.branchId, ...row.allocations.map((a) => a.receipt.branchId)])];
 }
 
-function present(row: PaymentRow, canCancel: boolean) {
-  const { cancelledAt, amount, allocations, ...rest } = row;
+/**
+ * Phiếu chi nhiều chi nhánh (ADMIN chi 30tr: 10tr cho phiếu nhập CN A, 20tr cho CN B): người có phạm vi CHI NHÁNH chỉ
+ * thấy các dòng phân bổ thuộc chi nhánh mình; `amount` là tổng các dòng đó (không lộ số tiền chi nhánh khác) và
+ * `partial: true` báo phiếu còn phần ngoài phạm vi. Phạm vi toàn chuỗi: nguyên vẹn, `partial: false`.
+ */
+function present(row: PaymentRow, canCancel: boolean, scope?: BranchScope) {
+  const { cancelledAt, amount, allocations: all, ...rest } = row;
+  const allocations = scope ? all.filter((a) => isInBranchScope(scope, a.receipt.branchId)) : all;
+  const partial = allocations.length < all.length;
+  const visibleAmount = partial ? allocations.reduce((sum, a) => sum + a.amount, 0n) : amount;
   return {
     ...rest,
-    amount: Number(amount),
+    amount: Number(visibleAmount),
+    partial,
     status: cancelledAt ? 'CANCELLED' : 'COMPLETED',
     cancelledAt,
     allocations: allocations.map((a) => ({
@@ -65,10 +72,7 @@ export class SupplierPaymentService {
   async create(dto: CreateSupplierPaymentRequest, actor: RequestActor) {
     const scope = resolveBranchScope(actor.user);
     const branchId = resolveWriteBranch(scope, dto.branchId, 'Cần chọn chi nhánh chi tiền (branchId)');
-    const paidAt = new Date(dto.paidAt);
-    if (paidAt.getTime() > Date.now() + FUTURE_TOLERANCE_MS) {
-      throw badRequest('Thời gian thanh toán không được ở tương lai');
-    }
+    const paidAt = parseDocumentDate(dto.paidAt, 'Ngày chi');
     const ids = dto.allocations.map((row) => row.receiptId);
     if (new Set(ids).size !== ids.length) throw invalidReference('một phiếu nhập chỉ được phân bổ một lần');
 
@@ -76,7 +80,7 @@ export class SupplierPaymentService {
       // Lock order: khoá NCC TRƯỚC (xếp hàng cùng điều chỉnh nợ/huỷ), phiếu nhập khoá sau khi cộng paidAmount.
       if (!(await this.debts.lockSupplier(tx, dto.supplierId))) throw invalidReference('nhà cung cấp không tồn tại');
       if (!(await this.debts.branchUsable(tx, branchId))) {
-        throw invalidReference('chi nhánh không tồn tại hoặc đã ngừng hoạt động');
+        throw invalidReference('chi nhánh không tồn tại');
       }
 
       const receipts = new Map((await this.debts.findReceiptsForAllocation(tx, ids)).map((r) => [r.id, r]));
@@ -96,9 +100,14 @@ export class SupplierPaymentService {
         }
       }
 
-      // Kiểm cả nợ trong phạm vi người trả lẫn nợ toàn chuỗi (dùng chung với PATCH /goods-receipt/:id/payment).
-      const total = dto.allocations.reduce((sum, row) => sum + BigInt(row.amount), 0n);
-      await assertPaymentWithinDebt(this.debts, tx, scope, dto.supplierId, total);
+      // Kiểm nợ trong phạm vi người trả, nợ toàn chuỗi và nợ TỪNG chi nhánh được phân bổ (dùng chung với PATCH /goods-receipt/:id/payment).
+      await assertPaymentWithinDebt(
+        this.debts,
+        tx,
+        scope,
+        dto.supplierId,
+        dto.allocations.map((row) => ({ branchId: receipts.get(row.receiptId)!.branchId, amount: BigInt(row.amount) })),
+      );
 
       const created = await this.writer.create(
         tx,
@@ -115,7 +124,7 @@ export class SupplierPaymentService {
       );
       await this.audit.record(tx, auditActorOf(actor), created.auditEntries);
       const row = (await this.payments.findById(created.id, tx))!;
-      return present(row, await this.canCancel(row, scope, actor));
+      return present(row, await this.canCancel(row, scope, actor), scope);
     });
   }
 
@@ -124,13 +133,18 @@ export class SupplierPaymentService {
     const scope = resolveBranchScope(actor.user);
     const row = await this.payments.findById(id);
     if (!row || !branchesOf(row).some((b) => isInBranchScope(scope, b))) throw notFound();
-    return present(row, await this.canCancel(row, scope, actor));
+    return present(row, await this.canCancel(row, scope, actor), scope);
   }
 
   /** Huỷ cần quyền trên MỌI chi nhánh liên quan (huỷ làm nợ tăng lại ở mọi phiếu được phân bổ) — không → 1506. */
   async cancel(id: string, dto: CancelDebtDocumentRequest, actor: RequestActor) {
     const scope = resolveBranchScope(actor.user);
     return this.transactions.run(async ({ tx }) => {
+      // Lock order: NCC TRƯỚC (cùng huỷ phiếu nhập / điều chỉnh nợ), rồi mới phiếu chi và phiếu nhập. NCC của phiếu chi
+      // bất biến nên đọc không khoá để biết NCC là an toàn; đọc lại SAU khi khoá để có trạng thái mới nhất.
+      const peek = await this.payments.findById(id, tx);
+      if (!peek) throw notFound();
+      await this.debts.lockSupplier(tx, peek.supplierId);
       const row = await this.payments.findById(id, tx);
       if (!row || !branchesOf(row).some((b) => isInBranchScope(scope, b))) throw notFound();
       for (const branchId of branchesOf(row)) assertBranchInScope(scope, branchId);

@@ -89,8 +89,9 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     codes as never,
     supplierPayments as never,
     audit as never,
+    { getGrantedCodes: jest.fn().mockResolvedValue(new Set(['goods-receipt:create'])) } as never,
   );
-  return { service, repository, ledger, audit, intake, supplierPayments };
+  return { service, repository, ledger, audit, intake, supplierPayments, debts };
 }
 
 type RecordCall = [unknown, Record<string, unknown>, Record<string, unknown>[]];
@@ -224,6 +225,30 @@ describe('GoodsReceiptService — xác nhận', () => {
     });
     await expect(service.confirm('r1', PM_A)).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_DOCUMENT_STATE });
     expect(ledger.apply).not.toHaveBeenCalled();
+  });
+
+  it('N1: xác nhận khoá NCC TRƯỚC khi khoá phiếu / chiếm phiếu / nhập kho (lock order)', async () => {
+    const { service, repository, intake, debts } = makeService({
+      findStatus: jest.fn().mockResolvedValue(head),
+      findItemsForConfirm: jest.fn().mockResolvedValue([confirmItem]),
+    });
+    await service.confirm('r1', PM_A);
+    const order = (fn: jest.Mock) => fn.mock.invocationCallOrder[0];
+    expect(debts.lockSupplier).toHaveBeenCalledWith({}, head.supplierId);
+    expect(order(debts.lockSupplier)).toBeLessThan(order(repository.findStatusForUpdate));
+    expect(order(debts.lockSupplier)).toBeLessThan(order(repository.transition));
+    expect(order(debts.lockSupplier)).toBeLessThan(order(intake.intake));
+  });
+
+  it('N1: NCC của nháp đổi giữa lúc đọc và lúc khoá phiếu → 1701, không nhập kho', async () => {
+    const { service, intake } = makeService({
+      findStatus: jest
+        .fn()
+        .mockResolvedValueOnce(head)
+        .mockResolvedValueOnce({ ...head, supplierId: 'other-supplier' }),
+    });
+    await expect(service.confirm('r1', PM_A)).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_DOCUMENT_STATE });
+    expect(intake.intake).not.toHaveBeenCalled();
   });
 
   it('K8: hệ số quy đổi lấy lúc xác nhận — ghi lại dòng, nhập đúng số viên mới, kèm cảnh báo', async () => {

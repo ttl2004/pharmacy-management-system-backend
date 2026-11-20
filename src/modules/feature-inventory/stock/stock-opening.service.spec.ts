@@ -18,6 +18,7 @@ function makeService(auditEntries: unknown[]) {
       findFirst: jest.fn().mockResolvedValue({ id: 'p1', code: 'SP001', name: 'Panadol', trackBatches: false }),
     },
     stockBatch: { count: jest.fn().mockResolvedValue(0) },
+    $executeRaw: jest.fn().mockResolvedValue(1),
   };
   const transactions = { run: jest.fn((work: (ctx: unknown) => unknown) => work({ tx })) };
   const intake = {
@@ -25,7 +26,7 @@ function makeService(auditEntries: unknown[]) {
   };
   const audit = { record: jest.fn() };
   const service = new StockOpeningService(transactions as never, intake as never, audit as never);
-  return { service, audit };
+  return { service, audit, tx };
 }
 
 describe('StockOpeningService — nhật ký', () => {
@@ -59,5 +60,16 @@ describe('StockOpeningService — nhật ký', () => {
         metadata: { batchId: 'b1', quantity: 10, unitCost: '1500' },
       },
     ]);
+  });
+});
+
+describe('StockOpeningService — bấm đúp (M4)', () => {
+  it('khoá số lô KHONG-LO của sản phẩm TRƯỚC khi đếm lô đã có', async () => {
+    const { service, tx } = makeService([]);
+    await service.create({ branchId: A, productId: 'p1', quantity: 10, unitCost: 1000 }, PM_A);
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+    const sql = (tx.$executeRaw.mock.calls[0] as [{ values: unknown[] }])[0];
+    expect(sql.values).toContainEqual(['stock-batch:p1|KHONG-LO']);
+    expect(tx.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.stockBatch.count.mock.invocationCallOrder[0]);
   });
 });

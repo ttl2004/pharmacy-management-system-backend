@@ -1,4 +1,4 @@
-import { validateEnv } from './env.validation';
+import { productionEnvWarnings, validateEnv } from './env.validation';
 
 const base = {
   DATABASE_URL: 'postgresql://u:p@h:5432/db',
@@ -65,5 +65,30 @@ describe('validateEnv', () => {
     expect(env.REPORT_RECONCILE_CRON).toBe('15 0 * * *');
     expect(validateEnv({ ...base, REPORT_RECONCILE_ENABLED: 'false' }).REPORT_RECONCILE_ENABLED).toBe('false');
     expect(() => validateEnv({ ...base, REPORT_RECONCILE_CRON: 'không phải cron' })).toThrow(/REPORT_RECONCILE_CRON/);
+  });
+});
+
+describe('NODE_ENV (L1)', () => {
+  it('mặc định production (không khai báo = coi như chạy thật, tắt Swagger)', () => {
+    expect(validateEnv({ ...base }).NODE_ENV).toBe('production');
+    expect(validateEnv({ ...base, NODE_ENV: 'development' }).NODE_ENV).toBe('development');
+    expect(() => validateEnv({ ...base, NODE_ENV: 'dev' })).toThrow(/NODE_ENV/);
+  });
+});
+
+describe('productionEnvWarnings', () => {
+  it('production thiếu COOKIE_SECURE và TRUST_PROXY → 2 cảnh báo', () => {
+    const warnings = productionEnvWarnings({ NODE_ENV: 'production', COOKIE_SECURE: 'false', TRUST_PROXY: 0 });
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toMatch(/COOKIE_SECURE/);
+    expect(warnings[1]).toMatch(/TRUST_PROXY/);
+  });
+
+  it('production cấu hình đủ → không cảnh báo', () => {
+    expect(productionEnvWarnings({ NODE_ENV: 'production', COOKIE_SECURE: 'true', TRUST_PROXY: 1 })).toEqual([]);
+  });
+
+  it('không phải production → không cảnh báo', () => {
+    expect(productionEnvWarnings({ NODE_ENV: 'development', COOKIE_SECURE: 'false', TRUST_PROXY: 0 })).toEqual([]);
   });
 });

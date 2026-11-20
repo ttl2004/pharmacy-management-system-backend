@@ -34,6 +34,7 @@ function makeService(repositoryOverrides: Record<string, jest.Mock> = {}) {
       .fn()
       .mockImplementation((_tx: unknown, _id: string, data: object) => Promise.resolve({ ...EXISTING, ...data })),
     countReferences: jest.fn().mockResolvedValue(0),
+    lockRow: jest.fn().mockResolvedValue(true),
     ...repositoryOverrides,
   };
   const transactions = { run: jest.fn((work: (ctx: unknown) => unknown) => work({ tx: {}, afterCommit: jest.fn() })) };
@@ -138,6 +139,20 @@ describe('SupplierService', () => {
     const { service, repository } = makeService({ countReferences: jest.fn().mockResolvedValue(3) });
     await expect(service.remove('sup-1', ADMIN)).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
     expect(repository.updateWith).not.toHaveBeenCalled();
+  });
+
+  it('xoá: khoá dòng NCC TRƯỚC khi đếm chứng từ (điều chỉnh nợ song song không lọt)', async () => {
+    const { service, repository } = makeService();
+    await service.remove('sup-1', ADMIN);
+    expect(repository.lockRow.mock.invocationCallOrder[0]).toBeLessThan(
+      repository.countReferences.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('xoá NCC đã bị xoá (khoá không thấy dòng) → 1600, không đếm', async () => {
+    const { service, repository } = makeService({ lockRow: jest.fn().mockResolvedValue(false) });
+    await expect(service.remove('sup-1', ADMIN)).rejects.toMatchObject({ errorCode: ErrorCode.RECORD_NOT_FOUND });
+    expect(repository.countReferences).not.toHaveBeenCalled();
   });
 
   it('không tồn tại → 1600', async () => {

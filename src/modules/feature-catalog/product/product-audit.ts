@@ -33,7 +33,49 @@ const CONTROL_FLAG_SET: ReadonlySet<string> = new Set(CONTROL_FLAGS);
 
 type Row = Partial<Record<(typeof FIELDS)[number], unknown>> & { code: string; name: string };
 /** Dòng đơn vị bán tối thiểu để so giá chung. */
-type UnitPrice = { salePrice: number; unit: { id: string } };
+type UnitPrice = {
+  salePrice: number;
+  unit: { id: string };
+  conversionRate?: number;
+  barcode?: string | null;
+};
+
+const UNIT_FIELDS = ['conversionRate', 'salePrice', 'barcode'] as const;
+/** Trường so ở dòng đã có: giá đổi đã có `PRODUCT.PRICE_CHANGED` riêng nên không ghi trùng ở đây. */
+const UNIT_DIFF_FIELDS = ['conversionRate', 'barcode'] as const;
+
+/** Một dòng đơn vị gọn để ghi nhật ký: khoá theo `unitId`, kèm quy đổi / giá / mã vạch. */
+function unitSnapshot(row: UnitPrice, fields: readonly (typeof UNIT_FIELDS)[number][] = UNIT_FIELDS) {
+  return { unitId: row.unit.id, ...Object.fromEntries(fields.map((field) => [field, row[field] ?? null])) };
+}
+
+/**
+ * So cấu hình đơn vị bán trước/sau (theo `unit.id`): dòng thêm → chỉ có ở `after`, dòng bỏ → chỉ có ở `before`, dòng sửa
+ * → cả hai, chỉ gồm trường đổi. Trả `null` khi không có gì đổi.
+ */
+function diffUnits(before: readonly UnitPrice[] = [], after: readonly UnitPrice[] = []) {
+  const oldRows = new Map(before.map((row) => [row.unit.id, row]));
+  const newRows = new Map(after.map((row) => [row.unit.id, row]));
+  const unitsBefore: AuditJson[] = [];
+  const unitsAfter: AuditJson[] = [];
+  for (const [id, row] of oldRows) {
+    if (!newRows.has(id)) unitsBefore.push(unitSnapshot(row));
+  }
+  for (const [id, row] of newRows) {
+    const previous = oldRows.get(id);
+    if (!previous) {
+      unitsAfter.push(unitSnapshot(row));
+      continue;
+    }
+    const changed = UNIT_DIFF_FIELDS.filter(
+      (field) => previous[field] !== undefined && (previous[field] ?? null) !== (row[field] ?? null),
+    );
+    if (!changed.length) continue;
+    unitsBefore.push(unitSnapshot(previous, changed));
+    unitsAfter.push(unitSnapshot(row, changed));
+  }
+  return unitsBefore.length || unitsAfter.length ? { before: unitsBefore, after: unitsAfter } : null;
+}
 
 /** Nhãn, phạm vi và từ khoá chung của mọi dòng sản phẩm: danh mục toàn chuỗi → `[]`; tìm theo mã + tên (D8). */
 function base(id: string, row: Row) {
@@ -57,7 +99,8 @@ export function productCreatedEntry(id: string, row: Row): AuditEntry {
 
 /**
  * Các dòng nhật ký của một lần sửa (rỗng khi không có gì đáng ghi — vd. chỉ đổi mô tả hoặc bấm sao):
- * - `PRODUCT.UPDATED` / `STATUS_CHANGED` (chỉ đổi `status`) cho trường thường;
+ * - `PRODUCT.UPDATED` / `STATUS_CHANGED` (chỉ đổi `status`) cho trường thường; đổi cấu hình đơn vị bán (thêm / bỏ dòng, quy
+ *   đổi, mã vạch; giá đổi đã có `PRICE_CHANGED`) ghi chung vào đây dưới khoá `units` (luôn là `PRODUCT.UPDATED`);
  * - `PRODUCT.CONTROL_FLAGS_CHANGED` khi đổi cờ kê đơn / kiểm soát đặc biệt;
  * - `PRODUCT.PRICE_CHANGED` cho mỗi đơn vị bán (có cả trước và sau) đổi giá chung, `amount` = giá mới.
  */
@@ -69,18 +112,21 @@ export function productUpdatedEntries(
   const entries: AuditEntry[] = [];
   const common = base(id, after);
   const diff = diffFields(before, after, FIELDS);
+  const unitDiff = diffUnits(before.units, after.units);
+  let unitsLogged = false;
   if (diff) {
     const fieldBefore = split(diff.before, false);
     const fieldAfter = split(diff.after, false);
     const changedKeys = Object.keys(fieldAfter);
     if (changedKeys.length) {
-      const statusOnly = changedKeys.length === 1 && changedKeys[0] === 'status';
+      const statusOnly = changedKeys.length === 1 && changedKeys[0] === 'status' && !unitDiff;
       entries.push({
         event: statusOnly ? 'PRODUCT.STATUS_CHANGED' : 'PRODUCT.UPDATED',
         ...common,
-        before: fieldBefore,
-        after: fieldAfter,
+        before: unitDiff ? { ...fieldBefore, units: unitDiff.before } : fieldBefore,
+        after: unitDiff ? { ...fieldAfter, units: unitDiff.after } : fieldAfter,
       });
+      unitsLogged = Boolean(unitDiff);
     }
     const flagsAfter = split(diff.after, true);
     if (Object.keys(flagsAfter).length) {
@@ -91,6 +137,15 @@ export function productUpdatedEntries(
         after: flagsAfter,
       });
     }
+  }
+
+  if (unitDiff && !unitsLogged) {
+    entries.push({
+      event: 'PRODUCT.UPDATED',
+      ...common,
+      before: { units: unitDiff.before },
+      after: { units: unitDiff.after },
+    });
   }
 
   const oldPrice = new Map((before.units ?? []).map((row) => [row.unit.id, row.salePrice]));
@@ -106,6 +161,10 @@ export function productUpdatedEntries(
     });
   }
   return entries;
+}
+
+export function productRestoredEntry(id: string, row: Row): AuditEntry {
+  return { event: 'PRODUCT.RESTORED', ...base(id, row), after: pickAuditFields(row, FIELDS) };
 }
 
 export function productDeletedEntry(id: string, row: Row): AuditEntry {

@@ -65,6 +65,7 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
       .fn()
       .mockResolvedValue({ batchIdByRefItem: new Map([['i1', 'b-dest']]), movements: [], auditEntries: [] }),
     returnToBatches: jest.fn().mockResolvedValue([]),
+    assertCanIntake: jest.fn().mockResolvedValue(undefined),
   };
   const codes = { next: jest.fn().mockResolvedValue('DC000001') };
   const audit = { record: jest.fn() };
@@ -174,6 +175,17 @@ describe('TransferService — xuất/nhận/huỷ theo đúng phía', () => {
     expect(options.preLocked).toBeDefined();
   });
 
+  it('K4: chi nhánh nhận không nhận được lô (khác hạn dùng / cách ly) → xuất bị từ chối, chưa trừ kho', async () => {
+    const { service, ledger, intake } = makeService({ findHead: jest.fn().mockResolvedValue(pendingHead) });
+    intake.assertCanIntake.mockRejectedValue(new Error('lô L1 đang có hạn 2027-01-01'));
+    await expect(service.ship('t1', PM_A)).rejects.toThrow('lô L1');
+    expect(intake.assertCanIntake).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ branchId: B, lines: [expect.objectContaining({ batchNumber: 'L1', quantity: 30 })] }),
+    );
+    expect(ledger.apply).not.toHaveBeenCalled();
+  });
+
   it('lô hết hạn trong lúc chờ xuất → 1704', async () => {
     const { service, ledger } = makeService({ findHead: jest.fn().mockResolvedValue(pendingHead) });
     ledger.lockBatches.mockResolvedValue([batch({ expiryDate: parseDateOnly(todayInVietnam()) })]);
@@ -225,13 +237,22 @@ describe('TransferService — xuất/nhận/huỷ theo đúng phía', () => {
 
   it('K5: huỷ khi đang trên đường → hoàn về đúng lô gửi với giá chốt lúc xuất (giá vốn lô được tính lại)', async () => {
     const { service, intake } = makeService({ findHead: jest.fn().mockResolvedValue(transitHead) });
-    await service.cancel('t1', { reason: 'xe hỏng' }, PM_A);
+    await service.cancel('t1', { reason: 'xe hỏng' }, actor(AuthRole.ADMIN));
     const [, request] = intake.returnToBatches.mock.calls[0] as [unknown, Record<string, unknown>];
     expect(request).toMatchObject({
       type: 'TRANSFER_IN',
       refId: 't1',
       lines: [{ batchId: 'b1', quantity: 30, unitCost: 900, refItemId: 'i1' }],
     });
+  });
+
+  it('M5: chi nhánh gửi huỷ phiếu đang trên đường → 1500, không chiếm phiếu, không hoàn hàng', async () => {
+    const { service, intake, repository } = makeService({ findHead: jest.fn().mockResolvedValue(transitHead) });
+    await expect(service.cancel('t1', { reason: 'xe hỏng' }, PM_A)).rejects.toMatchObject({
+      response: { code: ErrorCode.PERMISSION_DENIED },
+    });
+    expect(repository.transition).not.toHaveBeenCalled();
+    expect(intake.returnToBatches).not.toHaveBeenCalled();
   });
 
   it('huỷ phiếu đã nhận → 1701', async () => {

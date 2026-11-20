@@ -7,6 +7,8 @@ import { resolveBranchScope, scopedBranchFilter } from 'src/modules/feature-auth
 import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { adjustmentEvent } from 'src/providers/audit-log/audit-events';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
+import { canSeeCost } from '../core/cost-visibility';
 import { DocumentCodeService } from '../core/document-code.service';
 import {
   assertNoDuplicateBatches,
@@ -18,7 +20,8 @@ import {
 import { branchWhere, resolveWriteBranch } from '../core/inventory-scope';
 import { InventoryTransactions, type InventoryTxContext } from '../core/inventory-transactions';
 import { StockIntakeService } from '../core/stock-intake.service';
-import { AUDIT_ENTITY, MAX_DOCUMENT_LINES } from '../core/inventory.constants';
+import { AUDIT_ENTITY, DOCUMENT_CODE_FORMATS, MAX_DOCUMENT_LINES } from '../core/inventory.constants';
+import { parseDocumentDate } from '../core/document-date';
 import { LedgerEntry, StockLedgerService } from '../core/stock-ledger.service';
 import {
   AdjustmentItemRequest,
@@ -27,6 +30,7 @@ import {
   CreateAdjustmentRequest,
   UpdateAdjustmentRequest,
 } from './dtos/adjustment.request';
+import { maskAdjustmentDetail, maskAdjustmentRow, NO_RETURN_SUMMARY } from './adjustment-cost-mask';
 import { adjustmentListWhere, adjustmentOrderBy } from './adjustment-list-filters';
 import { NO_RETURN_MONEY, PurchaseReturnMoneyService, type ReturnLineInput } from './purchase-return-money.service';
 import {
@@ -93,6 +97,25 @@ interface StatusChange {
 }
 
 /** Phần chung của mọi dòng nhật ký phiếu điều chỉnh: nhãn + từ khoá = mã phiếu (D8), phạm vi = chi nhánh phiếu. */
+/** Mã tự sinh của phiếu điều chỉnh: `DCK` + số (xem `DOCUMENT_CODE_FORMATS.STOCK_ADJUSTMENT`). */
+const AUTO_CODE_PATTERN = new RegExp(`^${DOCUMENT_CODE_FORMATS.STOCK_ADJUSTMENT.prefix}\\d+$`, 'i');
+
+/**
+ * Kiểm phần đầu phiếu người dùng tự nhập, trước khi mở transaction:
+ * - L8: mã tự đặt không được theo mẫu tự sinh (`DCK` + số) — nếu không, khi dãy số tự sinh chạy tới đúng mã đó, lần lập
+ *   phiếu ấy lỗi trùng mã.
+ * - L9: ngày chứng từ không ở tương lai, lùi tối đa 7 ngày.
+ */
+function assertHeaderInput(dto: { code?: string; documentDate?: string }): void {
+  const code = dto.code?.trim();
+  if (code && AUTO_CODE_PATTERN.test(code)) {
+    throw badRequest(
+      `Mã ${code} trùng mẫu mã tự sinh (${DOCUMENT_CODE_FORMATS.STOCK_ADJUSTMENT.prefix} + số) — đặt mã khác hoặc bỏ trống để tự sinh`,
+    );
+  }
+  if (dto.documentDate) parseDocumentDate(dto.documentDate, 'Ngày chứng từ');
+}
+
 function adjustmentAudit(doc: { id: string; code: string; branchId: string }) {
   return {
     entityType: AUDIT_ENTITY.STOCK_ADJUSTMENT,
@@ -125,6 +148,7 @@ export class AdjustmentService {
     private readonly audit: AuditLogService,
     private readonly intake: StockIntakeService,
     private readonly returnMoney: PurchaseReturnMoneyService,
+    private readonly permissions: PermissionService,
   ) {}
 
   /** Dòng phiếu trả cho bước tính tiền: lô đã đọc (đã chắc có — bước trước đã từ chối lô lạ) + SL đưa ra (dương). */
@@ -145,8 +169,30 @@ export class AdjustmentService {
     const branchId = scopedBranchFilter(resolveBranchScope(actor.user), query.branchId);
     const where = adjustmentListWhere(query, branchId);
     const page = await this.adjustments.findPage(where, query.page, query.limit, adjustmentOrderBy(query.sort));
-    if (query.type !== AdjustmentType.RETURN_TO_SUPPLIER) return page;
-    return { ...page, summary: await this.adjustments.returnSummary(where) };
+    // Người không thấy được giá vốn (K8): mọi cột tiền = null (phiếu loại nào cũng có cột tiền ở DB).
+    const showCost = await canSeeCost(this.permissions, actor.user);
+    // Tổng SL / giá trị từng phiếu của trang này (một câu lệnh). Trả NCC: giá trị = tổng tiền trả của phiếu (như chi tiết).
+    const totals = await this.adjustments.itemTotals(page.hits.map((row) => row.id));
+    const hits = page.hits.map((row) => {
+      const sum = totals.get(row.id);
+      const value = row.type === AdjustmentType.RETURN_TO_SUPPLIER ? Number(row.totalAmount) : (sum?.value ?? 0);
+      const base = showCost ? row : maskAdjustmentRow(row);
+      const common = { ...base, totalQuantity: sum?.quantity ?? 0, totalValue: showCost ? value : null };
+      if (row.type !== AdjustmentType.STOCK_TAKE) return common;
+      // Kiểm kê: số liệu GIỮ DẤU (tăng/giảm tách riêng) để danh sách hiện đủ như mock; giá trị ẩn theo quyền giá vốn.
+      return {
+        ...common,
+        lineCount: sum?.lineCount ?? 0,
+        totalActual: sum?.totalActual ?? 0,
+        diffUp: sum?.diffUp ?? 0,
+        diffDown: sum?.diffDown ?? 0,
+        diffUpValue: showCost ? (sum?.diffUpValue ?? 0) : null,
+        diffDownValue: showCost ? (sum?.diffDownValue ?? 0) : null,
+      };
+    });
+    const masked = { ...page, hits };
+    if (query.type !== AdjustmentType.RETURN_TO_SUPPLIER) return masked;
+    return { ...masked, summary: showCost ? await this.adjustments.returnSummary(where) : NO_RETURN_SUMMARY };
   }
 
   /** Cảnh báo lô mới / lô đổi tồn của phiếu kiểm kê (chỉ đọc). */
@@ -171,10 +217,10 @@ export class AdjustmentService {
     return { isFavourite };
   }
 
-  async getDetail(id: string, actor: RequestActor): Promise<AdjustmentDetail> {
+  async getDetail(id: string, actor: RequestActor) {
     const adjustment = await this.adjustments.findDetail(id, branchWhere(resolveBranchScope(actor.user)));
     if (!adjustment) throw errors.notFound();
-    return adjustment;
+    return (await canSeeCost(this.permissions, actor.user)) ? adjustment : maskAdjustmentDetail(adjustment);
   }
 
   async create(dto: CreateAdjustmentRequest, actor: RequestActor): Promise<AdjustmentDetail> {
@@ -183,6 +229,7 @@ export class AdjustmentService {
     if (dto.items.length > MAX_DOCUMENT_LINES) {
       throw inventoryError(ErrorCode.DOCUMENT_LINE_LIMIT, `tối đa ${MAX_DOCUMENT_LINES} dòng`);
     }
+    assertHeaderInput(dto);
     const batchIds = dto.items.map((item) => item.batchId);
     assertNoDuplicateBatches(batchIds);
     const draftLines = dto.items.map((item, index) => this.toDraftLine(dto.type, item, index));
@@ -246,7 +293,7 @@ export class AdjustmentService {
         supplierId: dto.supplierId ?? null,
         reason: dto.reason,
         note: dto.note ?? null,
-        documentDate: dto.documentDate ? new Date(dto.documentDate) : new Date(),
+        documentDate: dto.documentDate ? parseDocumentDate(dto.documentDate, 'Ngày chứng từ') : new Date(),
         handlerId: dto.handlerId ?? null,
         receiverId: dto.receiverId ?? null,
         internalUseTypeId: dto.internalUseTypeId ?? null,
@@ -280,6 +327,7 @@ export class AdjustmentService {
     if (dto.items.length > MAX_DOCUMENT_LINES) {
       throw inventoryError(ErrorCode.DOCUMENT_LINE_LIMIT, `tối đa ${MAX_DOCUMENT_LINES} dòng`);
     }
+    assertHeaderInput(dto);
     const batchIds = dto.items.map((item) => item.batchId);
     assertNoDuplicateBatches(batchIds);
 
@@ -353,7 +401,7 @@ export class AdjustmentService {
         supplierId: dto.supplierId ?? null,
         reason: dto.reason,
         note: dto.note ?? null,
-        ...(dto.documentDate ? { documentDate: new Date(dto.documentDate) } : {}),
+        ...(dto.documentDate ? { documentDate: parseDocumentDate(dto.documentDate, 'Ngày chứng từ') } : {}),
         handlerId: dto.handlerId ?? null,
         receiverId: dto.receiverId ?? null,
         internalUseTypeId: dto.internalUseTypeId ?? null,

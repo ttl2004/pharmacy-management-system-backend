@@ -66,7 +66,7 @@ export class PriceBookController {
   @Get('rows')
   @ApiOperation({
     description:
-      'Trang dòng giá: mỗi dòng một (hàng, đơn vị) kèm giá vốn, giá nhập cuối theo chi nhánh, giá chung và giá các bảng trong bookIds. Trả {items, total, page, pageSize}.',
+      'Trang dòng giá: mỗi dòng một (hàng, đơn vị) kèm giá vốn, giá nhập cuối theo chi nhánh, giá chung và giá các bảng trong bookIds. Trả {items, total, page, pageSize}. Không có goods-receipt:create / price-book:update: avgCost, lastPurchaseCost = null và bỏ qua lọc theo giá vốn; không có price-book:update: pageSize tối đa 500 (400 nếu vượt).',
   })
   rows(@Query() query: PriceRowsQuery, @CurrentUser() user: JwtUser) {
     return this.rowsService.listRows(query, user);
@@ -126,7 +126,8 @@ export class PriceBookController {
   @RequirePermissions('price-book:update')
   @Post(':id/apply-formula')
   @ApiOperation({
-    description: 'Áp công thức của bảng cho mọi dòng khớp bộ lọc trong body (như query của /rows). Trả {count}.',
+    description:
+      'Áp công thức của bảng cho mọi dòng khớp bộ lọc trong body (như query của /rows). Trả {count, skipped}: skipped = dòng bị bỏ qua (chưa biết giá gốc hoặc giá tính ra ≤ 0). Công thức theo giá vốn / giá nhập cuối bắt buộc chọn chi nhánh (400).',
   })
   applyFormula(
     @Param('id', new ParseUUIDPipe()) id: string,

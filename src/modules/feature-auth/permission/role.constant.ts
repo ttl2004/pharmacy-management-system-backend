@@ -105,6 +105,8 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'order:create',
     'order:pay',
     'order:cancel',
+    'order:void',
+    'order:handle-others',
     // Khai trước cho màn giao diện đã có (khách hàng, công nợ, giá, báo cáo, DQG).
     'customer:read',
     'customer:create',
@@ -159,6 +161,8 @@ export const DEFAULT_ROLE_GRANTS: Partial<Record<RoleCode, readonly PermissionCo
     'order:create',
     'order:pay',
     'order:cancel',
+    'order:void',
+    'order:handle-others',
     // Kết nối tài khoản CSDL Dược là việc cấp chuỗi — chỉ ADMIN.
     'customer:read',
     'customer:create',

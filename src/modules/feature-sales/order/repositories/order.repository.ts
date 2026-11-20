@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { OrderChannel, OrderStatus, Prisma, UserStatus } from '@prisma/client';
+import { lockAdvisoryKeys } from 'src/common/databases/advisory-lock';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { AuthRole } from 'src/common/types/common.enum';
 import type { SellableUnit } from '../../core/order-lines';
@@ -39,6 +40,8 @@ const ORDER_DETAIL_SELECT = {
   cancelReason: true,
   confirmedAt: true,
   updatedAt: true,
+  // Chỉ để suy ra `cancelledByUser` (xem `toDetail`) — không lộ ra response dưới tên này.
+  updatedByUser: USER_BRIEF,
   items: {
     where: { isDeleted: false },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -75,11 +78,27 @@ const ORDER_DETAIL_SELECT = {
       transactionCode: true,
       paidAt: true,
       createdAt: true,
+      createdByUser: USER_BRIEF,
     },
   },
 } satisfies Prisma.OrderSelect;
 
-export type OrderDetail = Prisma.OrderGetPayload<{ select: typeof ORDER_DETAIL_SELECT }>;
+type OrderDetailRow = Prisma.OrderGetPayload<{ select: typeof ORDER_DETAIL_SELECT }>;
+
+/** Chi tiết đơn: `cancelledByUser` = người huỷ (chỉ khi CANCELLED, ngược lại null). */
+export type OrderDetail = Omit<OrderDetailRow, 'updatedByUser'> & {
+  cancelledByUser: { id: string; fullName: string } | null;
+};
+
+/**
+ * Người huỷ = `updatedByUser` của đơn, chỉ khi đơn CANCELLED — không thêm cột. Đúng vì huỷ (kể cả huỷ hoá đơn đã thu và
+ * job tự huỷ) là lần ghi CUỐI lên đơn: mọi thao tác ghi đơn đều là `claim` yêu cầu PENDING/COMPLETED, nên đơn CANCELLED
+ * không còn bị ghi lại (rollup/yêu thích chỉ ghi bảng khác).
+ */
+function toDetail(row: OrderDetailRow): OrderDetail {
+  const { updatedByUser, ...rest } = row;
+  return { ...rest, cancelledByUser: row.status === OrderStatus.CANCELLED ? updatedByUser : null };
+}
 
 /** Kết quả tìm-hoặc-tạo hồ sơ người mua tại quầy. */
 export interface WalkInCustomer {
@@ -105,12 +124,20 @@ export interface OrderHead {
   prescriptionCode: string | null;
   prescriberName: string | null;
   updatedAt: Date | null;
+  /** Lúc thu tiền (đơn COMPLETED) — mốc tính hạn huỷ hoá đơn đã thu. */
+  completedAt: Date | null;
   /** Bảng giá lúc tạo đơn (null + tên còn = bảng đã bị xoá) và người tạo — để kiểm lại bảng khi sửa dòng. */
   priceBookId: string | null;
   priceBookName: string | null;
   createdBy: string | null;
   lineCount: number;
   prescriptionLineCount: number;
+  /** Khách mua gắn với đơn (null = khách lẻ) và số dòng thuốc kiểm soát — thuốc kiểm soát phải có khách (M1). */
+  customerId: string | null;
+  controlledLineCount: number;
+  /** Người lập đơn (`staffId`, gán lúc tạo) và tên — để kiểm quyền xử lý đơn của người khác và ghi `onBehalfOf`. */
+  staffId: string | null;
+  staffName: string | null;
 }
 
 @Injectable()
@@ -132,11 +159,16 @@ export class OrderRepository {
     return { hits, total, page, totalPages: Math.ceil(total / limit), limit };
   }
 
-  findDetail(id: string, scopeWhere: Prisma.OrderWhereInput, client: Prisma.TransactionClient = this.prisma) {
-    return client.order.findFirst({
+  async findDetail(
+    id: string,
+    scopeWhere: Prisma.OrderWhereInput,
+    client: Prisma.TransactionClient = this.prisma,
+  ): Promise<OrderDetail | null> {
+    const row = await client.order.findFirst({
       where: { AND: [{ id, isDeleted: false }, scopeWhere] },
       select: ORDER_DETAIL_SELECT,
     });
+    return row ? toDetail(row) : null;
   }
 
   async findHead(
@@ -157,18 +189,29 @@ export class OrderRepository {
         prescriptionCode: true,
         prescriberName: true,
         updatedAt: true,
+        completedAt: true,
         priceBookId: true,
         priceBookName: true,
         createdBy: true,
+        customerId: true,
+        staffId: true,
+        staff: { select: { fullName: true } },
         _count: { select: { items: { where: { isDeleted: false } } } },
       },
     });
     if (!row) return null;
-    const prescriptionLineCount = await tx.orderItem.count({
-      where: { orderId: id, isDeleted: false, product: { requiresPrescription: true } },
-    });
-    const { _count, ...head } = row;
-    return { ...head, lineCount: _count.items, prescriptionLineCount };
+    const [prescriptionLineCount, controlledLineCount] = await Promise.all([
+      tx.orderItem.count({ where: { orderId: id, isDeleted: false, product: { requiresPrescription: true } } }),
+      tx.orderItem.count({ where: { orderId: id, isDeleted: false, product: { isControlled: true } } }),
+    ]);
+    const { _count, staff, ...head } = row;
+    return {
+      ...head,
+      staffName: staff?.fullName ?? null,
+      lineCount: _count.items,
+      prescriptionLineCount,
+      controlledLineCount,
+    };
   }
 
   findBranch(tx: Prisma.TransactionClient, id: string) {
@@ -249,16 +292,27 @@ export class OrderRepository {
     return tx.payment.create({ data, select: { id: true } });
   }
 
-  /** Đơn tại quầy PENDING không ai đụng tới từ trước `cutoff`. */
+  /**
+   * Khoá theo nhân viên rồi đếm đơn tại quầy đang chờ thu của họ. Khoá giữ tới hết transaction lập đơn, nên hai lần
+   * lập đơn cùng lúc của một người chạy nối tiếp — không lọt quá trần.
+   */
+  async lockAndCountPendingPos(tx: Prisma.TransactionClient, staffId: string): Promise<number> {
+    await lockAdvisoryKeys(tx, [`pos-pending:${staffId}`]);
+    return tx.order.count({
+      where: { staffId, isDeleted: false, channel: OrderChannel.POS, status: OrderStatus.PENDING },
+    });
+  }
+
+  /** Đơn tại quầy PENDING được LẬP từ trước `cutoff` — hạn tính từ lúc lập đơn, sửa đơn không gia hạn. */
   findAbandonedPos(cutoff: Date, take: number) {
     return this.prisma.order.findMany({
       where: {
         isDeleted: false,
         channel: OrderChannel.POS,
         status: OrderStatus.PENDING,
-        OR: [{ updatedAt: { lt: cutoff } }, { updatedAt: null, createdAt: { lt: cutoff } }],
+        createdAt: { lt: cutoff },
       },
-      select: { id: true, code: true, branchId: true, status: true, updatedAt: true },
+      select: { id: true, code: true, branchId: true, status: true },
       orderBy: { createdAt: 'asc' },
       take,
     });

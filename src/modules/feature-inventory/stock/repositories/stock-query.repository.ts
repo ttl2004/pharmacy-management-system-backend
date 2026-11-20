@@ -4,6 +4,15 @@ import { PrismaService } from 'src/common/databases/prisma.service';
 import { lockAdvisoryKeys } from 'src/common/databases/advisory-lock';
 import { parseDateOnly, toDateOnlyString, todayInVietnam, vietnamDayStartUtc } from 'src/common/utils/date-only.util';
 import { containsPattern } from 'src/common/utils/like-pattern.util';
+import { INVENTORY_TX_MAX_WAIT_MS, INVENTORY_TX_TIMEOUT_MS } from '../../core/inventory.constants';
+import { accumulateProductBalance, buildBalanceSegments, type SegmentSums } from './movement-product-balance';
+
+/**
+ * Lần dựng đầu trên sổ kho hàng triệu dòng vượt 5 s mặc định của Prisma → rollback, lần sau dựng lại từ đầu (không
+ * bao giờ xong). `timeout` đủ rộng cho người dựng; `maxWait` cho người chờ kết nối. Request khác chờ khoá advisory
+ * cũng nằm trong transaction cùng cấu hình nên không hết hạn trước người dựng.
+ */
+export const MONTHLY_BUILD_TX_OPTIONS = { timeout: 120_000, maxWait: 10_000 } as const;
 
 const BATCH_SELECT = {
   id: true,
@@ -43,6 +52,10 @@ const MOVEMENT_SELECT = {
 
 export type StockBatchRow = Prisma.StockBatchGetPayload<{ select: typeof BATCH_SELECT }>;
 export type StockMovementRow = Prisma.StockMovementGetPayload<{ select: typeof MOVEMENT_SELECT }>;
+export type StockMovementWithBalance = StockMovementRow & {
+  /** Tồn thuốc (mọi lô) của chi nhánh ngay sau bút toán này — khác `balanceAfter` là tồn của riêng lô. */
+  productBalanceAfter: number;
+};
 
 export interface ProductStockRow {
   branchId: string;
@@ -111,13 +124,73 @@ export class StockQueryRepository {
     return this.prisma.stockBatch.findFirst({ where: { id, isDeleted: false, ...scopeWhere }, select: BATCH_SELECT });
   }
 
-  findMovements(where: Prisma.StockMovementWhereInput, take: number): Promise<StockMovementRow[]> {
-    return this.prisma.stockMovement.findMany({
-      where,
-      select: MOVEMENT_SELECT,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take,
-    });
+  /**
+   * Trang sổ kho (mới nhất trước, (createdAt, id) giảm dần), mỗi dòng kèm `productBalanceAfter` = tồn THUỐC (mọi lô) của chi nhánh ngay sau bút toán,
+   * theo đúng thứ tự (createdAt, id) của danh sách. Bộ lọc của danh sách (lô, loại, chứng từ, ngày, con trỏ) KHÔNG áp
+   * cho phần cộng: mọi bút toán của thuốc đều tính.
+   *
+   * Sổ kho là nguồn chân lý của tồn (mọi thay đổi `quantityOnHand` đi qua `StockLedgerService` và ghi một bút toán), nên
+   * sau m = tồn hiện tại − Σ bút toán đứng sau m. Trang + tồn hiện tại + các tổng đọc trong MỘT transaction
+   * REPEATABLE READ (chỉ đọc) → cùng một ảnh chụp, bút toán ghi xen giữa không làm lệch cột. Tối đa 2 câu SQL
+   * bất kể số dòng/sản phẩm; mỗi sản phẩm quét sổ kho một lần (index `[branchId, productId, createdAt]`) từ dòng cũ
+   * nhất của nó trong trang tới hiện tại — dòng giữa được suy ra bằng cộng dồn ở bộ nhớ (xem `movement-product-balance`).
+   * Không lọc `isDeleted` ở lô: sổ kho đếm cả lô đã xoá nên tồn phải cùng cơ sở (hiện không có luồng nào xoá mềm lô).
+   */
+  findMovementsWithProductBalance(
+    where: Prisma.StockMovementWhereInput,
+    take: number,
+  ): Promise<StockMovementWithBalance[]> {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const rows = await tx.stockMovement.findMany({
+          where,
+          select: MOVEMENT_SELECT,
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          take,
+        });
+        if (!rows.length) return [];
+
+        const balanceRows = rows.map((row) => ({
+          id: row.id,
+          createdAt: row.createdAt,
+          branchId: row.branch.id,
+          productId: row.product.id,
+          quantity: row.quantity,
+        }));
+        const values = Prisma.join(
+          buildBalanceSegments(balanceRows).map(
+            (s) =>
+              Prisma.sql`(${s.id}::uuid, ${s.branchId}::uuid, ${s.productId}::uuid, ${s.createdAt}::timestamptz,
+                ${s.upperCreatedAt}::timestamptz, ${s.upperId}::uuid)`,
+          ),
+        );
+        // `createdAt >=` / `<=` đứng riêng để index đi theo khoảng thời gian; so sánh bộ (createdAt, id) lọc tiếp.
+        const sums = await tx.$queryRaw<{ id: string; onHand: bigint; segment: bigint }[]>(Prisma.sql`
+          SELECT v."id",
+                 (SELECT COALESCE(SUM(b."quantityOnHand"), 0) FROM "stock_batches" b
+                  WHERE b."branchId" = v."branchId" AND b."productId" = v."productId")::bigint AS "onHand",
+                 (SELECT COALESCE(SUM(m."quantity"), 0) FROM "stock_movements" m
+                  WHERE m."branchId" = v."branchId" AND m."productId" = v."productId"
+                    AND m."createdAt" >= v."createdAt" AND (m."createdAt", m."id") > (v."createdAt", v."id")
+                    AND m."createdAt" <= COALESCE(v."upperCreatedAt", 'infinity'::timestamptz)
+                    AND (v."upperCreatedAt" IS NULL OR (m."createdAt", m."id") <= (v."upperCreatedAt", v."upperId"))
+                 )::bigint AS "segment"
+          FROM (VALUES ${values}) AS v("id", "branchId", "productId", "createdAt", "upperCreatedAt", "upperId")`);
+
+        const sumById = new Map<string, SegmentSums>(
+          sums.map((r) => [r.id, { onHand: Number(r.onHand), segment: Number(r.segment) }]),
+        );
+        const balances = accumulateProductBalance(balanceRows, sumById);
+        return rows.map((row) => ({ ...row, productBalanceAfter: balances.get(row.id)! }));
+      },
+      // Timeout tường minh: mặc định 5 s của Prisma có thể bị vượt khi trang sâu của hàng bán chạy phải cộng nhiều bút
+      // toán — quá hạn là rollback và lỗi 500 thay vì trả chậm. Cùng trần với transaction kho.
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+        timeout: INVENTORY_TX_TIMEOUT_MS,
+        maxWait: INVENTORY_TX_MAX_WAIT_MS,
+      },
+    );
   }
 
   /**
@@ -371,7 +444,7 @@ export class StockQueryRepository {
         INSERT INTO "stock_movement_monthly_built" ("month")
         SELECT g::date FROM generate_series(${startMonth}::date, ${needUpTo}::date, interval '1 month') AS g
         ON CONFLICT DO NOTHING`);
-    });
+    }, MONTHLY_BUILD_TX_OPTIONS);
   }
 
   /**

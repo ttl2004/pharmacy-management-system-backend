@@ -34,6 +34,7 @@ const head = (overrides: Partial<OrderHead> = {}): OrderHead => ({
   prescriptionLineCount: 0,
   customerId: null,
   controlledLineCount: 0,
+  interactionOverride: null,
   ...overrides,
 });
 

@@ -1308,7 +1308,8 @@ model Order {
   /// Giảm giá cả đơn (VND, ≤ tạm tính). Tổng = tạm tính + phí ship − giảm giá.
   discountAmount       BigInt        @default(0)
   totalAmount          BigInt        @default(0)
-  /// Dược sĩ ghi đè cảnh báo tương tác major: {reason, warningIds, warningSummaries, byUserId, at}.
+  /// Dược sĩ duyệt cảnh báo tương tác nghiêm trọng tại quầy: {reason, warningIds, warningSummaries, manual, byUserId, byUserName, requestedBy, at}.
+  /// byUserId/byUserName = dược sĩ duyệt, requestedBy = người bán, manual = duyệt thủ công khi service tương tác tắt.
   interactionOverride  Json?         @db.JsonB
   paymentStatus        PaymentStatus @default(UNPAID)
   prescriptionCode     String?       @db.VarChar(50)

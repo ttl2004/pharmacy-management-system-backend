@@ -52,6 +52,7 @@ function makeService(
     countStale: jest.fn().mockResolvedValue(0),
     deactivateStale: jest.fn().mockResolvedValue(0),
     syncProductPrescription: jest.fn().mockResolvedValue([]),
+    syncProductControlled: jest.fn().mockResolvedValue([]),
     ...repositoryOverrides,
   };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };

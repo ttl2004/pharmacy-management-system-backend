@@ -99,6 +99,18 @@ export interface AdjustmentHead {
   supplierPaid: bigint;
 }
 
+/** Tổng một phiếu trên trang danh sách (xem `itemTotals`). */
+export interface AdjustmentItemTotals {
+  quantity: number;
+  value: number;
+  lineCount: number;
+  totalActual: number;
+  diffUp: number;
+  diffDown: number;
+  diffUpValue: number;
+  diffDownValue: number;
+}
+
 @Injectable()
 export class AdjustmentRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -121,6 +133,58 @@ export class AdjustmentRepository {
       this.prisma.stockAdjustment.count({ where: fullWhere }),
     ]);
     return { hits, total, page, totalPages: Math.ceil(total / limit), limit };
+  }
+
+  /**
+   * Tổng theo phiếu cho trang danh sách, MỘT câu lệnh cho cả trang (đi theo index unique (adjustmentId, batchId)).
+   * quantity = Σ |quantity| (SL đưa ra / chênh lệch tuyệt đối); value = Σ |quantity| × unitCost (bigint, tránh tràn Int).
+   * Thêm số liệu GIỮ DẤU cho phiếu kiểm kê (quantity = thực đếm − sổ sách): lineCount = số sản phẩm, totalActual = Σ thực đếm,
+   * diffUp / diffDown = Σ chênh lệch dương / Σ chênh lệch âm (số dương), diffUpValue / diffDownValue = giá trị tương ứng (× unitCost).
+   * Phiếu không có dòng nào không xuất hiện trong kết quả.
+   */
+  async itemTotals(adjustmentIds: string[]): Promise<Map<string, AdjustmentItemTotals>> {
+    if (adjustmentIds.length === 0) return new Map();
+    const rows = await this.prisma.$queryRaw<
+      {
+        adjustmentId: string;
+        quantity: bigint;
+        value: bigint;
+        lineCount: bigint;
+        totalActual: bigint;
+        diffUp: bigint;
+        diffDown: bigint;
+        diffUpValue: bigint;
+        diffDownValue: bigint;
+      }[]
+    >(Prisma.sql`
+      SELECT "adjustmentId",
+             SUM(ABS("quantity"))::bigint AS quantity,
+             SUM(ABS("quantity")::bigint * "unitCost"::bigint)::bigint AS value,
+             COUNT(DISTINCT "productId")::bigint AS "lineCount",
+             COALESCE(SUM(COALESCE("actualQuantity", 0)::bigint), 0)::bigint AS "totalActual",
+             COALESCE(SUM("quantity"::bigint) FILTER (WHERE "quantity" > 0), 0)::bigint AS "diffUp",
+             COALESCE(SUM(-"quantity"::bigint) FILTER (WHERE "quantity" < 0), 0)::bigint AS "diffDown",
+             COALESCE(SUM("quantity"::bigint * "unitCost"::bigint) FILTER (WHERE "quantity" > 0), 0)::bigint AS "diffUpValue",
+             COALESCE(SUM(-"quantity"::bigint * "unitCost"::bigint) FILTER (WHERE "quantity" < 0), 0)::bigint AS "diffDownValue"
+      FROM "stock_adjustment_items"
+      WHERE "adjustmentId" IN (${Prisma.join(adjustmentIds.map((id) => Prisma.sql`${id}::uuid`))}) AND "isDeleted" = false
+      GROUP BY "adjustmentId"
+    `);
+    return new Map(
+      rows.map((r) => [
+        r.adjustmentId,
+        {
+          quantity: Number(r.quantity),
+          value: Number(r.value),
+          lineCount: Number(r.lineCount),
+          totalActual: Number(r.totalActual),
+          diffUp: Number(r.diffUp),
+          diffDown: Number(r.diffDown),
+          diffUpValue: Number(r.diffUpValue),
+          diffDownValue: Number(r.diffDownValue),
+        },
+      ]),
+    );
   }
 
   /** Dòng tổng danh sách trả NCC: Σ tiền + Σ SL trả của mọi phiếu khớp lọc, không tính phiếu huỷ. */

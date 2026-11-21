@@ -45,4 +45,13 @@ export class ProductQuery extends AbstractBaseQuery {
   @IsBoolean()
   @ApiPropertyOptional({ type: Boolean, description: 'Lọc thuốc kê đơn' })
   requiresPrescription?: boolean;
+
+  @IsOptional()
+  @Transform(toBoolean)
+  @IsBoolean()
+  @ApiPropertyOptional({
+    type: Boolean,
+    description: 'true = chỉ liệt kê sản phẩm ĐÃ xoá (để khôi phục); cần quyền product:delete',
+  })
+  deleted?: boolean;
 }

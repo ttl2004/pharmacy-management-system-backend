@@ -17,7 +17,6 @@ import {
   Max,
   MaxLength,
   Min,
-  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { VIETNAM_PHONE_PATTERN } from 'src/common/utils/phone.util';
@@ -59,31 +58,6 @@ export class PrescriptionRequest {
   imageUrl?: string;
 }
 
-/** Dược sĩ ghi đè cảnh báo tương tác major (đã xác thực mật khẩu ở FE). Server tự điền người ghi đè + thời điểm. */
-export class InteractionOverrideRequest {
-  @IsString()
-  @MinLength(20)
-  @MaxLength(1000)
-  @ApiProperty({ description: 'Lý do ghi đè (≥ 20 ký tự)' })
-  reason: string;
-
-  @IsArray()
-  @ArrayMinSize(1)
-  @ArrayMaxSize(50)
-  @IsString({ each: true })
-  @MaxLength(100, { each: true })
-  @ApiProperty({ type: [String] })
-  warningIds: string[];
-
-  @IsArray()
-  @ArrayMinSize(1)
-  @ArrayMaxSize(50)
-  @IsString({ each: true })
-  @MaxLength(500, { each: true })
-  @ApiProperty({ type: [String], description: 'Mô tả ngắn từng cảnh báo — giữ lại khi cơ sở tri thức đổi' })
-  warningSummaries: string[];
-}
-
 class OrderLinesRequest {
   @IsArray()
   @ArrayMinSize(1)
@@ -100,10 +74,15 @@ class OrderLinesRequest {
   prescription?: PrescriptionRequest;
 
   @IsOptional()
-  @ValidateNested()
-  @Type(() => InteractionOverrideRequest)
-  @ApiPropertyOptional({ type: InteractionOverrideRequest })
-  interactionOverride?: InteractionOverrideRequest;
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(8000)
+  @ApiPropertyOptional({
+    description:
+      'Phiếu duyệt của dược sĩ (`POST /sales/interaction-approvals`) khi giỏ có cảnh báo tương tác nghiêm trọng. ' +
+      'Sửa đơn mà không gửi → xoá bản duyệt cũ (giỏ đã đổi phải duyệt lại).',
+  })
+  interactionApprovalToken?: string;
 }
 
 export class CreatePosOrderRequest extends OrderLinesRequest {
@@ -192,13 +171,16 @@ export class CancelOrderRequest {
   reason: string;
 }
 
-/** Huỷ hoá đơn ĐÃ THU: ngoài lý do còn phải khai số tiền đã hoàn cho khách (kiểm ở service). */
+/** Huỷ hoá đơn ĐÃ THU: ngoài lý do còn phải khai số tiền đã hoàn cho khách = đúng tổng hoá đơn (kiểm ở service). */
 export class VoidPaidOrderRequest extends CancelOrderRequest {
   @IsOptional()
   @IsInt()
   @Min(0)
   @Max(MAX_MONEY)
-  @ApiPropertyOptional({ example: 100000, description: 'Bắt buộc khi đơn > 0đ: 0 < refundAmount ≤ tổng đơn' })
+  @ApiPropertyOptional({
+    example: 100000,
+    description: 'Bắt buộc khi đơn > 0đ và phải BẰNG ĐÚNG tổng đơn (huỷ là hoàn toàn bộ); đơn 0đ không gửi',
+  })
   refundAmount?: number;
 
   @IsOptional()

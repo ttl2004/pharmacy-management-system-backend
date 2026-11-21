@@ -52,7 +52,8 @@ describe('ReconcileService (unit)', () => {
     expect(run).toMatchObject({ status: 'FAILED', errorMessage: 'db chết' });
   });
 
-  it('RUNNING cũ > 1 giờ được đánh dấu FAILED khi lần mới bắt đầu', async () => {
+  it('RUNNING cũ > 15 phút được đánh dấu FAILED khi lần mới bắt đầu', async () => {
+    const before = Date.now();
     await service.run('CRON', null, '2026-11-04', '2026-11-05');
     const arg = (
       tx.salesReconcileRun.updateMany.mock.calls as [
@@ -61,6 +62,9 @@ describe('ReconcileService (unit)', () => {
     )[0][0];
     expect(arg.where.status).toBe('RUNNING');
     expect(arg.where.startedAt.lt).toBeInstanceOf(Date);
+    // Một lần chạy dài nhất ~5 phút (timeout transaction) → 15 phút là chắc chắn đã chết.
+    expect(before - arg.where.startedAt.lt.getTime()).toBeGreaterThanOrEqual(15 * 60_000 - 50);
+    expect(before - arg.where.startedAt.lt.getTime()).toBeLessThan(16 * 60_000);
     expect(arg.data.status).toBe('FAILED');
     expect(String(arg.data.errorMessage)).toContain('bị ngắt giữa chừng');
   });

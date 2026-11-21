@@ -20,6 +20,7 @@ import { GoodsReceiptRepository } from '../goods-receipt/repositories/goods-rece
 import { SupplierDebtRepository } from '../supplier-debt/repositories/supplier-debt.repository';
 import { SupplierPaymentRepository } from '../supplier-debt/repositories/supplier-payment.repository';
 import { SupplierPaymentWriter } from '../supplier-debt/supplier-payment.writer';
+import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
 import { AdjustmentService } from './adjustment.service';
 import { PurchaseReturnMoneyService } from './purchase-return-money.service';
 import { AdjustmentRepository } from './repositories/adjustment.repository';
@@ -55,6 +56,11 @@ describe('phiếu trả NCC — công nợ không âm (db)', () => {
         PurchaseReturnRepository,
         PurchaseReturnMoneyService,
         AdjustmentService,
+        // Người gọi trong spec là ADMIN lập phiếu: có quyền thấy giá vốn (K8).
+        {
+          provide: PermissionService,
+          useValue: { getGrantedCodes: () => Promise.resolve(new Set(['goods-receipt:create'])) },
+        },
       ],
     }).compile();
     receipts = moduleRef.get(GoodsReceiptService);

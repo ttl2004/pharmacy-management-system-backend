@@ -49,7 +49,7 @@ export class ReconcileRunsController {
   @ApiOperation({
     summary: 'Chạy đối soát doanh thu ngay (đồng bộ)',
     description:
-      'Dựng lại tổng hợp cho [fromDate, toDate] từ đơn gốc và báo các dòng đang lệch. Tối đa 31 ngày, toDate không quá hôm nay. ' +
+      'Dựng lại tổng hợp cho [fromDate, toDate] từ đơn gốc và báo các dòng đang lệch. Tối đa 31 ngày, toDate tối đa là hôm qua (đối soát ngày đang bán sẽ làm quầy thu tiền phải chờ). ' +
       'Trả bản ghi lần chạy (có thể status FAILED kèm errorMessage). 400 "Đối soát đang chạy" nếu lần khác chưa xong.',
   })
   @ApiResponse({ status: 400, description: '1002 khoảng ngày sai / Đối soát đang chạy' })
@@ -58,8 +58,13 @@ export class ReconcileRunsController {
     if (fromDate > toDate) {
       throw new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message: 'fromDate phải trước hoặc bằng toDate' });
     }
-    if (toDate > todayInVietnam()) {
-      throw new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message: 'toDate không được ở tương lai' });
+    // L6: đối soát khoá dòng tổng hợp của các ngày trong khoảng suốt lúc dựng lại — ngày hôm nay đang bán thì quầy
+    // thu tiền phải chờ. Chạy tay chỉ tới hôm qua; hôm nay do cron 00:15 đêm nay đối soát.
+    if (toDate >= todayInVietnam()) {
+      throw new ErrorException({
+        code: ErrorCode.HTTP_BAD_REQUEST,
+        message: 'Chỉ đối soát tay tới hôm qua (toDate trước hôm nay) — ngày hôm nay được đối soát tự động lúc 00:15',
+      });
     }
     if (daysBetweenDateOnly(fromDate, toDate) + 1 > RECONCILE_MAX_DAYS) {
       throw new ErrorException({

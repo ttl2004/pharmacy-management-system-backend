@@ -26,17 +26,25 @@ export async function assertBranchDebtNotNegative(
 
 const money = (value: bigint | number) => Number(value).toLocaleString('vi-VN');
 
+/** Một khoản trả vào nợ của MỘT chi nhánh (chi nhánh của phiếu nhập được phân bổ). */
+export interface PaymentPortion {
+  branchId: string;
+  amount: bigint;
+}
+
 /**
  * Trần chi trả (dùng chung cho `POST /supplier-payment` và `PATCH /goods-receipt/:id/payment`): tổng trả không vượt nợ
- * trong phạm vi người trả lẫn nợ toàn chuỗi (điều chỉnh có thể đã giảm nợ). Gọi sau `lockSupplier`.
+ * trong phạm vi người trả, nợ toàn chuỗi (điều chỉnh có thể đã giảm nợ) VÀ nợ từng chi nhánh được phân bổ — mọi vai trò,
+ * kể cả ADMIN toàn chuỗi: nợ chuỗi còn không có nghĩa nợ từng chi nhánh còn. Gọi sau `lockSupplier`.
  */
 export async function assertPaymentWithinDebt(
   debts: SupplierDebtRepository,
   tx: Prisma.TransactionClient,
   scope: BranchScope,
   supplierId: string,
-  total: bigint,
+  portions: readonly PaymentPortion[],
 ): Promise<void> {
+  const total = portions.reduce((sum, row) => sum + row.amount, 0n);
   const debt = await debts.debtOf(supplierId, scope.kind === 'BRANCH' ? scope.branchId : undefined, tx);
   if (total > debt.scoped) {
     const cap = debt.scoped > 0n ? debt.scoped : 0n;
@@ -47,5 +55,18 @@ export async function assertPaymentWithinDebt(
       ErrorCode.DEBT_EXCEEDED,
       'nợ nhà cung cấp đã được điều chỉnh giảm ở cấp chuỗi, số trả vượt nợ thực tế — liên hệ chủ nhà thuốc',
     );
+  }
+
+  const byBranch = new Map<string, bigint>();
+  for (const row of portions) byBranch.set(row.branchId, (byBranch.get(row.branchId) ?? 0n) + row.amount);
+  for (const [branchId, amount] of byBranch) {
+    const branchDebt = await debts.debtOf(supplierId, branchId, tx);
+    if (amount > branchDebt.scoped) {
+      const cap = branchDebt.scoped > 0n ? branchDebt.scoped : 0n;
+      throw inventoryError(
+        ErrorCode.DEBT_EXCEEDED,
+        `số trả ${money(amount)} vào phiếu nhập của một chi nhánh vượt nợ nhà cung cấp tại chi nhánh đó (${money(cap)}) — công nợ đã được điều chỉnh giảm`,
+      );
+    }
   }
 }

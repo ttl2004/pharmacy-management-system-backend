@@ -6,7 +6,13 @@ export const MAX_ORDER_LINES = 100;
 export const MAX_MONEY = 2_000_000_000;
 export const MAX_LINE_QUANTITY = 10_000;
 
-/** Đơn tại quầy PENDING không ai thao tác quá chừng này phút thì tự huỷ để nhả hàng đang giữ (luật S8). */
+/**
+ * Số đơn tại quầy chờ thu (PENDING) tối đa của MỘT nhân viên cùng lúc (L12). Mỗi đơn chờ giữ hàng tới khi thu hoặc tự
+ * huỷ — không giới hạn thì một người lập đơn liên tục là giữ hết hàng, quầy khác thấy "hết hàng".
+ */
+export const MAX_PENDING_POS_PER_STAFF = 3;
+
+/** Đơn tại quầy PENDING quá chừng này phút kể từ lúc LẬP đơn (sửa đơn không gia hạn) thì tự huỷ để nhả hàng đang giữ (luật S8). */
 export const POS_ABANDON_MINUTES = 30;
 
 /** Số đơn tối đa job tự huỷ xử lý mỗi lượt — lượt sau làm tiếp, không giữ kết nối quá lâu. */

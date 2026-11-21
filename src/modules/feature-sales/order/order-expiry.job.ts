@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { OrderService } from './order.service';
 
-/** Mỗi phút huỷ đơn tại quầy bỏ dở (luật S8). Chạy nhiều instance vẫn an toàn: huỷ là cập nhật có điều kiện. */
+/** Mỗi phút huỷ đơn tại quầy chờ thu quá hạn kể từ lúc lập (luật S8). Chạy nhiều instance vẫn an toàn: huỷ là cập nhật có điều kiện. */
 @Injectable()
 export class OrderExpiryJob {
   private readonly logger = new Logger(OrderExpiryJob.name);

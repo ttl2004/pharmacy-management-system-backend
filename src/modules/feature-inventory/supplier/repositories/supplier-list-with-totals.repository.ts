@@ -18,11 +18,15 @@ const SORT_COLUMNS: Record<string, string> = {
   currentDebt: 't."currentDebt"',
 };
 
+const SENSITIVE_SORT = new Set(['email']);
+
 export interface SupplierListParams {
   /** Chỉ tính phiếu nhập của chi nhánh này; `undefined` = toàn chuỗi. */
   branchId?: string;
   /** Thiếu quyền supplier-debt:read -> nợ = 0, bỏ qua lọc/sắp theo nợ. */
   canSeeDebt: boolean;
+  /** Thiếu quyền supplier:update -> không sắp theo email (không dò được dữ liệu bị ẩn). */
+  canSeeSensitive?: boolean;
   ids?: string[];
   status?: RecordStatus;
   groupId?: string;
@@ -160,7 +164,7 @@ export class SupplierListWithTotalsRepository {
   /** `field:dir` -> ORDER BY từ whitelist; sai/thiếu quyền nợ -> mặc định createdAt desc. Luôn thêm id để ổn định trang. */
   private buildOrder(p: SupplierListParams): Prisma.Sql {
     const [field, dir] = (p.sort ?? '').split(':');
-    const column = SORT_COLUMNS[field];
+    const column = p.canSeeSensitive === false && SENSITIVE_SORT.has(field) ? undefined : SORT_COLUMNS[field];
     const blocked = field === 'currentDebt' && !p.canSeeDebt;
     if (!column || blocked) return Prisma.sql`ORDER BY t."createdAt" DESC, t."id"`;
     const direction = dir?.toLowerCase() === 'asc' ? Prisma.sql`ASC` : Prisma.sql`DESC`;

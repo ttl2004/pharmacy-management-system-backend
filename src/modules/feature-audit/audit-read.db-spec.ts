@@ -149,4 +149,29 @@ describe('audit đọc (db)', () => {
     expect(hist.items.map((r) => r.id)).toEqual([other.id]);
     expect((await service.listByEntity('price_books', other.entityId, q(), pm)).items).toHaveLength(0);
   });
+
+  it('ADMIN không thấy dòng của SUPER_ADMIN (list, search, detail, history); SUPER_ADMIN thấy hết', async () => {
+    const mine = { ...row({ branchIds: [], entityLabel: 'Dòng quản trị', reason: 'sửa giá' }), actorRoleCode: 'ADMIN' };
+    const root = {
+      ...row({ branchIds: [], entityLabel: 'Dòng tối cao', reason: 'sửa giá' }),
+      actorRoleCode: 'SUPER_ADMIN',
+    };
+    const system = { ...row({ branchIds: [], entityLabel: 'Dòng hệ thống', reason: 'sửa giá' }), actorRoleCode: null };
+    await prisma.auditLog.createMany({ data: [mine, root, system] });
+    const adminActor = asActor(AuthRole.ADMIN, null);
+    const rootActor = asActor(AuthRole.SUPER_ADMIN, null);
+    const range = { fromDate: '2026-01-01', toDate: '2026-01-31' };
+
+    const list = await service.list(q(), adminActor);
+    expect(list.items.map((r) => r.id).sort()).toEqual([mine.id, system.id].sort());
+    const search = await service.list(q({ search: 'sua gia', ...range }), adminActor);
+    expect(search.items.map((r) => r.id).sort()).toEqual([mine.id, system.id].sort());
+    await expect(service.get(root.id, adminActor)).rejects.toMatchObject({ status: 404 });
+    expect((await service.get(mine.id, adminActor)).id).toBe(mine.id);
+    expect((await service.listByEntity('price_books', root.entityId, q(), adminActor)).items).toHaveLength(0);
+
+    expect((await service.list(q(), rootActor)).items).toHaveLength(3);
+    expect((await service.list(q({ search: 'sua gia', ...range }), rootActor)).items).toHaveLength(3);
+    expect((await service.get(root.id, rootActor)).id).toBe(root.id);
+  });
 });

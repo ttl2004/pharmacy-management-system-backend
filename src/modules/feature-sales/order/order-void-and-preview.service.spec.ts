@@ -24,11 +24,17 @@ const head = (overrides: Partial<OrderHead> = {}): OrderHead => ({
   prescriptionCode: null,
   prescriberName: null,
   updatedAt: null,
+  completedAt: new Date(),
   priceBookId: null,
   priceBookName: null,
   createdBy: 'u1',
+  staffId: 'u1',
+  staffName: 'Nhân viên A',
   lineCount: 1,
   prescriptionLineCount: 0,
+  customerId: null,
+  controlledLineCount: 0,
+  interactionOverride: null,
   ...overrides,
 });
 
@@ -86,6 +92,22 @@ describe('OrderVoidAndPreviewService', () => {
     }
   });
 
+  it('voidPaid: người huỷ khác người lập → cả hai dòng nhật ký có onBehalfOf (PAYMENT.REFUNDED giữ metadata tiền)', async () => {
+    orders.findHead.mockResolvedValue(head({ staffId: 'u9', createdBy: 'u9', staffName: 'Chị Lan' }));
+    await service.voidPaid('o1', full, { ...ss, user: { ...ss.user, role: AuthRole.ADMIN, branchId: null } } as never);
+    const { entries } = recorded();
+    for (const entry of entries) {
+      expect(entry.metadata).toMatchObject({ onBehalfOf: { userId: 'u9', fullName: 'Chị Lan' } });
+    }
+    expect(entries[1].metadata).toMatchObject({ totalAmount: '12000', refundAmount: '12000' });
+  });
+
+  it('voidPaid: tự huỷ đơn của mình → không có onBehalfOf', async () => {
+    orders.findHead.mockResolvedValue(head());
+    await service.voidPaid('o1', full, ss);
+    expect(recorded().entries[0]).not.toHaveProperty('metadata');
+  });
+
   it('đơn 100k: refundAmount 100000 CASH → payment REFUND 100000; audit PAYMENT.REFUNDED 100000n, severity 1', async () => {
     orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));
     await service.voidPaid('o1', { reason: 'Khách trả', refundAmount: 100000, refundMethod: PaymentMethod.CASH }, ss);
@@ -107,34 +129,30 @@ describe('OrderVoidAndPreviewService', () => {
     expect(refund?.metadata).not.toHaveProperty('partialRefund');
   });
 
-  it('đơn 100k hoàn 60000 → payment REFUND 60000; severity 2, metadata.partialRefund true, totalAmount "100000"', async () => {
+  it.each([
+    ['hoàn 60000 (một phần)', 60000],
+    ['hoàn 99999', 99999],
+    ['hoàn 100001', 100001],
+  ])('đơn 100k %s → 1002, không claim / hoàn kho / ghi payment / audit', async (_name, refundAmount) => {
     orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));
-    await service.voidPaid(
-      'o1',
-      { reason: 'Khách trả', refundAmount: 60000, refundMethod: PaymentMethod.BANK_TRANSFER },
-      ss,
-    );
-
-    expect(orders.createPayment).toHaveBeenCalledWith(
-      tx,
-      expect.objectContaining({ kind: 'REFUND', amount: 60000n, method: PaymentMethod.BANK_TRANSFER }),
-    );
-    const refund = recorded().entries.find((entry) => entry.event === 'PAYMENT.REFUNDED');
-    expect(refund).toMatchObject({
-      amount: 60000n,
-      severity: 2,
-      metadata: { totalAmount: '100000', refundAmount: '60000', partialRefund: true },
+    await expect(
+      service.voidPaid('o1', { reason: 'Khách trả', refundAmount, refundMethod: PaymentMethod.CASH }, ss),
+    ).rejects.toMatchObject({
+      errorCode: ErrorCode.HTTP_BAD_REQUEST,
+      message: expect.stringContaining('bằng đúng tổng hoá đơn (100000đ)') as unknown,
     });
+    expect(orders.claim).not.toHaveBeenCalled();
+    expect(stock.restock).not.toHaveBeenCalled();
+    expect(orders.createPayment).not.toHaveBeenCalled();
+    expect(rollup.applyOrder).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
   });
 
-  it.each([
-    [100000, 100000n],
-    [60000, 60000n],
-  ])('voidPaid đơn 100k hoàn %i → applyOrder(tx, id, -1, -%sn)', async (refundAmount, refund) => {
+  it('voidPaid đơn 100k hoàn 100000 → applyOrder(tx, id, -1, -100000n) sau khi ghi payment', async () => {
     orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));
-    await service.voidPaid('o1', { reason: 'Khách trả', refundAmount, refundMethod: PaymentMethod.CASH }, ss);
+    await service.voidPaid('o1', { reason: 'Khách trả', refundAmount: 100000, refundMethod: PaymentMethod.CASH }, ss);
     expect(rollup.applyOrder).toHaveBeenCalledTimes(1);
-    expect(rollup.applyOrder).toHaveBeenCalledWith(tx, 'o1', -1, -refund);
+    expect(rollup.applyOrder).toHaveBeenCalledWith(tx, 'o1', -1, -100000n);
     expect(orders.createPayment.mock.invocationCallOrder[0]).toBeLessThan(
       rollup.applyOrder.mock.invocationCallOrder[0],
     );
@@ -149,7 +167,6 @@ describe('OrderVoidAndPreviewService', () => {
   it.each([
     ['thiếu refundAmount', { reason: 'x', refundMethod: PaymentMethod.CASH }],
     ['refundAmount 0', { reason: 'x', refundAmount: 0, refundMethod: PaymentMethod.CASH }],
-    ['refundAmount 100001', { reason: 'x', refundAmount: 100001, refundMethod: PaymentMethod.CASH }],
     ['thiếu refundMethod', { reason: 'x', refundAmount: 100000 }],
   ])('đơn 100k %s → 1002', async (_name, dto) => {
     orders.findHead.mockResolvedValue(head({ totalAmount: 100000n }));
@@ -168,6 +185,47 @@ describe('OrderVoidAndPreviewService', () => {
     await expect(
       service.voidPaid('o1', { reason: 'x', refundAmount: 5000, refundMethod: PaymentMethod.CASH }, ss),
     ).rejects.toMatchObject({ errorCode: ErrorCode.HTTP_BAD_REQUEST });
+  });
+
+  describe('B7 — hạn 7 ngày huỷ hoá đơn đã thu', () => {
+    const daysAgo = (d: number) => new Date(Date.now() - d * 24 * 60 * 60 * 1000);
+    const pm = {
+      ...ss,
+      user: { ...ss.user, role: AuthRole.PHARMACY_MANAGER, roleLevel: 60 },
+    } as unknown as RequestActor;
+    const admin = {
+      ...ss,
+      user: { ...ss.user, role: AuthRole.ADMIN, branchId: null, roleLevel: 90 },
+    } as unknown as RequestActor;
+
+    it('đã thu 6 ngày: quản lý chi nhánh huỷ được', async () => {
+      orders.findHead.mockResolvedValue(head({ completedAt: daysAgo(6) }));
+      await service.voidPaid('o1', full, pm);
+      expect(orders.claim).toHaveBeenCalled();
+    });
+
+    it('đã thu 8 ngày: quản lý chi nhánh → 1500, không chiếm đơn, không đụng kho', async () => {
+      orders.findHead.mockResolvedValue(head({ completedAt: daysAgo(8) }));
+      await expect(service.voidPaid('o1', full, pm)).rejects.toMatchObject({
+        response: { code: ErrorCode.PERMISSION_DENIED },
+      });
+      expect(orders.claim).not.toHaveBeenCalled();
+      expect(stock.restock).not.toHaveBeenCalled();
+    });
+
+    it('thiếu completedAt (dữ liệu cũ): quản lý chi nhánh → 1500 (coi như quá hạn)', async () => {
+      orders.findHead.mockResolvedValue(head({ completedAt: null, updatedAt: new Date() }));
+      await expect(service.voidPaid('o1', full, pm)).rejects.toMatchObject({
+        response: { code: ErrorCode.PERMISSION_DENIED },
+      });
+      expect(orders.claim).not.toHaveBeenCalled();
+    });
+
+    it('đã thu 8 ngày: ADMIN huỷ được', async () => {
+      orders.findHead.mockResolvedValue(head({ completedAt: daysAgo(8) }));
+      await service.voidPaid('o1', full, admin);
+      expect(orders.claim).toHaveBeenCalled();
+    });
   });
 
   it('kiểm tiền xảy ra TRƯỚC khi chiếm đơn và trả hàng về kho', async () => {

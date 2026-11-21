@@ -26,6 +26,7 @@ function makeService(repositoryOverrides: Record<string, jest.Mock> = {}) {
     softDelete: jest.fn(),
     countReferencingUsers: jest.fn().mockResolvedValue(0),
     hasOpenInventory: jest.fn().mockResolvedValue(false),
+    findOutstandingSupplierDebts: jest.fn().mockResolvedValue([]),
     ...repositoryOverrides,
   } as never;
   return new BranchService(repository, fakePrisma() as never, audit as never);
@@ -192,6 +193,22 @@ describe('BranchService — xoá', () => {
     });
 
     await expect(service.remove('id', ADMIN_ACTOR)).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
+    expect(softDelete).not.toHaveBeenCalled();
+  });
+
+  it('còn nợ nhà cung cấp thì báo INVALID_REFERENCE kèm số nợ và không xoá (M2)', async () => {
+    const softDelete = jest.fn();
+    const service = makeService({
+      findOutstandingSupplierDebts: jest.fn().mockResolvedValue([
+        { supplierId: 's1', debt: 15_000_000n },
+        { supplierId: 's2', debt: 5_000_000n },
+      ]),
+      softDelete,
+    });
+
+    const error = (await service.remove('id', ADMIN_ACTOR).catch((e: unknown) => e)) as Error & { errorCode: number };
+    expect(error.errorCode).toBe(ErrorCode.INVALID_REFERENCE);
+    expect(error.message).toContain('2 nhà cung cấp');
     expect(softDelete).not.toHaveBeenCalled();
   });
 

@@ -80,7 +80,7 @@ export class TransferController {
   @RequirePermissions('transfer:receive')
   @Post(':id/receive')
   @ApiOperation({
-    description: 'Nhận hàng: body rỗng = nhận đủ; `lines` = số thực nhận từng dòng, nhận thiếu bắt buộc lý do. Cộng kho nhận (TRANSFER_IN) theo số thực nhận.',
+    description: 'Nhận hàng: body rỗng = nhận đủ; `lines` = số thực nhận từng dòng, nhận thiếu bắt buộc lý do. Tồn kho nhận tăng đúng số thực nhận; phần thiếu ghi hao hụt (DISPOSE) ở chi nhánh nhận theo giá chốt lúc xuất, nhật ký TRANSFER.RECEIVED_SHORT ghi tiền hao hụt (≥ 1.000.000đ hoặc ≥ 10% số gửi → mức cao).',
   })
   receive(
     @Param('id', new ParseUUIDPipe()) id: string,
@@ -92,7 +92,10 @@ export class TransferController {
 
   @RequirePermissions('transfer:cancel')
   @Post(':id/cancel')
-  @ApiOperation({ description: 'Huỷ. Đang trên đường thì hoàn hàng về đúng lô gửi.' })
+  @ApiOperation({
+    description:
+      'Huỷ. Chưa xuất (PENDING): chi nhánh gửi huỷ được. Đã xuất (IN_TRANSIT): chỉ quản trị chuỗi (ADMIN) — hoàn hàng về đúng lô gửi; chi nhánh khác → 1500.',
+  })
   cancel(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: CancelTransferRequest,

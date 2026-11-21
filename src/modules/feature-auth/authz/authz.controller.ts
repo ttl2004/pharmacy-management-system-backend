@@ -17,6 +17,7 @@ import { requestContextOf } from 'src/common/decorators/request-context';
 import type { TokenPair } from './token.service';
 import { PasswordService } from './password.service';
 import { ChangePasswordRequest } from './dtos/password.request';
+import { UserThrottlerGuard } from 'src/common/guards/user-throttler.guard';
 
 @Controller('auth')
 @ApiTags('Auth')
@@ -128,7 +129,11 @@ export class AuthzController {
   @Post('change-password')
   @HttpCode(200)
   @ApiBearerAuth(AUTH_JWT)
-  @UseGuards(AuthzGuard)
+  // L5: tối đa 5 lần/phút theo NGƯỜI DÙNG (không theo IP: FE đi qua proxy chung IP) — access token bị lộ cũng không
+  // dò được mật khẩu hiện tại. UserThrottlerGuard phải đứng sau AuthzGuard để đã có req.user.
+  @UseGuards(AuthzGuard, UserThrottlerGuard)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @ApiResponse({ status: 429, description: 'Thử đổi mật khẩu quá 5 lần/phút' })
   @ApiOperation({
     description:
       'Xác minh mật khẩu hiện tại, cập nhật hash bcrypt và thu hồi toàn bộ phiên trong cùng transaction. Đăng nhập lại sau khi thành công.',

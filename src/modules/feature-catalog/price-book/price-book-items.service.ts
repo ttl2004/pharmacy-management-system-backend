@@ -65,13 +65,14 @@ export class PriceBookItemsService {
     bookId: string,
     dto: PriceRowsFilterRequest,
     actor: RequestActor,
-  ): Promise<{ count: number }> {
+  ): Promise<{ count: number; skipped: number }> {
     const user = actor.user;
     const book = await this.getEditableBook(bookId, user);
     if (!book.formulaBase) {
       throw new ErrorException({ code: ErrorCode.HTTP_BAD_REQUEST, message: 'Bảng giá chưa có công thức' });
     }
     const branchId = scopedBranchFilter(resolveBranchScope(user), dto.branchId);
+    this.assertBranchForCostBase(book.formulaBase, branchId);
     const rows = await this.rowsRepository.findAll(toRowsFilter(dto, branchId));
     const bases = await this.toBasePrices(book.formulaBase, rows, resolveBranchScope(user));
     // MỘT entry cho cả lần áp (có thể hàng trăm dòng), cùng transaction với việc ghi giá.
@@ -96,7 +97,8 @@ export class PriceBookItemsService {
       }
       return written;
     });
-    return { count };
+    // `skipped` = dòng khớp bộ lọc nhưng không ghi (chưa biết giá gốc hoặc giá tính ra ≤ 0).
+    return { count, skipped: rows.length - count };
   }
 
   /**
@@ -112,6 +114,7 @@ export class PriceBookItemsService {
     if (!book.formulaBase) return 0;
     const unitIds = await this.rowsRepository.findItemUnitIds(tx, book.id);
     if (!unitIds.length) return 0;
+    this.assertBranchForCostBase(book.formulaBase, branchId);
     const rows = await this.rowsRepository.findAll({
       codes: [],
       categoryIds: [],
@@ -123,7 +126,8 @@ export class PriceBookItemsService {
   }
 
   /**
-   * Ghi giá theo công thức của bảng `bookId` cho các dòng có giá gốc; dòng `basePrice = null` bị BỎ QUA (không ghi 0).
+   * Ghi giá theo công thức của bảng `bookId` cho các dòng có giá gốc; dòng `basePrice = null` và dòng tính ra giá
+   * ≤ 0 bị BỎ QUA (không ghi 0 — POS coi 0 là giá hợp lệ nên sẽ bán 0 đồng).
    * Trả số dòng đã ghi. Không truyền `tx` thì tự mở transaction.
    */
   async applyFormula(bookId: string, rows: BasePriceRow[], tx?: Prisma.TransactionClient): Promise<number> {
@@ -134,9 +138,20 @@ export class PriceBookItemsService {
 
     const entries = rows
       .filter((row): row is { productUnitId: string; basePrice: number } => row.basePrice !== null)
-      .map((row) => ({ productUnitId: row.productUnitId, price: computeFormulaPrice(row.basePrice, terms) }));
+      .map((row) => ({ productUnitId: row.productUnitId, price: computeFormulaPrice(row.basePrice, terms) }))
+      .filter((entry) => entry.price > 0);
     await this.rowsRepository.upsertItems(tx, bookId, entries);
     return entries.length;
+  }
+
+  /** Giá vốn / giá nhập cuối tính theo chi nhánh: không có chi nhánh thì không dòng nào tính được → từ chối. */
+  private assertBranchForCostBase(base: string, branchId: string | undefined): void {
+    if ((base === 'avgCost' || base === 'lastPurchaseCost') && !branchId) {
+      throw new ErrorException({
+        code: ErrorCode.HTTP_BAD_REQUEST,
+        message: 'Công thức theo giá vốn / giá nhập cuối phải chọn chi nhánh',
+      });
+    }
   }
 
   /** Giá gốc của từng dòng theo `formula.base`: giá vốn / giá nhập cuối / giá chung / giá trong một bảng khác. */

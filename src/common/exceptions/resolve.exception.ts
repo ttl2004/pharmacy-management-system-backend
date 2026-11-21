@@ -6,6 +6,7 @@ import {
   ExceptionFilter,
   ForbiddenException,
   HttpException,
+  Logger,
   MethodNotAllowedException,
   NotFoundException,
   UnauthorizedException,
@@ -14,9 +15,12 @@ import {
 import { ErrorCode } from '../types/error-code';
 import { ErrorException } from './error.exception';
 import { FastifyReply, FastifyRequest } from 'fastify';
+import { maskPhonesInText } from '../utils/mask.util';
 
 @Catch()
 export class ResolveExceptionFilter implements ExceptionFilter {
+  private readonly logger = new Logger(ResolveExceptionFilter.name);
+
   private getErrorCodeFromHttpException(exception: HttpException): ErrorCode {
     if (exception instanceof NotFoundException) {
       return ErrorCode.HTTP_NOT_FOUND;
@@ -75,6 +79,15 @@ export class ResolveExceptionFilter implements ExceptionFilter {
     } else {
       message = 'Lỗi máy chủ nội bộ';
       errorCode = ErrorCode.INTERNAL_SERVER_ERROR;
+    }
+
+    // Lỗi phía máy chủ (5xx): ghi đủ nguyên nhân + stack để còn tra được. Không ghi body/header (có thể chứa mật khẩu,
+    // token); `requestId` để nối với dòng log request của pino. Lỗi 4xx là lỗi người dùng — không ghi để log khỏi rác.
+    if (statusCode >= 500) {
+      this.logger.error(
+        `${request.method} ${maskPhonesInText(request.url)} → ${statusCode} (requestId=${String(request.id)})`,
+        exception instanceof Error ? exception.stack : String(exception),
+      );
     }
 
     response.status(statusCode).header('content-type', 'application/json').send({

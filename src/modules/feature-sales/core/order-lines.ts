@@ -12,6 +12,8 @@ export interface SellableUnit {
   conversionRate: number;
   salePrice: number;
   status: RecordStatus;
+  /** false = không bán ở đơn vị này tại quầy (vd. thuốc chỉ bán nguyên hộp thì dòng "Viên" tắt cờ này). */
+  allowLooseSale: boolean;
   unit: { name: string };
   product: { id: string; name: string; status: RecordStatus; requiresPrescription: boolean; isControlled?: boolean };
 }
@@ -81,6 +83,12 @@ export function buildOrderLines(
     const unit = unitById.get(line.productUnitId);
     if (!unit || unit.status !== RecordStatus.ACTIVE || unit.product.status !== RecordStatus.ACTIVE) {
       throw salesError(ErrorCode.PRODUCT_NOT_SELLABLE, `dòng ${index + 1}`);
+    }
+    if (!unit.allowLooseSale) {
+      throw new ErrorException({
+        code: ErrorCode.PRODUCT_NOT_SELLABLE,
+        message: `Dòng ${index + 1}: ${unit.product.name} không được bán theo đơn vị ${unit.unit.name}`,
+      });
     }
     const baseQuantity = line.quantity * unit.conversionRate;
     if (baseQuantity > MAX_BASE_QUANTITY) {

@@ -435,7 +435,23 @@ describe('cập nhật tổng hợp trong thu tiền / huỷ hoá đơn (db)', (
     const repo = new OrderRepository(prisma as unknown as PrismaService);
     const transactions = new InventoryTransactions(prisma as unknown as PrismaService);
     const rollup = new SalesRollupRepository();
-    orders = new OrderService(repo, transactions, stock as never, {} as never, audit as never, {} as never, rollup);
+    const safety = {
+      approvalForOrder: () => null,
+      precheck: (productIds: string[]) =>
+        Promise.resolve({ available: true, productIds, majorWarningIds: [], majorSummaries: [] }),
+      assertPayAllowed: () => undefined,
+    };
+    orders = new OrderService(
+      repo,
+      transactions,
+      stock as never,
+      {} as never,
+      audit as never,
+      {} as never,
+      rollup,
+      { getGrantedCodes: () => Promise.resolve(new Set(['order:handle-others'])) } as never,
+      safety as never,
+    );
     voids = new OrderVoidAndPreviewService(
       repo,
       transactions,
@@ -485,7 +501,7 @@ describe('cập nhật tổng hợp trong thu tiền / huỷ hoá đơn (db)', (
     prisma.$queryRaw<{ date: string; orderCount: number; revenue: bigint }[]>`
       SELECT to_char("date", 'YYYY-MM-DD') AS "date", "orderCount", "revenue" FROM sales_daily ORDER BY "date"`;
 
-  it('luồng thật: thu đơn 100k ngày 1, huỷ hoàn 60k ngày 3 → sales_daily ngày 1: orderCount 0, revenue 40000', async () => {
+  it('luồng thật: thu đơn 100k ngày 1, huỷ hoàn đủ 100k ngày 3 → sales_daily ngày 1: orderCount 0, revenue 0', async () => {
     const order = await seedPaidOrder(prisma, base, {
       branch: 0,
       completedAt: vn('2026-11-01T00:00:00'),
@@ -499,17 +515,17 @@ describe('cập nhật tổng hợp trong thu tiền / huỷ hoá đơn (db)', (
     setNow('2026-11-03T14:00:00');
     await voids.voidPaid(
       order.id,
-      { reason: 'Khách trả', refundAmount: 60000, refundMethod: PaymentMethod.CASH },
+      { reason: 'Khách trả', refundAmount: 100000, refundMethod: PaymentMethod.CASH },
       actor,
     );
-    expect(await salesDaily()).toEqual([{ date: '2026-11-01', orderCount: 0, revenue: 40000n }]);
+    expect(await salesDaily()).toEqual([{ date: '2026-11-01', orderCount: 0, revenue: 0n }]);
     const prod = await prisma.salesDailyProduct.findMany();
     expect(prod).toHaveLength(1);
     expect(prod[0]).toMatchObject({ qtyBase: 0, revenue: 0n, cogsAmount: 0n });
 
     // Dựng lại từ dữ liệu gốc ra đúng như cộng dồn từng bước.
     await prisma.$transaction((tx) => new SalesRollupRepository().rebuild(tx, '2026-11-01', '2026-11-03'));
-    expect(await salesDaily()).toEqual([{ date: '2026-11-01', orderCount: 0, revenue: 40000n }]);
+    expect(await salesDaily()).toEqual([{ date: '2026-11-01', orderCount: 0, revenue: 0n }]);
   });
 
   it('rollback: thu tiền lỗi sau khi đã cộng tổng hợp → tổng hợp không đổi, đơn vẫn PENDING', async () => {

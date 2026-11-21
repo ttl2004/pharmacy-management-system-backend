@@ -11,10 +11,19 @@ export type PriceCompareBase = (typeof PRICE_COMPARE_BASES)[number];
 
 /** Trần cho "Xuất file": FE xin cả bảng một lần (100000), nên vượt xa trần 100 của danh sách thường. */
 const MAX_PAGE_SIZE = 100_000;
+/** Cùng trần trang với danh sách thường — `(page - 1) * pageSize` không tràn. */
+const MAX_PAGE = 10_000;
+/** `price_book_items.price` và `product_units.sale_price` là `Int` (PostgreSQL int4). */
+const MAX_PRICE = 1_000_000_000;
 
 /** FE gửi mảng dạng chuỗi nối dấu phẩy (`a,b,c`); body JSON có thể là mảng thật — nhận cả hai. */
 const toList = ({ value }: { value: unknown }) =>
-  typeof value === 'string' ? value.split(',').map((v) => v.trim()).filter(Boolean) : value;
+  typeof value === 'string'
+    ? value
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean)
+    : value;
 const toNumber = ({ value }: { value: unknown }) => (value === undefined || value === '' ? undefined : Number(value));
 
 /**
@@ -26,7 +35,10 @@ export class PriceRowsFilterRequest {
   @Transform(toList)
   @IsArray()
   @IsString({ each: true })
-  @ApiPropertyOptional({ type: String, description: 'Mã hàng chọn sẵn, nối dấu phẩy (khớp đúng, không phân biệt hoa thường)' })
+  @ApiPropertyOptional({
+    type: String,
+    description: 'Mã hàng chọn sẵn, nối dấu phẩy (khớp đúng, không phân biệt hoa thường)',
+  })
   codes?: string[];
 
   @IsOptional()
@@ -72,7 +84,10 @@ export class PriceRowsFilterRequest {
   @Transform(toList)
   @IsArray()
   @IsUUID('all', { each: true })
-  @ApiPropertyOptional({ type: String, description: 'Bảng giá cần lấy cột giá, nối dấu phẩy (chỉ bảng người gọi xem được)' })
+  @ApiPropertyOptional({
+    type: String,
+    description: 'Bảng giá cần lấy cột giá, nối dấu phẩy (chỉ bảng người gọi xem được)',
+  })
   bookIds?: string[];
 }
 
@@ -81,7 +96,8 @@ export class PriceRowsQuery extends PriceRowsFilterRequest {
   @Transform(toNumber)
   @IsInt()
   @Min(1)
-  @ApiPropertyOptional({ example: 1 })
+  @Max(MAX_PAGE)
+  @ApiPropertyOptional({ example: 1, maximum: MAX_PAGE })
   page?: number;
 
   @IsOptional()
@@ -105,6 +121,7 @@ export class SetGeneralPriceRequest {
 
   @IsInt({ message: 'Giá phải là số nguyên' })
   @Min(0, { message: 'Giá không được âm' })
+  @Max(MAX_PRICE, { message: `Giá tối đa ${MAX_PRICE.toLocaleString('en-US')} đồng` })
   @ApiProperty({ example: 25000 })
   price: number;
 }
@@ -121,6 +138,7 @@ export class SetBookItemRequest {
   @ValidateIf((o: SetBookItemRequest) => o.price !== null)
   @IsInt({ message: 'Giá phải là số nguyên' })
   @Min(0, { message: 'Giá không được âm' })
+  @Max(MAX_PRICE, { message: `Giá tối đa ${MAX_PRICE.toLocaleString('en-US')} đồng` })
   @ApiProperty({ type: Number, nullable: true, description: 'Số = thêm/cập nhật; null = bỏ hàng khỏi bảng' })
   price: number | null;
 }

@@ -55,3 +55,20 @@ export async function usernameOf(tx: Prisma.TransactionClient, userId: string): 
   const auth = await tx.auth.findFirst({ where: { userId }, select: { username: true } });
   return auth?.username ?? null;
 }
+
+const USERNAME_MAX_LENGTH = 50;
+const DELETED_USERNAME_TAIL = /_DEL_[0-9a-z]{6}$/;
+
+/**
+ * Xoá người dùng thì đổi `username` thành `<username>_DEL_<hậu tố>` để nhả cột unique (cùng cách vai trò đổi `code`);
+ * cắt phần gốc để tổng không vượt VarChar(50). Nhật ký vẫn giữ username gốc.
+ */
+export function deletedUsername(username: string): string {
+  const suffix = `_DEL_${Date.now().toString(36).slice(-6)}`;
+  return `${username.slice(0, USERNAME_MAX_LENGTH - suffix.length)}${suffix}`;
+}
+
+/** Bỏ hậu tố `_DEL_xxxxxx` để lấy lại username gốc (username dài quá 38 ký tự đã bị cắt lúc xoá thì chỉ lấy lại phần còn). */
+export function originalUsername(username: string): string {
+  return username.replace(DELETED_USERNAME_TAIL, '');
+}

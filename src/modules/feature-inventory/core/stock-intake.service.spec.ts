@@ -44,6 +44,7 @@ function makeIntake(lockedRows: IntakeBatch[]) {
     updateCosts: jest.fn(),
     findWithNonImportMovements: jest.fn().mockResolvedValue(new Set<string>()),
     resetDates: jest.fn(),
+    findByKey: jest.fn().mockResolvedValue(lockedRows),
   };
   const ledger = { apply: jest.fn().mockResolvedValue([]), lockBatches: jest.fn().mockResolvedValue(lockedRows) };
   const ctx: InventoryTxContext = { tx: {} as never, afterCommit: jest.fn() };
@@ -205,6 +206,25 @@ describe('StockIntakeService', () => {
     });
   });
 
+  it('dòng số lượng 0: chỉ bảo đảm có lô (để ghi hao hụt điều chuyển), không đổi giá vốn, không ghi sổ', async () => {
+    const rows = [locked(), locked({ id: 'b2', productId: 'p2', batchNumber: 'L2', quantityOnHand: 0 })];
+    const { intake, batches, ledger, ctx } = makeIntake(rows);
+
+    const result = await intake.intake(
+      ctx,
+      request([line(), line({ productId: 'p2', batchNumber: 'L2', quantity: 0, refItemId: 'i2' })]),
+    );
+
+    expect(batches.insertSkipExisting).toHaveBeenCalledWith(
+      {},
+      expect.arrayContaining([expect.objectContaining({ productId: 'p2', batchNumber: 'L2' })]),
+    );
+    expect(batches.updateCosts).toHaveBeenCalledWith({}, [{ id: 'b1', importPrice: 1100 }], 'actor');
+    const [, entries] = ledger.apply.mock.calls[0] as [unknown, { batchId: string }[]];
+    expect(entries.map((e) => e.batchId)).toEqual(['b1']);
+    expect(result.batchIdByRefItem.get('i2')).toBe('b2');
+  });
+
   it('không có dòng thì không gọi DB', async () => {
     const { intake, batches, ctx } = makeIntake([]);
     await intake.intake(ctx, request([]));
@@ -246,6 +266,57 @@ describe('StockIntakeService.returnToBatches', () => {
       'actor',
       { preLocked: rows },
     );
+  });
+});
+
+describe('StockIntakeService.returnToBatches: một lô nhiều dòng (B3)', () => {
+  it('gộp theo lô rồi bình quân một lần, không để dòng sau đè dòng trước', async () => {
+    // Lô còn 10 viên giá 1000; huỷ hoá đơn trả 1 hộp (10 viên, giá 800) + 30 viên giá 1200 về cùng lô.
+    // Đúng: (10×1000 + 10×800 + 30×1200) / 50 = 1080. Tính từng dòng riêng sẽ ra 900 hoặc 1100 tuỳ dòng cuối.
+    const rows = [locked({ quantityOnHand: 10, importPrice: 1000 })];
+    const { intake, batches, ctx } = makeIntake(rows);
+
+    await intake.returnToBatches(ctx, {
+      type: StockMovementType.TRANSFER_IN,
+      refType: StockRefType.STOCK_TRANSFER,
+      refId: 't1',
+      actorId: 'actor',
+      note: 'Hoàn hàng',
+      lines: [
+        { batchId: 'b1', quantity: 10, unitCost: 800, refItemId: 'i1' },
+        { batchId: 'b1', quantity: 30, unitCost: 1200, refItemId: 'i2' },
+      ],
+    });
+
+    expect(batches.updateCosts).toHaveBeenCalledWith({}, [{ id: 'b1', importPrice: 1080 }], 'actor');
+  });
+});
+
+describe('StockIntakeService.assertCanIntake (K4)', () => {
+  it('cùng số lô, khác hạn dùng, đã có hàng → từ chối, không ghi gì', async () => {
+    const { intake, batches, ctx } = makeIntake([locked({ expiryDate: parseDateOnly('2027-01-01') })]);
+    await expect(intake.assertCanIntake(ctx, { branchId: 'br', lines: [line()] })).rejects.toMatchObject({
+      errorCode: ErrorCode.BATCH_EXPIRY_MISMATCH,
+    });
+    expect(batches.resetDates).not.toHaveBeenCalled();
+    expect(batches.lockByKey).not.toHaveBeenCalled();
+  });
+
+  it('lô trống chưa phát sinh sổ khác hạn: nhận được (intake sẽ sửa hạn) — kiểm sớm không sửa, không từ chối', async () => {
+    const { intake, batches, ctx } = makeIntake([
+      locked({ quantityOnHand: 0, expiryDate: parseDateOnly('2027-01-01') }),
+    ]);
+    await expect(intake.assertCanIntake(ctx, { branchId: 'br', lines: [line()] })).resolves.toBeUndefined();
+    expect(batches.resetDates).not.toHaveBeenCalled();
+  });
+
+  it('lô đang cách ly → 1704; không có lô ở đích → qua', async () => {
+    const quarantined = makeIntake([locked({ status: BatchStatus.QUARANTINE })]);
+    await expect(
+      quarantined.intake.assertCanIntake(quarantined.ctx, { branchId: 'br', lines: [line()] }),
+    ).rejects.toMatchObject({ errorCode: ErrorCode.BATCH_NOT_AVAILABLE });
+    const empty = makeIntake([]);
+    await expect(empty.intake.assertCanIntake(empty.ctx, { branchId: 'br', lines: [line()] })).resolves.toBeUndefined();
   });
 });
 

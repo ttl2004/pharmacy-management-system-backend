@@ -12,6 +12,7 @@ import {
   IsString,
   IsUUID,
   Matches,
+  Max,
   MaxLength,
   Min,
   ValidateNested,
@@ -20,8 +21,10 @@ import {
 const trim = ({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value);
 
 /** Giá gốc của công thức: 3 khoá cố định hoặc id một bảng giá khác. */
-const BASE_PATTERN = /^(avgCost|lastPurchaseCost|general|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+const BASE_PATTERN =
+  /^(avgCost|lastPurchaseCost|general|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
 const MAX_SCOPE_IDS = 200;
+const MAX_FORMULA_AMOUNT = 1_000_000_000;
 
 export class PriceBookFormulaRequest {
   @Matches(BASE_PATTERN, { message: 'Giá gốc phải là avgCost, lastPurchaseCost, general hoặc id một bảng giá' })
@@ -34,6 +37,7 @@ export class PriceBookFormulaRequest {
 
   @IsNumber({ maxDecimalPlaces: 2 }, { message: 'Giá trị công thức phải là số, tối đa 2 chữ số thập phân' })
   @Min(0, { message: 'Giá trị công thức không được âm' })
+  @Max(MAX_FORMULA_AMOUNT, { message: 'Giá trị công thức quá lớn (tối đa 1.000.000.000)' })
   @ApiProperty({ example: 10 })
   amount: number;
 

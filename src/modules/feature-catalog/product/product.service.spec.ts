@@ -41,8 +41,13 @@ function makeService(
     updateUnit: jest.fn().mockResolvedValue(undefined),
     softDeleteUnits: jest.fn().mockResolvedValue(undefined),
     softDeleteProduct: jest.fn().mockResolvedValue(undefined),
+    findDeletedWith: jest.fn().mockResolvedValue(null),
+    restoreProduct: jest.fn().mockResolvedValue(1),
+    restoreUnitsDeletedAt: jest.fn().mockResolvedValue(0),
+    findLiveUnits: jest.fn().mockResolvedValue([{ unitId: 'unit-vien', conversionRate: 1, isBaseUnit: true }]),
     hasInventoryHistory: jest.fn().mockResolvedValue(false),
     hasOpenInventory: jest.fn().mockResolvedValue(false),
+    findUnitsInUse: jest.fn().mockResolvedValue({ priceBook: new Set(), sold: new Set() }),
     findActiveDrug: jest.fn().mockResolvedValue({ id: 'drug-id', isPrescription: false }),
     findPacksByDrug: jest.fn().mockResolvedValue([]),
     replaceLocations: jest.fn().mockResolvedValue(undefined),
@@ -1114,8 +1119,17 @@ describe('ProductService — xoá', () => {
 
     await expect(service.remove('product-id', ACTOR)).resolves.toEqual({ success: true });
 
-    expect(softDeleteUnits).toHaveBeenCalledWith(expect.anything(), ['row-vien', 'row-vi'], 'caller-id');
-    expect(softDeleteProduct).toHaveBeenCalledWith(expect.anything(), 'product-id', 'caller-id');
+    // Cùng một mốc thời gian cho cả hai để khôi phục nhận ra dòng xoá cùng lúc.
+    expect(softDeleteUnits).toHaveBeenCalledWith(
+      expect.anything(),
+      ['row-vien', 'row-vi'],
+      'caller-id',
+      expect.any(Date),
+    );
+    expect(softDeleteProduct).toHaveBeenCalledWith(expect.anything(), 'product-id', 'caller-id', expect.any(Date));
+    const unitsDate = (softDeleteUnits.mock.calls[0] as unknown[])[3];
+    const productDate = (softDeleteProduct.mock.calls[0] as unknown[])[3];
+    expect(unitsDate).toBe(productDate);
   });
 
   it('lỗi khi ghi thì ném ra ngoài, không trả success', async () => {
@@ -1312,5 +1326,381 @@ describe('ProductService — nhật ký', () => {
         searchTerms: ['SP0001', 'Paracetamol 500mg'],
       }),
     ]);
+  });
+});
+
+describe('ProductService — khôi phục', () => {
+  const deletedAt = new Date('2026-11-01T00:00:00Z');
+  const deletedRow = { ...existingProduct, name: 'Paracetamol 500mg', barcode: null, updatedAt: deletedAt };
+
+  it('sản phẩm không ở trạng thái đã xoá thì báo RECORD_NOT_FOUND và không ghi gì', async () => {
+    const restoreProduct = jest.fn();
+    const restoreUnitsDeletedAt = jest.fn();
+    const audit = makeAudit();
+    const service = makeService(
+      { findDeletedWith: jest.fn().mockResolvedValue(null), restoreProduct, restoreUnitsDeletedAt },
+      {},
+      audit,
+    );
+
+    await expect(service.restore('product-id', ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.RECORD_NOT_FOUND,
+    });
+    expect(restoreProduct).not.toHaveBeenCalled();
+    expect(restoreUnitsDeletedAt).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('khôi phục Product và dòng đơn vị xoá cùng mốc thời gian, ghi PRODUCT.RESTORED', async () => {
+    const restoreProduct = jest.fn().mockResolvedValue(1);
+    const restoreUnitsDeletedAt = jest.fn().mockResolvedValue(2);
+    const audit = makeAudit();
+    const service = makeService(
+      {
+        findDeletedWith: jest.fn().mockResolvedValue(deletedRow),
+        findDetail: jest.fn().mockResolvedValue({ id: 'product-id' }),
+        findLiveUnits: jest.fn().mockResolvedValue([{ unitId: 'unit-vien', conversionRate: 1, isBaseUnit: true }]),
+        restoreProduct,
+        restoreUnitsDeletedAt,
+      },
+      {},
+      audit,
+    );
+
+    await expect(service.restore('product-id', ACTOR)).resolves.toEqual({ id: 'product-id' });
+
+    expect(restoreUnitsDeletedAt).toHaveBeenCalledWith(expect.anything(), 'product-id', deletedAt, 'caller-id');
+    expect(restoreProduct).toHaveBeenCalledWith(expect.anything(), 'product-id', 'caller-id');
+    expect(recordedEntries(audit)).toEqual([
+      expect.objectContaining({
+        event: 'PRODUCT.RESTORED',
+        entityId: 'product-id',
+        entityLabel: 'SP0001',
+        after: expect.objectContaining({ code: 'SP0001', barcode: null }) as unknown,
+      }),
+    ]);
+  });
+
+  it('không xác định được đơn vị cơ bản sau khi hồi sinh dòng → 1701, không khôi phục Product', async () => {
+    const restoreProduct = jest.fn();
+    const audit = makeAudit();
+    const service = makeService(
+      {
+        findDeletedWith: jest.fn().mockResolvedValue(deletedRow),
+        findLiveUnits: jest.fn().mockResolvedValue([]),
+        restoreProduct,
+      },
+      {},
+      audit,
+    );
+
+    await expect(service.restore('product-id', ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.INVALID_DOCUMENT_STATE,
+    });
+    expect(restoreProduct).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('thuốc liên kết không còn hiệu lực → INVALID_REFERENCE; trùng quy cách → DUPLICATE_CODE', async () => {
+    const linked = { ...deletedRow, drugId: 'drug-id' };
+    const gone = makeService({
+      findDeletedWith: jest.fn().mockResolvedValue(linked),
+      findActiveDrug: jest.fn().mockResolvedValue(null),
+    });
+    await expect(gone.restore('product-id', ACTOR)).rejects.toMatchObject({ errorCode: ErrorCode.INVALID_REFERENCE });
+
+    const twin = makeService({
+      findDeletedWith: jest.fn().mockResolvedValue(linked),
+      findPacksByDrug: jest
+        .fn()
+        .mockResolvedValue([{ code: 'SP9', units: [{ unitId: 'unit-vien', conversionRate: 1 }] }]),
+    });
+    await expect(twin.restore('product-id', ACTOR)).rejects.toMatchObject({ errorCode: ErrorCode.DUPLICATE_CODE });
+  });
+
+  it('D3: thuốc nay thuộc danh mục kiểm soát → khôi phục kèm bật isControlled, nhật ký ghi true', async () => {
+    const updateProduct = jest.fn().mockResolvedValue(1);
+    const audit = makeAudit();
+    const service = makeService(
+      {
+        findDeletedWith: jest.fn().mockResolvedValue({ ...deletedRow, drugId: 'drug-id', isControlled: false }),
+        findActiveDrug: jest
+          .fn()
+          .mockResolvedValue({ id: 'drug-id', isPrescription: false, controlType: 'Gây nghiện' }),
+        findPacksByDrug: jest.fn().mockResolvedValue([]),
+        findDetail: jest.fn().mockResolvedValue({ id: 'product-id' }),
+        findLiveUnits: jest.fn().mockResolvedValue([{ unitId: 'unit-vien', conversionRate: 1, isBaseUnit: true }]),
+        restoreProduct: jest.fn().mockResolvedValue(1),
+        restoreUnitsDeletedAt: jest.fn().mockResolvedValue(1),
+        updateProduct,
+      },
+      {},
+      audit,
+    );
+
+    await service.restore('product-id', ACTOR);
+
+    expect(updateProduct).toHaveBeenCalledWith(expect.anything(), 'product-id', { isControlled: true });
+    expect(recordedEntries(audit)).toEqual([
+      expect.objectContaining({
+        event: 'PRODUCT.RESTORED',
+        after: expect.objectContaining({ isControlled: true }) as unknown,
+      }),
+    ]);
+  });
+
+  it('bị khôi phục chen ngang (updateMany trả 0) thì báo RECORD_NOT_FOUND', async () => {
+    const audit = makeAudit();
+    const service = makeService(
+      { findDeletedWith: jest.fn().mockResolvedValue(deletedRow), restoreProduct: jest.fn().mockResolvedValue(0) },
+      {},
+      audit,
+    );
+
+    await expect(service.restore('product-id', ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.RECORD_NOT_FOUND,
+    });
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('list với onlyDeleted chuyển cờ xuống repository', async () => {
+    const findPageWithSummary = jest.fn().mockResolvedValue({ hits: [], total: 0, page: 1, totalPages: 0, limit: 10 });
+    const service = makeService({ findPageWithSummary });
+
+    await service.list({ page: 1, limit: 10 }, true);
+
+    expect(findPageWithSummary).toHaveBeenCalledWith({}, expect.objectContaining({ deleted: true }));
+  });
+});
+
+describe('ProductService — đổi quy cách đơn vị đang dùng (D4)', () => {
+  const rows = [
+    {
+      id: 'row-vien',
+      unitId: 'unit-vien',
+      isDeleted: false,
+      conversionRate: 1,
+      salePrice: 500,
+      barcode: null,
+      unit: { name: 'Viên' },
+    },
+    {
+      id: 'row-hop',
+      unitId: 'unit-hop',
+      isDeleted: false,
+      conversionRate: 10,
+      salePrice: 4500,
+      barcode: null,
+      unit: { name: 'Hộp' },
+    },
+  ];
+  const unitsDto = (hopRate: number) => ({
+    units: [
+      { unitId: 'unit-vien', conversionRate: 1, salePrice: 500, isBaseUnit: true },
+      { unitId: 'unit-hop', conversionRate: hopRate, salePrice: 4500, isBaseUnit: false },
+    ],
+  });
+
+  it('có kho: đổi quy cách bị chặn PRODUCT_HAS_STOCK, nêu tên đơn vị và không ghi gì', async () => {
+    const updateUnit = jest.fn();
+    const service = makeService({
+      findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+      findUnitsForReconcile: jest.fn().mockResolvedValue(rows),
+      hasInventoryHistory: jest.fn().mockResolvedValue(true),
+      updateUnit,
+    });
+
+    await expect(service.update('product-id', unitsDto(20), ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.PRODUCT_HAS_STOCK,
+      message: expect.stringContaining('Không đổi được quy cách Hộp (đang 1 = 10') as unknown,
+    });
+    expect(updateUnit).not.toHaveBeenCalled();
+  });
+
+  it('dòng đã vào bảng giá hoặc đã bán: bị chặn dù chưa có kho', async () => {
+    for (const inUse of [
+      { priceBook: new Set(['row-hop']), sold: new Set<string>() },
+      { priceBook: new Set<string>(), sold: new Set(['row-hop']) },
+    ]) {
+      const service = makeService({
+        findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+        findUnitsForReconcile: jest.fn().mockResolvedValue(rows),
+        findUnitsInUse: jest.fn().mockResolvedValue(inUse),
+      });
+      await expect(service.update('product-id', unitsDto(20), ACTOR)).rejects.toMatchObject({
+        errorCode: ErrorCode.INVALID_DOCUMENT_STATE,
+      });
+    }
+  });
+
+  it('chưa kho / bảng giá / bán: đổi quy cách được; không đổi quy cách thì không kiểm gì dù có kho', async () => {
+    const updateUnit = jest.fn().mockResolvedValue(undefined);
+    const hasInventoryHistory = jest.fn().mockResolvedValue(false);
+    const service = makeService({
+      findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+      findUnitsForReconcile: jest.fn().mockResolvedValue(rows),
+      hasInventoryHistory,
+      updateUnit,
+    });
+    await service.update('product-id', unitsDto(20), ACTOR);
+    expect(updateUnit).toHaveBeenCalledWith(
+      expect.anything(),
+      'row-hop',
+      expect.objectContaining({ conversionRate: 20 }),
+    );
+
+    const stocked = jest.fn().mockResolvedValue(true);
+    const same = makeService({
+      findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+      findUnitsForReconcile: jest.fn().mockResolvedValue(rows),
+      hasInventoryHistory: stocked,
+    });
+    await same.update('product-id', unitsDto(10), ACTOR);
+    expect(stocked).not.toHaveBeenCalled();
+  });
+
+  it('nhật ký PRODUCT.UPDATED chứa diff đơn vị: thêm, bỏ, đổi quy cách/mã vạch', async () => {
+    const audit = makeAudit();
+    const row = (id: string, rate: number, barcode: string | null = null) => ({
+      id: `row-${id}`,
+      salePrice: 500,
+      conversionRate: rate,
+      barcode,
+      unit: { id },
+    });
+    const before = { ...existingProduct, units: [row('vien', 1), row('hop', 10, 'A'), row('thung', 100)] };
+    const after = { ...existingProduct, units: [row('vien', 1), row('hop', 20, 'B'), row('vi', 5)] };
+    const service = makeService(
+      { findDetailWith: jest.fn().mockResolvedValueOnce(before).mockResolvedValueOnce(after) },
+      {},
+      audit,
+    );
+
+    await service.update('product-id', { indications: 'x' } as never, ACTOR);
+
+    expect(recordedEntries(audit)).toEqual([
+      expect.objectContaining({
+        event: 'PRODUCT.UPDATED',
+        before: {
+          units: [
+            { unitId: 'thung', conversionRate: 100, salePrice: 500, barcode: null },
+            { unitId: 'hop', conversionRate: 10, barcode: 'A' },
+          ],
+        },
+        after: {
+          units: [
+            { unitId: 'hop', conversionRate: 20, barcode: 'B' },
+            { unitId: 'vi', conversionRate: 5, salePrice: 500, barcode: null },
+          ],
+        },
+      }),
+    ]);
+  });
+});
+
+describe('ProductService — cờ kiểm soát theo danh mục thuốc (D3)', () => {
+  const controlledDrug = { id: 'drug-id', isPrescription: true, controlType: 'Gây nghiện' };
+  const plainDrug = { id: 'drug-id', isPrescription: false, controlType: null };
+  const blankDrug = { id: 'drug-id', isPrescription: false, controlType: '  ' };
+
+  it('tạo: thuốc có controlType, không gửi cờ → isControlled = true', async () => {
+    const createProduct = jest.fn().mockResolvedValue({ id: 'product-id' });
+    const service = makeService({
+      createProduct,
+      findActiveDrug: jest.fn().mockResolvedValue(controlledDrug),
+      findDetailWith: jest.fn().mockResolvedValue({ id: 'product-id' }),
+    });
+
+    await service.create(validCreatePayload(), ACTOR);
+
+    expect(createProduct).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ isControlled: true }));
+  });
+
+  it('tạo: thuốc có controlType mà gửi isControlled=false → 400, không ghi gì', async () => {
+    const createProduct = jest.fn();
+    const service = makeService({ createProduct, findActiveDrug: jest.fn().mockResolvedValue(controlledDrug) });
+
+    await expect(service.create(validCreatePayload({ isControlled: false }), ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.HTTP_BAD_REQUEST,
+    });
+    expect(createProduct).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['không có controlType', plainDrug],
+    ['controlType chỉ có khoảng trắng', blankDrug],
+  ])('tạo: thuốc %s → giữ giá trị thủ công', async (_name, drug) => {
+    const createProduct = jest.fn().mockResolvedValue({ id: 'product-id' });
+    const service = makeService({
+      createProduct,
+      findActiveDrug: jest.fn().mockResolvedValue(drug),
+      findDetailWith: jest.fn().mockResolvedValue({ id: 'product-id' }),
+    });
+
+    await service.create(validCreatePayload({ isControlled: true }), ACTOR);
+    expect(createProduct).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ isControlled: true }));
+
+    await service.create(validCreatePayload({ isControlled: false }), ACTOR);
+    expect(createProduct).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ isControlled: false }));
+  });
+
+  it('sửa: hàng đã gắn thuốc kiểm soát gửi isControlled=false → 400', async () => {
+    const updateProduct = jest.fn();
+    const service = makeService({
+      findDetailWith: jest.fn().mockResolvedValue({ ...existingProduct, drugId: 'drug-id', drug: controlledDrug }),
+      updateProduct,
+    });
+
+    await expect(service.update('product-id', { isControlled: false }, ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.HTTP_BAD_REQUEST,
+    });
+    expect(updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('sửa: đổi sang thuốc kiểm soát không gửi cờ → isControlled ép true', async () => {
+    const updateProduct = jest.fn().mockResolvedValue(1);
+    const service = makeService({
+      findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+      findActiveDrug: jest.fn().mockResolvedValue(controlledDrug),
+      updateProduct,
+    });
+
+    await service.update('product-id', { drugId: 'drug-id' }, ACTOR);
+
+    expect(updateProduct).toHaveBeenCalledWith(
+      expect.anything(),
+      'product-id',
+      expect.objectContaining({ isControlled: true }),
+    );
+  });
+
+  it('sửa: đổi sang thuốc không kiểm soát, không gửi cờ → không đụng isControlled (giữ giá trị hiện tại)', async () => {
+    const updateProduct = jest.fn().mockResolvedValue(1);
+    const service = makeService({
+      findDetailWith: jest.fn().mockResolvedValue(existingProduct),
+      findActiveDrug: jest.fn().mockResolvedValue(plainDrug),
+      updateProduct,
+    });
+
+    await service.update('product-id', { drugId: 'drug-id' }, ACTOR);
+
+    const data = (updateProduct.mock.calls[0] as unknown[])[2] as Record<string, unknown>;
+    expect(data).not.toHaveProperty('isControlled');
+  });
+
+  it('sửa: hàng gắn thuốc không kiểm soát vẫn tự bật/tắt cờ', async () => {
+    const updateProduct = jest.fn().mockResolvedValue(1);
+    const service = makeService({
+      findDetailWith: jest.fn().mockResolvedValue({ ...existingProduct, drugId: 'drug-id', drug: plainDrug }),
+      updateProduct,
+    });
+
+    await service.update('product-id', { isControlled: false }, ACTOR);
+
+    expect(updateProduct).toHaveBeenCalledWith(
+      expect.anything(),
+      'product-id',
+      expect.objectContaining({ isControlled: false }),
+    );
   });
 });

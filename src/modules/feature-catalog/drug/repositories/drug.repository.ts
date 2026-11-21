@@ -10,6 +10,12 @@ import type { DrugSourceRecord } from '../drug-source.client';
 /** 500 dòng × 25 tham số = 12.500 — xa giới hạn 65.535 tham số của một câu lệnh Postgres. */
 export const UPSERT_BATCH_SIZE = 500;
 
+/** Hàng hoá bị đồng bộ bật cờ kiểm soát (D3). */
+export interface ControlledChange {
+  id: string;
+  code: string;
+}
+
 /** Hàng hoá bị đồng bộ sửa cờ kê đơn. */
 export interface PrescriptionChange {
   id: string;
@@ -96,8 +102,22 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
       UPDATE "products" p
       SET "requiresPrescription" = d."isPrescription", "updatedAt" = ${syncedAt}, "updatedBy" = ${actorId}::uuid
       FROM "drugs" d
-      WHERE p."drugId" = d."id" AND p."requiresPrescription" <> d."isPrescription"
+      WHERE p."drugId" = d."id" AND p."isDeleted" = false AND p."requiresPrescription" <> d."isPrescription"
       RETURNING p."id" AS "id", p."code" AS "code", NOT d."isPrescription" AS "before", d."isPrescription" AS "after"`;
+  }
+
+  /**
+   * D3: thuốc có `controlType` trong danh mục → hàng hoá đang trỏ tới nó (chưa xoá) bật cờ kiểm soát. CHỈ bật, không
+   * bao giờ tự tắt khi `controlType` về rỗng (cờ khi đó do dược sĩ quyết). Trả id/mã các hàng vừa đổi để ghi nhật ký.
+   */
+  syncProductControlled(tx: Prisma.TransactionClient, syncedAt: Date, actorId: string): Promise<ControlledChange[]> {
+    return tx.$queryRaw<ControlledChange[]>`
+      UPDATE "products" p
+      SET "isControlled" = true, "updatedAt" = ${syncedAt}, "updatedBy" = ${actorId}::uuid
+      FROM "drugs" d
+      WHERE p."drugId" = d."id" AND p."isDeleted" = false AND p."isControlled" = false
+        AND COALESCE(TRIM(d."controlType"), '') <> ''
+      RETURNING p."id" AS "id", p."code" AS "code"`;
   }
 
   private staleWhere(syncedAt: Date): Prisma.DrugWhereInput {

@@ -8,7 +8,7 @@ import { AuthzGuard } from '../authz/guards/auth.guard';
 import type { JwtUser } from '../authz/types/authz.types';
 import { RequirePermissions } from '../permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../permission/guards/permission.guard';
-import { CreateUserRequest, UpdateUserRequest } from './dtos/user.request';
+import { CreateUserRequest, ResetPasswordRequest, RestoreUserRequest, UpdateUserRequest } from './dtos/user.request';
 import { UserQuery } from './dtos/user.query';
 import { UserService } from './user.service';
 
@@ -37,6 +37,16 @@ export class UserController {
   })
   list(@Query() query: UserQuery, @CurrentUser() user: JwtUser) {
     return this.userService.list(query, user);
+  }
+
+  @RequirePermissions('user:delete')
+  @Get('deleted')
+  @ApiOperation({
+    description:
+      'Danh sách người dùng đã xoá mềm (để khôi phục), cùng bộ lọc và phạm vi chi nhánh như danh sách thường. Chỉ tìm theo họ tên (SĐT/email đã nhả khi xoá).',
+  })
+  listDeleted(@Query() query: UserQuery, @CurrentUser() user: JwtUser) {
+    return this.userService.listDeleted(query, user);
   }
 
   @RequirePermissions('user:read')
@@ -69,6 +79,21 @@ export class UserController {
     return this.userService.update(id, dto, actor);
   }
 
+  @RequirePermissions('user:update')
+  @Post(':id/reset-password')
+  @ApiOperation({
+    description:
+      'Đặt lại mật khẩu cho nhân viên quên mật khẩu (8–72 ký tự). Chỉ người cấp cao hơn, trong phạm vi chi nhánh; không cho SUPER_ADMIN và chính mình (1605 — dùng POST /auth/change-password). Thu hồi mọi phiên của người đó.',
+  })
+  @ApiResponse({ status: 404, description: '1200 không tồn tại/ngoài phạm vi/chưa có tài khoản đăng nhập' })
+  resetPassword(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: ResetPasswordRequest,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.userService.resetPassword(id, dto, actor);
+  }
+
   @RequirePermissions('user:delete')
   @Delete(':id')
   @ApiOperation({
@@ -80,5 +105,19 @@ export class UserController {
     @CurrentActor() actor: RequestActor,
   ) {
     return this.userService.remove(id, actor, query.reason);
+  }
+
+  @RequirePermissions('user:delete')
+  @Post(':id/restore')
+  @ApiOperation({
+    description:
+      'Khôi phục người dùng đã xoá mềm: lấy lại username gốc, SĐT/email lấy từ body (tuỳ chọn), trạng thái về INACTIVE, phiên vẫn bị thu hồi (đặt lại mật khẩu nếu cần). Trùng username/SĐT/email với người khác trả 1601; người chưa bị xoá trả 1701.',
+  })
+  restore(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: RestoreUserRequest,
+    @CurrentActor() actor: RequestActor,
+  ) {
+    return this.userService.restore(id, dto, actor);
   }
 }

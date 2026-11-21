@@ -1,4 +1,4 @@
-import { OrderChannel, OrderStatus, PaymentMethod, RecordStatus } from '@prisma/client';
+import { OrderChannel, OrderStatus, PaymentMethod, Prisma, RecordStatus } from '@prisma/client';
 import type { RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
@@ -40,6 +40,7 @@ const head = (overrides: Partial<OrderHead> = {}): OrderHead => ({
   prescriptionLineCount: 0,
   customerId: null,
   controlledLineCount: 0,
+  interactionOverride: null,
   ...overrides,
 });
 
@@ -70,6 +71,7 @@ describe('OrderService', () => {
     findAbandonedPos: jest.fn(),
     findPage: jest.fn().mockResolvedValue({ hits: [], total: 0 }),
     lockAndCountPendingPos: jest.fn().mockResolvedValue(0),
+    findItemProductIds: jest.fn().mockResolvedValue(['p1']),
   };
   const transactions = { run: jest.fn((work: (c: typeof ctx) => unknown) => work(ctx)) };
   const stock = {
@@ -84,6 +86,23 @@ describe('OrderService', () => {
   const priceBooks = { getUsableBook: jest.fn() };
   const rollup = { applyOrder: jest.fn() };
   const permissions = { getGrantedCodes: jest.fn() };
+  const approval = {
+    reason: 'Bác sĩ đã xác nhận phối hợp được',
+    warningIds: ['ddi:DD1:DD2'],
+    warningSummaries: ['Nghiêm trọng: A + B'],
+    manual: false,
+    byUserId: 'ph1',
+    byUserName: 'Dược sĩ B',
+    requestedBy: 'u1',
+    at: '2026-11-21T00:00:00.000Z',
+  };
+  const safety = {
+    approvalForOrder: jest.fn().mockReturnValue(null),
+    precheck: jest.fn((productIds: string[]) =>
+      Promise.resolve({ available: true, productIds, majorWarningIds: [], majorSummaries: [] }),
+    ),
+    assertPayAllowed: jest.fn(),
+  };
   const service = new OrderService(
     orders as unknown as OrderRepository,
     transactions as never,
@@ -93,6 +112,7 @@ describe('OrderService', () => {
     priceBooks as never,
     rollup as never,
     permissions as never,
+    safety as never,
   );
   /** Lần gọi `record` đầu tiên: actor + các entry. */
   const recorded = () => ({ actor: argOf<AuditActor>(audit.record, 1), entries: argOf<AuditEntry[]>(audit.record, 2) });
@@ -102,6 +122,8 @@ describe('OrderService', () => {
     orders.claim.mockResolvedValue(1);
     orders.lockAndCountPendingPos.mockResolvedValue(0);
     permissions.getGrantedCodes.mockResolvedValue(new Set());
+    orders.findItemProductIds.mockResolvedValue(['p1']);
+    safety.approvalForOrder.mockReturnValue(null);
   });
 
   it('createPos: SS lập ở chi nhánh mình, giữ hàng với id dòng tự sinh trùng id đã ghi', async () => {
@@ -201,17 +223,54 @@ describe('OrderService', () => {
     expect(recorded().entries.map((entry) => entry.event)).toEqual(['ORDER.CREATED']);
   });
 
-  it('createPos có ghi đè cảnh báo tương tác ghi thêm ORDER.INTERACTION_OVERRIDE, lý do = lý do ghi đè', async () => {
-    await service.createPos(
-      {
-        items: [{ productUnitId: 'pu1', quantity: 1 }],
-        interactionOverride: { reason: 'Bác sĩ đã xác nhận', warningIds: ['w1'], warningSummaries: ['A + B'] },
-      },
-      ss,
-    );
+  it('createPos có phiếu duyệt: đối chiếu đúng người bán/chi nhánh/giỏ, lưu bản duyệt, ghi ORDER.INTERACTION_OVERRIDE', async () => {
+    safety.approvalForOrder.mockReturnValue(approval);
+    await service.createPos({ items: [{ productUnitId: 'pu1', quantity: 1 }], interactionApprovalToken: 'token' }, ss);
+    expect(safety.approvalForOrder).toHaveBeenCalledWith('token', {
+      actorId: 'u1',
+      branchId: 'b1',
+      productIds: ['p1'],
+    });
+    expect(orders.createHeader).toHaveBeenCalledWith(tx, expect.objectContaining({ interactionOverride: approval }));
     const { entries } = recorded();
     expect(entries.map((entry) => entry.event)).toEqual(['ORDER.CREATED', 'ORDER.INTERACTION_OVERRIDE']);
-    expect(entries[1]).toMatchObject({ reason: 'Bác sĩ đã xác nhận', branchIds: ['b1'], entityLabel: 'HD000001' });
+    expect(entries[1]).toMatchObject({
+      reason: approval.reason,
+      branchIds: ['b1'],
+      entityLabel: 'HD000001',
+      after: { approvedBy: { userId: 'ph1', fullName: 'Dược sĩ B' } },
+    });
+  });
+
+  it('replacePosItems không gửi phiếu duyệt → xoá bản duyệt cũ của đơn', async () => {
+    orders.findHead.mockResolvedValue(head());
+    await service.replacePosItems('o1', { items: [{ productUnitId: 'pu1', quantity: 1 }] }, ss);
+    const update = argOf<Record<string, unknown>>(orders.claim, 3);
+    expect(update.interactionOverride).toBe(Prisma.DbNull);
+  });
+
+  it('payPos: kiểm tra tương tác trước transaction, rồi kiểm bản duyệt của đơn', async () => {
+    orders.findHead.mockResolvedValue(head({ interactionOverride: approval }));
+    await service.payPos('o1', { method: PaymentMethod.CASH }, ss);
+    expect(safety.precheck).toHaveBeenCalledWith(['p1']);
+    expect(safety.assertPayAllowed).toHaveBeenCalledWith(expect.objectContaining({ productIds: ['p1'] }), approval);
+  });
+
+  it('payPos: còn cảnh báo chưa duyệt → lỗi của gate, không ghi thanh toán, không trừ kho', async () => {
+    orders.findHead.mockResolvedValue(head());
+    safety.assertPayAllowed.mockImplementationOnce(() => {
+      throw new Error('1804');
+    });
+    await expect(service.payPos('o1', { method: PaymentMethod.CASH }, ss)).rejects.toThrow('1804');
+    expect(orders.createPayment).not.toHaveBeenCalled();
+    expect(stock.consume).not.toHaveBeenCalled();
+  });
+
+  it('payPos: giỏ bị sửa giữa lúc kiểm tra và lúc thu → báo thử lại, không ghi thanh toán', async () => {
+    orders.findHead.mockResolvedValue(head());
+    orders.findItemProductIds.mockResolvedValueOnce(['p1']).mockResolvedValueOnce(['p1', 'p2']);
+    await expect(service.payPos('o1', { method: PaymentMethod.CASH }, ss)).rejects.toThrow('vừa được sửa');
+    expect(orders.createPayment).not.toHaveBeenCalled();
   });
 
   it('dòng CUSTOMER.CREATED che SĐT còn 4 số cuối', async () => {

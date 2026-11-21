@@ -138,6 +138,8 @@ export interface OrderHead {
   /** Người lập đơn (`staffId`, gán lúc tạo) và tên — để kiểm quyền xử lý đơn của người khác và ghi `onBehalfOf`. */
   staffId: string | null;
   staffName: string | null;
+  /** Bản duyệt cảnh báo tương tác của dược sĩ (null = chưa duyệt) — kiểm lúc thu tiền. */
+  interactionOverride: Prisma.JsonValue | null;
 }
 
 @Injectable()
@@ -171,6 +173,16 @@ export class OrderRepository {
     return row ? toDetail(row) : null;
   }
 
+  /** Hàng hoá của các dòng đơn (chưa xoá) — để kiểm tra tương tác thuốc lúc thu tiền. */
+  async findItemProductIds(id: string, client: Prisma.TransactionClient = this.prisma): Promise<string[]> {
+    const rows = await client.orderItem.findMany({
+      where: { orderId: id, isDeleted: false },
+      select: { productId: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    return rows.map((row) => row.productId);
+  }
+
   async findHead(
     tx: Prisma.TransactionClient,
     id: string,
@@ -195,6 +207,7 @@ export class OrderRepository {
         createdBy: true,
         customerId: true,
         staffId: true,
+        interactionOverride: true,
         staff: { select: { fullName: true } },
         _count: { select: { items: { where: { isDeleted: false } } } },
       },

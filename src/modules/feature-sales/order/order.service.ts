@@ -41,7 +41,6 @@ import { orderErrors, salesError } from '../core/sales.error';
 import {
   CancelOrderRequest,
   CreatePosOrderRequest,
-  InteractionOverrideRequest,
   OrderQuery,
   PayOrderRequest,
   PrescriptionRequest,
@@ -49,6 +48,8 @@ import {
 } from './dtos/order.request';
 import { SalesRollupRepository } from '../../feature-report/sales-rollup.repository';
 import { OrderDetail, OrderHead, OrderRepository, WalkInCustomer } from './repositories/order.repository';
+import { SaleSafetyGate } from '../../feature-safety/sale-safety.gate';
+import type { StoredInteractionApproval } from '../../feature-safety/safety.types';
 
 /** Trạng thái huỷ được theo kênh. Online để tương lai (huỷ trước SHIPPING) — hiện chưa có đơn online nào. */
 const CANCELLABLE: Record<OrderChannel, readonly OrderStatus[]> = {
@@ -68,13 +69,6 @@ function prescriptionData(prescription: PrescriptionRequest | undefined) {
   };
 }
 
-/** Ghi đè cảnh báo tương tác: server tự điền người ghi đè + thời điểm. Không gửi → `{}` (giữ giá trị cũ khi sửa đơn). */
-function overrideData(override: InteractionOverrideRequest | undefined, actorId: string) {
-  if (!override) return {};
-  const value = { ...override, byUserId: actorId, at: new Date().toISOString() };
-  return { interactionOverride: value as unknown as Prisma.InputJsonValue };
-}
-
 /**
  * Phần chung của mọi dòng nhật ký đơn: nhãn + từ khoá = mã đơn (D8), phạm vi = chi nhánh đơn. Không bao giờ đưa tên
  * hay SĐT khách vào nhãn/từ khoá.
@@ -89,20 +83,33 @@ function orderAudit(order: { id: string; code: string; branchId: string }) {
   };
 }
 
-/** Dòng ghi đè cảnh báo tương tác (khi có): lý do ghi đè của người bán là `reason` của dòng nhật ký. */
+/** Dòng nhật ký khi đơn có dược sĩ duyệt cảnh báo tương tác: lý do duyệt là `reason` của dòng nhật ký. */
 function overrideEntries(
   order: { id: string; code: string; branchId: string },
-  override: InteractionOverrideRequest | undefined,
+  approval: Prisma.InputJsonValue | null,
 ): AuditEntry[] {
-  if (!override) return [];
+  if (!approval) return [];
+  const value = approval as unknown as StoredInteractionApproval;
   return [
     {
       event: 'ORDER.INTERACTION_OVERRIDE',
       ...orderAudit(order),
-      reason: override.reason,
-      after: { warningIds: override.warningIds, warningSummaries: override.warningSummaries },
+      reason: value.reason,
+      after: {
+        warningIds: value.warningIds,
+        warningSummaries: value.warningSummaries,
+        manual: value.manual,
+        approvedBy: { userId: value.byUserId, fullName: value.byUserName },
+      },
     },
   ];
+}
+
+/** Hai danh sách id có cùng tập phần tử (không xét thứ tự, trùng lặp). */
+function sameIdSet(a: string[], b: string[]): boolean {
+  const left = new Set(a);
+  const right = new Set(b);
+  return left.size === right.size && [...left].every((id) => right.has(id));
 }
 
 function controlledNeedsCustomer() {
@@ -131,6 +138,7 @@ export class OrderService {
     private readonly priceBooks: PriceBookService,
     private readonly rollup: SalesRollupRepository,
     private readonly permissions: PermissionService,
+    private readonly safety: SaleSafetyGate,
   ) {}
 
   async list(query: OrderQuery, actor: RequestActor) {
@@ -199,6 +207,12 @@ export class OrderService {
       const totals = orderTotals(lines);
       // Thuốc kiểm soát đặc biệt: phải biết người mua (như mock — chặn khách lẻ).
       if (!customer && lines.some((line) => line.isControlled)) throw controlledNeedsCustomer();
+      // Phiếu duyệt của dược sĩ (nếu có) phải khớp đúng người bán, chi nhánh và giỏ hàng này.
+      const approval = this.safety.approvalForOrder(dto.interactionApprovalToken, {
+        actorId,
+        branchId,
+        productIds: lines.map((line) => line.productId),
+      });
 
       const code = await this.codes.next(tx, 'ORDER');
       const { id } = await this.orders.createHeader(tx, {
@@ -213,7 +227,7 @@ export class OrderService {
         discountAmount: totals.discountAmount,
         totalAmount: totals.totalAmount,
         ...prescriptionData(dto.prescription),
-        ...overrideData(dto.interactionOverride, actorId),
+        ...(approval ? { interactionOverride: approval } : {}),
         note: dto.note ?? null,
         createdBy: actorId,
       });
@@ -237,7 +251,7 @@ export class OrderService {
           },
         },
       ];
-      entries.push(...overrideEntries(order, dto.interactionOverride));
+      entries.push(...overrideEntries(order, approval));
       // Hồ sơ khách do hệ thống tạo cũng phải có dấu vết: ai tạo, ở quầy nào. SĐT che, không ghi tên (PII).
       if (customer?.created) {
         entries.push({
@@ -280,6 +294,12 @@ export class OrderService {
       const totals = orderTotals(lines);
       // M1: sửa đơn khách lẻ thành đơn có thuốc kiểm soát cũng phải bị chặn như lúc lập đơn.
       if (!head.customerId && lines.some((line) => line.isControlled)) throw controlledNeedsCustomer();
+      // Giỏ đổi thì bản duyệt cũ hết hiệu lực: không gửi phiếu mới → xoá (thu tiền sẽ đòi duyệt lại nếu còn cảnh báo).
+      const approval = this.safety.approvalForOrder(dto.interactionApprovalToken, {
+        actorId,
+        branchId: head.branchId,
+        productIds: lines.map((line) => line.productId),
+      });
 
       // Chiếm trước khi đụng kho: request thu tiền/huỷ cùng lúc phải chờ, rồi thấy đơn đã đổi.
       const claimed = await this.orders.claim(
@@ -291,7 +311,7 @@ export class OrderService {
           discountAmount: totals.discountAmount,
           totalAmount: totals.totalAmount,
           ...prescriptionData(dto.prescription),
-          ...overrideData(dto.interactionOverride, actorId),
+          interactionOverride: approval ?? Prisma.DbNull,
           updatedAt: now,
           updatedBy: actorId,
         },
@@ -324,7 +344,7 @@ export class OrderService {
           },
         },
       ];
-      entries.push(...overrideEntries(head, dto.interactionOverride));
+      entries.push(...overrideEntries(head, approval));
       await this.audit.record(tx, auditActorOf(actor), entries);
       return this.mustFind(tx, id);
     });
@@ -335,6 +355,8 @@ export class OrderService {
     const scope = resolveBranchScope(actor.user);
     const actorId = actor.user.userId;
     const now = new Date();
+    // Gọi service tương tác TRƯỚC transaction: không giữ khoá DB trong lúc chờ HTTP.
+    const precheck = await this.safety.precheck(await this.orders.findItemProductIds(id));
 
     try {
       return await this.transactions.run(async (ctx) => {
@@ -360,6 +382,11 @@ export class OrderService {
         if (head.prescriptionLineCount > 0 && (!head.prescriptionCode || !head.prescriberName)) {
           throw salesError(ErrorCode.PRESCRIPTION_REQUIRED);
         }
+        // Giỏ phải đúng như lúc kiểm tra tương tác; rồi mọi cảnh báo nghiêm trọng phải đã được dược sĩ duyệt (1804).
+        if (!sameIdSet(await this.orders.findItemProductIds(id, tx), precheck.productIds)) {
+          throw badRequest('Đơn vừa được sửa trong lúc thu tiền, vui lòng thử lại');
+        }
+        this.safety.assertPayAllowed(precheck, head.interactionOverride);
         // M1: chốt chặn cuối — đơn khách lẻ không được thu tiền nếu có thuốc kiểm soát (dữ liệu cũ, đường sửa khác).
         if (head.controlledLineCount > 0 && !head.customerId) throw controlledNeedsCustomer();
 

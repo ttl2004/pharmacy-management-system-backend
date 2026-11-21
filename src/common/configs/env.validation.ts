@@ -144,6 +144,17 @@ export const envSchema = z
       .default('http://127.0.0.1:8790'),
     // Gửi qua header X-Internal-Key; phải trùng RAG_INTERNAL_KEY bên RAG service. Bỏ trống = không gửi.
     RAG_INTERNAL_KEY: z.string().optional(),
+
+    //- Service kiểm tra tương tác thuốc (repo TTT-BE, dữ liệu DDInter)
+    INTERACTION_SERVICE_URL: z
+      .string()
+      .refine(
+        (url) => URL.canParse(url) && /^https?:$/.test(new URL(url).protocol),
+        'INTERACTION_SERVICE_URL phải là URL http(s)',
+      )
+      .default('http://127.0.0.1:8791'),
+    // Gửi qua header X-Internal-Key; phải trùng INTERACTION_INTERNAL_KEY bên TTT-BE. Bỏ trống = không gửi.
+    INTERACTION_INTERNAL_KEY: z.string().optional(),
   })
   .refine((env) => env.COOKIE_SAMESITE !== 'none' || env.COOKIE_SECURE === 'true', {
     message: 'COOKIE_SAMESITE=none yêu cầu COOKIE_SECURE=true',

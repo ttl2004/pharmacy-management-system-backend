@@ -355,7 +355,7 @@ export class OrderService {
     const scope = resolveBranchScope(actor.user);
     const actorId = actor.user.userId;
     const now = new Date();
-    // Gọi service tương tác TRƯỚC transaction: không giữ khoá DB trong lúc chờ HTTP.
+    // Tra tương tác TRƯỚC transaction: không giữ khoá DB trong lúc chờ câu tra cứu.
     const precheck = await this.safety.precheck(await this.orders.findItemProductIds(id));
 
     try {

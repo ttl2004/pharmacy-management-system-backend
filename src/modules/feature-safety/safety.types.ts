@@ -1,4 +1,4 @@
-import type { InteractionSeverity } from './interaction-service.client';
+import type { InteractionSeverity } from './interaction.types';
 
 export type SafetyWarningKind = 'DRUG_DRUG' | 'DUPLICATE_INGREDIENT';
 
@@ -47,10 +47,10 @@ export interface SafetyCheckResult {
 /** Bản duyệt lưu vào cột `orders.interactionOverride`. */
 export interface StoredInteractionApproval {
   reason: string;
-  /** Cảnh báo nghiêm trọng đã được duyệt (rỗng khi duyệt thủ công lúc service tắt). */
+  /** Cảnh báo nghiêm trọng đã được duyệt (rỗng khi duyệt thủ công lúc không tra được dữ liệu). */
   warningIds: string[];
   warningSummaries: string[];
-  /** true = service tương tác không chạy, dược sĩ xác nhận đã kiểm tra thủ công. */
+  /** true = không tra được dữ liệu tương tác (1611), dược sĩ xác nhận đã kiểm tra thủ công. */
   manual: boolean;
   /** Dược sĩ duyệt. */
   byUserId: string;

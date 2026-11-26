@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, RecordStatus } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
+import { avgCostBaseSql, lastPurchaseSql } from 'src/common/databases/sql/stock-cost.sql';
 import { containsPattern } from 'src/common/utils/like-pattern.util';
 import { BranchScope } from '../../../feature-auth/permission/branch-scope';
 import type { PriceCompareOp, PriceStockFilter } from '../dtos/price-book-rows.request';
@@ -31,7 +32,8 @@ const COMPARE_SQL: Record<PriceCompareOp, Prisma.Sql> = {
 };
 
 /**
- * Đọc dòng giá bằng SQL thô: một câu cho trang + một câu đếm, không N+1.
+ * Đọc dòng giá bằng SQL thô: một câu cho trang + một câu đếm, không N+1. Công thức giá vốn / giá nhập cuối dùng chung
+ * với màn Hàng hoá chi nhánh (`common/databases/sql/stock-cost.sql.ts`).
  *
  * Giá vốn (D3) = bình quân `importPrice` theo SỐ CÒN LẠI của các lô AVAILABLE ở chi nhánh, tính theo đơn vị gốc, rồi
  * × hệ số đơn vị. Giá nhập cuối (D11) = (đơn giá − giảm giá) / hệ số của dòng phiếu nhập CONFIRMED gần nhất ở chi nhánh.
@@ -81,19 +83,11 @@ export class PriceBookRowsRepository {
       WITH cost AS (
         SELECT b."productId",
                COALESCE(SUM(b."quantityOnHand"), 0)::int AS "onHand",
-               SUM(b."importPrice"::float8 * b."quantityOnHand") FILTER (WHERE b."status" = 'AVAILABLE')
-                 / NULLIF(SUM(b."quantityOnHand") FILTER (WHERE b."status" = 'AVAILABLE'), 0) AS "avgBase"
+               ${avgCostBaseSql('b')} AS "avgBase"
         FROM "stock_batches" b
         WHERE b."branchId" = ${branchId}::uuid AND b."isDeleted" = false
         GROUP BY b."productId"
-      ), last_purchase AS (
-        SELECT DISTINCT ON (i."productId") i."productId",
-               (i."importPrice" - i."unitDiscount")::float8 / i."conversionRate" AS "netBase"
-        FROM "goods_receipt_items" i
-        JOIN "goods_receipts" r ON r."id" = i."receiptId"
-        WHERE r."branchId" = ${branchId}::uuid AND r."status" = 'CONFIRMED' AND r."isDeleted" = false AND i."isDeleted" = false
-        ORDER BY i."productId", COALESCE(r."confirmedAt", r."receivedAt", r."createdAt") DESC, i."createdAt" DESC, i."id" DESC
-      )
+      ), last_purchase AS (${lastPurchaseSql({ branchId })})
       SELECT t.* FROM (
         SELECT pu."id" AS "productUnitId", p."id" AS "productId", pu."unitId", p."code", p."name", u."name" AS "unitName",
                pu."conversionRate" AS "factor", pu."salePrice" AS "generalPrice",

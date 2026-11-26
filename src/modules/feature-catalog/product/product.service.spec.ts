@@ -139,6 +139,48 @@ describe('ProductService — danh sách', () => {
 
     expect(findPageWithSummary).toHaveBeenCalledWith({}, expect.anything());
   });
+
+  it('có tham số lọc mới → Danh mục hàng hoá lọc ở SQL, gộp bộ lọc cũ (search → q, status → statuses)', async () => {
+    const findPageWithSummary = jest.fn();
+    const findCatalogPage = jest.fn().mockResolvedValue({ hits: [], total: 0, page: 2, totalPages: 0, limit: 20 });
+    const service = makeService({ findPageWithSummary, findCatalogPage });
+
+    await service.list({
+      page: 2,
+      limit: 20,
+      search: 'para',
+      status: RecordStatus.ACTIVE,
+      categoryId: 'category-id',
+      types: [ProductType.DRUG],
+      sortBy: 'price',
+      sortDir: 'desc',
+    });
+
+    expect(findPageWithSummary).not.toHaveBeenCalled();
+    expect(findCatalogPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        q: 'para',
+        searchField: 'code_name',
+        statuses: [RecordStatus.ACTIVE],
+        types: [ProductType.DRUG],
+        categoryId: 'category-id',
+        categoryIds: [],
+      }),
+      { page: 2, limit: 20, sortBy: 'price', sortDir: 'desc', deleted: false },
+    );
+  });
+
+  it('chỉ gửi sortBy cũng chuyển sang đường SQL; chế độ đã xoá được giữ', async () => {
+    const findCatalogPage = jest.fn().mockResolvedValue({ hits: [], total: 0, page: 1, totalPages: 0, limit: 10 });
+    const service = makeService({ findCatalogPage });
+
+    await service.list({ page: 1, limit: 10, sortBy: 'name' }, true);
+
+    expect(findCatalogPage).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sortBy: 'name', sortDir: 'asc', deleted: true }),
+    );
+  });
 });
 
 describe('ProductService — chi tiết', () => {

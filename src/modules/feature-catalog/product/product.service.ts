@@ -12,6 +12,7 @@ import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-bas
 import { CatalogTransactions, productWriteLocks } from '../catalog-transactions';
 import { CreateProductRequest, ProductUnitRequest, UpdateProductRequest } from './dtos/product.request';
 import { ProductQuery } from './dtos/product.query';
+import { PRODUCT_LIST_FILTER_KEYS, toProductListFilter } from 'src/common/dtos/product-list-filter.query';
 import { productCreatedEntry, productDeletedEntry, productRestoredEntry, productUpdatedEntries } from './product-audit';
 import { toExtraCreateData, toExtraUpdateData } from './product-extra-fields.mapper';
 import {
@@ -34,6 +35,7 @@ export class ProductService extends AbstractBaseService<Product> {
 
   /** `onlyDeleted` do controller quyết (chỉ người có quyền xoá): khi bật, chỉ trả sản phẩm ĐÃ xoá mềm. */
   async list(query: ProductQuery, onlyDeleted = false) {
+    if (usesCatalogFilters(query)) return this.listCatalog(query, onlyDeleted);
     const filter: BaseWhere<Product> = {};
     if (query.categoryId) filter.categoryId = query.categoryId;
     if (query.manufacturerId) filter.manufacturerId = query.manufacturerId;
@@ -48,6 +50,28 @@ export class ProductService extends AbstractBaseService<Product> {
       sort: query.sort,
       search: query.search,
       searchFields: ['code', 'barcode', 'name', DRUG_INGREDIENTS_SEARCH_FIELD],
+      deleted: onlyDeleted,
+    });
+  }
+
+  /**
+   * Danh mục hàng hoá (lọc/sắp xếp/đếm ở SQL). Bộ lọc cũ một-giá-trị vẫn áp cùng lúc; `search` cũ = `q` khi không có
+   * `q`; `status`/`dosageForm` cũ gộp vào mảng tương ứng.
+   */
+  private listCatalog(query: ProductQuery, onlyDeleted: boolean) {
+    const filter = toProductListFilter(query);
+    filter.q ??= query.search?.trim() || undefined;
+    filter.categoryId = query.categoryId;
+    filter.manufacturerId = query.manufacturerId;
+    filter.baseUnitId = query.baseUnitId;
+    if (query.status && !filter.statuses.length) filter.statuses = [query.status];
+    if (query.dosageForm && !filter.dosageForms.length) filter.dosageForms = [query.dosageForm];
+    filter.requiresPrescription ??= query.requiresPrescription;
+    return this.productRepository.findCatalogPage(filter, {
+      page: query.page,
+      limit: query.limit,
+      sortBy: query.sortBy,
+      sortDir: query.sortDir ?? 'asc',
       deleted: onlyDeleted,
     });
   }
@@ -659,4 +683,9 @@ function prefillFromDrug(
   if (dto.dosageNote === undefined && existing.dosageNote === null) data.dosageNote = drug.dosage;
   if (dto.storageNote === undefined && existing.storageNote === null) data.storageNote = drug.storage;
   return data;
+}
+
+/** Có tham số lọc mới (hoặc `sortBy`) → dùng đường SQL đầy đủ của Danh mục hàng hoá. */
+function usesCatalogFilters(query: ProductQuery): boolean {
+  return query.sortBy !== undefined || PRODUCT_LIST_FILTER_KEYS.some((key) => query[key] !== undefined);
 }

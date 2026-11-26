@@ -1,6 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, Product, ReceiptStatus, RecordStatus, TransferStatus } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
+import {
+  type CatalogSortKey,
+  PRODUCT_FILTER_JOINS,
+  type ProductListFilter,
+  catalogSortExpr,
+  orderBySql,
+  productFilterConditions,
+} from 'src/common/databases/sql/product-filter.sql';
+import { type ProductListItem, findListItemsInOrder } from 'src/common/databases/product-list-item';
 import { escapeLike } from 'src/common/utils/like-pattern.util';
 import { BaseWhere, PaginationResult } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { PrismaBaseRepository } from 'src/providers/abstract-base/repositories/prisma-base.repository';
@@ -92,6 +101,15 @@ const PRODUCT_DETAIL_SELECT = {
 } satisfies Prisma.ProductSelect;
 
 export type ProductSummary = Prisma.ProductGetPayload<{ select: typeof PRODUCT_SUMMARY_SELECT }>;
+export interface CatalogPageOptions {
+  page: number;
+  limit: number;
+  sortBy?: CatalogSortKey;
+  sortDir: 'asc' | 'desc';
+  /** Chỉ lấy sản phẩm đã xoá mềm (cho người có quyền xoá, để khôi phục). */
+  deleted: boolean;
+}
+
 /** Dòng ProductUnit dùng cho đối chiếu replace-all (kể cả dòng đã xoá mềm). */
 export type ProductUnitRow = {
   id: string;
@@ -210,6 +228,39 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
       total,
       page: options.page,
       totalPages: Math.ceil(total / options.limit),
+      limit: options.limit,
+    };
+  }
+
+  /**
+   * Danh mục hàng hoá: lọc, sắp xếp, đếm hoàn toàn ở SQL (một câu lấy id trang + một câu đếm), rồi đọc đủ trường cho
+   * ≤ `limit` dòng bằng một câu Prisma. Không phụ thuộc chi nhánh.
+   */
+  async findCatalogPage(
+    filter: ProductListFilter,
+    options: CatalogPageOptions,
+  ): Promise<PaginationResult<ProductListItem>> {
+    const where = Prisma.join(
+      [Prisma.sql`p."isDeleted" = ${options.deleted}`, ...productFilterConditions(filter, 'ALL')],
+      ' AND ',
+    );
+    const from = Prisma.sql`FROM "products" p ${PRODUCT_FILTER_JOINS} WHERE ${where}`;
+    const order = orderBySql(options.sortBy ? catalogSortExpr(options.sortBy) : null, options.sortDir);
+    const [idRows, [{ count }]] = await Promise.all([
+      this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT p."id" ${from} ORDER BY ${order}
+        LIMIT ${options.limit} OFFSET ${(options.page - 1) * options.limit}`),
+      this.prisma.$queryRaw<{ count: number }[]>(Prisma.sql`SELECT COUNT(*)::int AS "count" ${from}`),
+    ]);
+    const hits = await findListItemsInOrder(
+      this.prisma,
+      idRows.map((r) => r.id),
+    );
+    return {
+      hits,
+      total: count,
+      page: options.page,
+      totalPages: Math.ceil(count / options.limit),
       limit: options.limit,
     };
   }

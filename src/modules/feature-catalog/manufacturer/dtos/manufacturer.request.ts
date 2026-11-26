@@ -87,3 +87,24 @@ export class UpdateManufacturerRequest {
   @ApiPropertyOptional({ enum: RecordStatus })
   status?: RecordStatus;
 }
+
+/** Tìm-hoặc-tạo hãng theo tên (thêm hàng từ CSDL Dược). Tên so sau chuẩn hoá: bỏ dấu, bỏ "Công ty/CTCP/TNHH/Co., Ltd…". */
+export class ResolveManufacturerRequest {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(200)
+  @ApiProperty({
+    example: 'CTCP DƯỢC PHẨM TRUNG ƯƠNG 1',
+    description: 'Tên hãng (từ manufacturerName của thuốc CSDL Dược)',
+  })
+  name: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  @ApiPropertyOptional({
+    example: 'VN',
+    description: 'Quốc gia (từ countryOfOrigin). Được đưa về tên chuẩn ("VN" → "Việt Nam"); chỉ dùng khi tạo mới.',
+  })
+  country?: string;
+}

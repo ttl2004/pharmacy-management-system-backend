@@ -295,10 +295,14 @@ model Manufacturer {
   address   String?      @db.Text
   note      String?      @db.Text
   status    RecordStatus @default(ACTIVE)
+  /// Tên đã chuẩn hoá (`normalizeManufacturerName`) để so trùng. Không unique: dữ liệu cũ có thể đã trùng;
+  /// chống tạo trùng bằng advisory lock theo khoá này trong transaction.
+  nameKey   String?      @db.VarChar(200)
 
   products Product[]
 
   @@index([status])
+  @@index([nameKey])
   @@map("manufacturers")
 }
 

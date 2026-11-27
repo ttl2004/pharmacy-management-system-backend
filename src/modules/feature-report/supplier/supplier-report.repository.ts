@@ -15,6 +15,8 @@ export interface SupplierReportFilter {
 /** Một thành phần nợ của một NCC: `opening` = phát sinh trước `start`, `period` = trong `[start, end)`. */
 export interface DebtComponentRow {
   supplierId: string;
+  /** Chi nhánh của chứng từ (phiếu chi: chi nhánh của phiếu nhập được phân bổ). */
+  branchId: string;
   opening: bigint;
   period: bigint;
   /** Số chứng từ trong kỳ. */
@@ -27,6 +29,11 @@ export interface SupplierNameRow {
   name: string;
 }
 
+export interface BranchNameRow {
+  id: string;
+  name: string;
+}
+
 export interface TopProductRow {
   productId: string;
   productName: string;
@@ -35,8 +42,8 @@ export interface TopProductRow {
 }
 
 /**
- * Đọc thẳng các bảng gốc, mỗi thành phần một câu `GROUP BY supplierId` (số dòng = số NCC): tổng trước mốc đầu và
- * tổng trong kỳ nằm CÙNG một lần quét nhờ `FILTER`. Điều kiện thời gian viết `col < $end` để dùng được chỉ mục.
+ * Đọc thẳng các bảng gốc, mỗi thành phần một câu `GROUP BY supplierId, branchId` (số dòng ≤ số NCC × số chi nhánh):
+ * tổng trước mốc đầu và tổng trong kỳ nằm CÙNG một lần quét nhờ `FILTER`. Điều kiện thời gian viết `col < $end` để dùng được chỉ mục.
  * Công thức nợ khớp `supplier-debt-ledger.builder` và `SupplierListWithTotalsRepository` (chứng từ huỷ = 0).
  */
 @Injectable()
@@ -46,35 +53,39 @@ export class SupplierReportRepository {
   /** Phiếu nhập CONFIRMED (chưa huỷ, chưa xoá) theo `confirmedAt`: tổng `totalAmount`. */
   receipts(f: SupplierReportFilter): Promise<DebtComponentRow[]> {
     return this.component(Prisma.sql`
-      SELECT r."supplierId" AS "supplierId",
+      SELECT r."supplierId" AS "supplierId", r."branchId" AS "branchId",
         COALESCE(SUM(r."totalAmount") FILTER (WHERE r."confirmedAt" < ${f.start}), 0)::bigint AS opening,
         COALESCE(SUM(r."totalAmount") FILTER (WHERE r."confirmedAt" >= ${f.start}), 0)::bigint AS period,
         (COUNT(*) FILTER (WHERE r."confirmedAt" >= ${f.start}))::int AS count
       FROM "goods_receipts" r
       WHERE r."status" = 'CONFIRMED' AND r."isDeleted" = false AND r."confirmedAt" < ${f.end}
         ${this.branchCond(f, 'r')} ${this.supplierCond(f, 'r')}
-      GROUP BY r."supplierId"`);
+      GROUP BY r."supplierId", r."branchId"`);
   }
 
-  /** Phần phân bổ của phiếu chi chưa huỷ theo `paidAt`, vào phiếu nhập thuộc phạm vi chi nhánh. */
+  /**
+   * Phần phân bổ của phiếu chi chưa huỷ theo `paidAt`, vào phiếu nhập thuộc phạm vi chi nhánh (chi nhánh = chi nhánh của
+   * phiếu nhập). `count` là `COUNT(DISTINCT)` trong TỪNG chi nhánh: phiếu chi phân bổ vào phiếu nhập của nhiều chi nhánh
+   * bị đếm ở mỗi chi nhánh, nên cộng lại có thể thừa — service chỉ dùng như cờ "có phát sinh", không trả ra như số phiếu.
+   */
   payments(f: SupplierReportFilter): Promise<DebtComponentRow[]> {
     return this.component(Prisma.sql`
-      SELECT p."supplierId" AS "supplierId",
+      SELECT p."supplierId" AS "supplierId", r."branchId" AS "branchId",
         COALESCE(SUM(a."amount") FILTER (WHERE p."paidAt" < ${f.start}), 0)::bigint AS opening,
         COALESCE(SUM(a."amount") FILTER (WHERE p."paidAt" >= ${f.start}), 0)::bigint AS period,
         (COUNT(DISTINCT p."id") FILTER (WHERE p."paidAt" >= ${f.start}))::int AS count
       FROM "supplier_payments" p
       JOIN "supplier_payment_allocations" a ON a."paymentId" = p."id"
-      ${f.branchIds ? Prisma.sql`JOIN "goods_receipts" r ON r."id" = a."receiptId"` : Prisma.empty}
+      JOIN "goods_receipts" r ON r."id" = a."receiptId"
       WHERE p."cancelledAt" IS NULL AND p."paidAt" < ${f.end}
         ${this.branchCond(f, 'r')} ${this.supplierCond(f, 'p')}
-      GROUP BY p."supplierId"`);
+      GROUP BY p."supplierId", r."branchId"`);
   }
 
   /** Phiếu trả NCC CONFIRMED theo `confirmedAt`: phần giảm nợ = `totalAmount − supplierPaid`. */
   returns(f: SupplierReportFilter): Promise<DebtComponentRow[]> {
     return this.component(Prisma.sql`
-      SELECT t."supplierId" AS "supplierId",
+      SELECT t."supplierId" AS "supplierId", t."branchId" AS "branchId",
         COALESCE(SUM(t."totalAmount" - t."supplierPaid") FILTER (WHERE t."confirmedAt" < ${f.start}), 0)::bigint AS opening,
         COALESCE(SUM(t."totalAmount" - t."supplierPaid") FILTER (WHERE t."confirmedAt" >= ${f.start}), 0)::bigint AS period,
         (COUNT(*) FILTER (WHERE t."confirmedAt" >= ${f.start}))::int AS count
@@ -82,20 +93,20 @@ export class SupplierReportRepository {
       WHERE t."type" = 'RETURN_TO_SUPPLIER' AND t."status" = 'CONFIRMED' AND t."isDeleted" = false
         AND t."supplierId" IS NOT NULL AND t."confirmedAt" < ${f.end}
         ${this.branchCond(f, 't')} ${this.supplierCond(f, 't')}
-      GROUP BY t."supplierId"`);
+      GROUP BY t."supplierId", t."branchId"`);
   }
 
   /** Điều chỉnh nợ chưa huỷ theo `adjustedAt`, chi nhánh lập trong phạm vi: tổng `delta`. */
   adjustments(f: SupplierReportFilter): Promise<DebtComponentRow[]> {
     return this.component(Prisma.sql`
-      SELECT x."supplierId" AS "supplierId",
+      SELECT x."supplierId" AS "supplierId", x."branchId" AS "branchId",
         COALESCE(SUM(x."delta") FILTER (WHERE x."adjustedAt" < ${f.start}), 0)::bigint AS opening,
         COALESCE(SUM(x."delta") FILTER (WHERE x."adjustedAt" >= ${f.start}), 0)::bigint AS period,
         (COUNT(*) FILTER (WHERE x."adjustedAt" >= ${f.start}))::int AS count
       FROM "supplier_debt_adjustments" x
       WHERE x."cancelledAt" IS NULL AND x."adjustedAt" < ${f.end}
         ${this.branchCond(f, 'x')} ${this.supplierCond(f, 'x')}
-      GROUP BY x."supplierId"`);
+      GROUP BY x."supplierId", x."branchId"`);
   }
 
   /** Hàng nhập nhiều nhất trong kỳ theo Σ `totalPrice` (dòng chưa xoá, phiếu CONFIRMED). */
@@ -129,6 +140,14 @@ export class SupplierReportRepository {
     return this.prisma.$queryRaw<SupplierNameRow[]>(
       Prisma.sql`SELECT s."id", s."code", s."name" FROM "suppliers" s WHERE s."id" = ANY(${ids}::uuid[])`,
     );
+  }
+
+  /** Chi nhánh cho bảng theo chi nhánh: mọi chi nhánh chưa xoá trong phạm vi, cộng chi nhánh (kể cả đã xoá) có số liệu. */
+  branches(branchIds: string[] | undefined, withIds: string[]): Promise<BranchNameRow[]> {
+    const only = branchIds ? Prisma.sql` AND b."id" = ANY(${branchIds}::uuid[])` : Prisma.empty;
+    return this.prisma.$queryRaw<BranchNameRow[]>(Prisma.sql`
+      SELECT b."id", b."name" FROM "branches" b
+      WHERE (b."isDeleted" = false OR b."id" = ANY(${withIds}::uuid[]))${only}`);
   }
 
   private component(query: Prisma.Sql): Promise<DebtComponentRow[]> {

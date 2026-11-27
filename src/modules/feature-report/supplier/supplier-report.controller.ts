@@ -25,7 +25,9 @@ export class SupplierReportController {
       'Ngày = ngày giờ VN. Nợ cuối kỳ = nợ đầu kỳ + nhập − trả (phần NCC chưa hoàn) − chi + điều chỉnh, cùng công thức sổ nợ NCC; ' +
       'chứng từ đã huỷ/xoá tính 0. NCC hiện nếu có phát sinh trong kỳ hoặc nợ đầu kỳ khác 0, giảm dần theo tiền nhập. ' +
       'Người không có quyền supplier-debt:read nhận null ở openingDebt, closingDebt, paidAmount, adjustmentAmount (cả totals) ' +
-      'và không thấy NCC chỉ vì nợ cũ. `topProducts` tối đa 10 theo tiền nhập. Cache tối đa 60 giây.',
+      'và không thấy NCC chỉ vì nợ cũ. `byBranch`: mỗi chi nhánh trong phạm vi một dòng (kể cả 0đ), cùng các cột như totals; ' +
+      'phiếu chi tính vào chi nhánh của phiếu nhập được phân bổ; tổng các dòng = totals. `topProducts` tối đa 10 theo tiền ' +
+      'nhập. Cache tối đa 60 giây.',
   })
   supplier(@Query() query: SupplierReportQuery, @CurrentActor() actor: RequestActor) {
     return this.service.supplierReport(query, actor);

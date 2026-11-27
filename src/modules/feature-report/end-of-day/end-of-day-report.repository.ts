@@ -39,6 +39,19 @@ export interface StaffRow {
   netAmount: bigint;
 }
 
+export interface BranchRow {
+  branchId: string;
+  branchName: string;
+  orderCount: number;
+  cancelledCount: number;
+  grossAmount: bigint;
+  refundAmount: bigint;
+  receiptCount: number;
+  receiptAmount: bigint;
+  paymentCount: number;
+  paymentAmount: bigint;
+}
+
 /** Hình thức thu tại quầy có trong báo cáo (COD không phát sinh dòng tiền trong ngày). */
 const SALE_METHODS = ['CASH', 'BANK_TRANSFER', 'CARD'];
 
@@ -96,6 +109,62 @@ export class EndOfDayReportRepository {
       WHERE sp."cancelledAt" IS NULL
         AND sp."paidAt" >= ${range.start} AND sp."paidAt" < ${range.end}${this.only('sp."branchId"', branchIds)}
       GROUP BY sp."method"`);
+  }
+
+  /**
+   * Mỗi chi nhánh trong phạm vi một dòng (kể cả chi nhánh 0đ; chi nhánh đã xoá chỉ hiện nếu có phát sinh): cùng điều
+   * kiện với các tổng ở trên, mỗi nguồn một `GROUP BY "branchId"` rồi ghép theo chi nhánh — tổng các dòng = tổng báo cáo.
+   */
+  byBranch(range: DayRange, branchIds?: string[]): Promise<BranchRow[]> {
+    return this.prisma.$queryRaw<BranchRow[]>(Prisma.sql`
+      WITH pay AS (
+        SELECT o."branchId" AS "branchId",
+               SUM(p."amount") FILTER (WHERE p."kind" = 'PAYMENT') AS "gross",
+               SUM(p."amount") FILTER (WHERE p."kind" = 'REFUND') AS "refund"
+        FROM payments p
+        JOIN orders o ON o."id" = p."orderId"
+        WHERE p."paidAt" >= ${range.start} AND p."paidAt" < ${range.end}
+          AND p."status" = 'SUCCESS' AND p."method"::text = ANY(${SALE_METHODS})${this.only('o."branchId"', branchIds)}
+        GROUP BY o."branchId"
+      ), done AS (
+        SELECT o."branchId" AS "branchId", COUNT(*) AS "n"
+        FROM orders o
+        WHERE o."completedAt" >= ${range.start} AND o."completedAt" < ${range.end}
+          AND o."status" = 'COMPLETED' AND o."isDeleted" = false${this.only('o."branchId"', branchIds)}
+        GROUP BY o."branchId"
+      ), cancelled AS (
+        SELECT o."branchId" AS "branchId", COUNT(*) AS "n"
+        FROM orders o
+        WHERE o."cancelledAt" >= ${range.start} AND o."cancelledAt" < ${range.end}
+          AND o."completedAt" IS NOT NULL AND o."isDeleted" = false${this.only('o."branchId"', branchIds)}
+        GROUP BY o."branchId"
+      ), rec AS (
+        SELECT g."branchId" AS "branchId", COUNT(*) AS "n", SUM(g."totalAmount") AS "amount"
+        FROM goods_receipts g
+        WHERE g."status" = 'CONFIRMED' AND g."isDeleted" = false
+          AND g."confirmedAt" >= ${range.start} AND g."confirmedAt" < ${range.end}${this.only('g."branchId"', branchIds)}
+        GROUP BY g."branchId"
+      ), sup AS (
+        SELECT sp."branchId" AS "branchId", COUNT(*) AS "n", SUM(sp."amount") AS "amount"
+        FROM supplier_payments sp
+        WHERE sp."cancelledAt" IS NULL
+          AND sp."paidAt" >= ${range.start} AND sp."paidAt" < ${range.end}${this.only('sp."branchId"', branchIds)}
+        GROUP BY sp."branchId"
+      )
+      SELECT b."id" AS "branchId", b."name" AS "branchName",
+             COALESCE(done."n", 0)::int AS "orderCount", COALESCE(cancelled."n", 0)::int AS "cancelledCount",
+             COALESCE(pay."gross", 0)::bigint AS "grossAmount", COALESCE(pay."refund", 0)::bigint AS "refundAmount",
+             COALESCE(rec."n", 0)::int AS "receiptCount", COALESCE(rec."amount", 0)::bigint AS "receiptAmount",
+             COALESCE(sup."n", 0)::int AS "paymentCount", COALESCE(sup."amount", 0)::bigint AS "paymentAmount"
+      FROM branches b
+      LEFT JOIN pay ON pay."branchId" = b."id"
+      LEFT JOIN done ON done."branchId" = b."id"
+      LEFT JOIN cancelled ON cancelled."branchId" = b."id"
+      LEFT JOIN rec ON rec."branchId" = b."id"
+      LEFT JOIN sup ON sup."branchId" = b."id"
+      WHERE (b."isDeleted" = false OR pay."branchId" IS NOT NULL OR done."branchId" IS NOT NULL
+             OR cancelled."branchId" IS NOT NULL OR rec."branchId" IS NOT NULL OR sup."branchId" IS NOT NULL)${this.only('b."id"', branchIds)}
+      ORDER BY (COALESCE(pay."gross", 0) - COALESCE(pay."refund", 0)) DESC, b."name", b."id"`);
   }
 
   /** Top sản phẩm theo tiền của đơn thu trong ngày còn COMPLETED. */

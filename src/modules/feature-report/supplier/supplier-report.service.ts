@@ -29,6 +29,20 @@ export interface SupplierReportRow {
   closingDebt: number | null;
 }
 
+/** Một chi nhánh trong phạm vi; tổng các dòng = `totals`. Trường nợ `null` như `SupplierReportRow`. */
+export interface SupplierReportBranchRow {
+  branchId: string;
+  branchName: string;
+  receiptCount: number;
+  purchaseAmount: number;
+  returnCount: number;
+  returnAmount: number;
+  paidAmount: number | null;
+  adjustmentAmount: number | null;
+  openingDebt: number | null;
+  closingDebt: number | null;
+}
+
 export interface SupplierReportResponse {
   totals: {
     purchaseAmount: number;
@@ -39,6 +53,7 @@ export interface SupplierReportResponse {
     closingDebt: number | null;
   };
   bySupplier: SupplierReportRow[];
+  byBranch: SupplierReportBranchRow[];
   topProducts: { productId: string; productName: string; qtyBase: number; amount: number }[];
 }
 
@@ -112,19 +127,25 @@ export class SupplierReportService {
     ]);
 
     const acc = new Map<string, Acc>();
-    const at = (id: string) => {
-      let a = acc.get(id);
-      if (!a) acc.set(id, (a = emptyAcc()));
+    const accBranch = new Map<string, Acc>();
+    const at = (map: Map<string, Acc>, id: string) => {
+      let a = map.get(id);
+      if (!a) map.set(id, (a = emptyAcc()));
       return a;
     };
-    for (const r of receipts)
-      Object.assign(at(r.supplierId), { receiptCount: r.count, purchase: r.period, openingPurchase: r.opening });
-    for (const r of returns)
-      Object.assign(at(r.supplierId), { returnCount: r.count, returned: r.period, openingReturned: r.opening });
-    for (const r of payments)
-      Object.assign(at(r.supplierId), { payCount: r.count, paid: r.period, openingPaid: r.opening });
-    for (const r of adjustments)
-      Object.assign(at(r.supplierId), { adjCount: r.count, adjusted: r.period, openingAdjusted: r.opening });
+    const add = (rows: DebtComponentRow[], count: keyof Acc, period: keyof Acc, opening: keyof Acc) => {
+      for (const r of rows) {
+        for (const a of [at(acc, r.supplierId), at(accBranch, r.branchId)]) {
+          (a[count] as number) += r.count;
+          (a[period] as bigint) += r.period;
+          (a[opening] as bigint) += r.opening;
+        }
+      }
+    };
+    add(receipts, 'receiptCount', 'purchase', 'openingPurchase');
+    add(returns, 'returnCount', 'returned', 'openingReturned');
+    add(payments, 'payCount', 'paid', 'openingPaid');
+    add(adjustments, 'adjCount', 'adjusted', 'openingAdjusted');
 
     // Có phát sinh trong kỳ; người xem nợ còn thấy NCC chỉ có nợ đầu kỳ. Người không xem nợ không được biết nợ cũ.
     const shown = [...acc.entries()].filter(([, a]) => {
@@ -132,7 +153,11 @@ export class SupplierReportService {
       const activity = a.receiptCount > 0 || a.returnCount > 0 || a.payCount > 0 || a.adjCount > 0;
       return activity || (canSeeDebt && opening !== 0n);
     });
-    const names = new Map((await this.repo.suppliersByIds(shown.map(([id]) => id))).map((s) => [s.id, s] as const));
+    const [supplierNames, branchNames] = await Promise.all([
+      this.repo.suppliersByIds(shown.map(([id]) => id)),
+      this.repo.branches(branchIds, [...accBranch.keys()]),
+    ]);
+    const names = new Map(supplierNames.map((s) => [s.id, s] as const));
 
     const total = { purchase: 0n, returned: 0n, paid: 0n, adjusted: 0n, opening: 0n, closing: 0n };
     const rows: { row: SupplierReportRow; purchase: bigint }[] = [];
@@ -165,6 +190,37 @@ export class SupplierReportService {
       x.purchase === y.purchase ? x.row.supplierId.localeCompare(y.row.supplierId) : x.purchase > y.purchase ? -1 : 1,
     );
 
+    const debt = (v: bigint) => (canSeeDebt ? Number(v) : null);
+    const byBranch = branchNames
+      .map((b) => {
+        const a = accBranch.get(b.id) ?? emptyAcc();
+        const opening = a.openingPurchase - a.openingReturned - a.openingPaid + a.openingAdjusted;
+        const closing = opening + a.purchase - a.returned - a.paid + a.adjusted;
+        return {
+          purchase: a.purchase,
+          row: {
+            branchId: b.id,
+            branchName: b.name,
+            receiptCount: a.receiptCount,
+            purchaseAmount: Number(a.purchase),
+            returnCount: a.returnCount,
+            returnAmount: Number(a.returned),
+            paidAmount: debt(a.paid),
+            adjustmentAmount: debt(a.adjusted),
+            openingDebt: debt(opening),
+            closingDebt: debt(closing),
+          } satisfies SupplierReportBranchRow,
+        };
+      })
+      .sort((x, y) =>
+        x.purchase === y.purchase
+          ? x.row.branchName.localeCompare(y.row.branchName) || x.row.branchId.localeCompare(y.row.branchId)
+          : x.purchase > y.purchase
+            ? -1
+            : 1,
+      )
+      .map((b) => b.row);
+
     const report: SupplierReportResponse = {
       totals: {
         purchaseAmount: Number(total.purchase),
@@ -175,6 +231,7 @@ export class SupplierReportService {
         closingDebt: canSeeDebt ? Number(total.closing) : null,
       },
       bySupplier: rows.map((r) => r.row),
+      byBranch,
       topProducts: top.map((p) => ({
         productId: p.productId,
         productName: p.productName,

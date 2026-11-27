@@ -23,6 +23,7 @@ describe('EndOfDayReportService', () => {
     supplierPayments: jest.fn(),
     topProducts: jest.fn(),
     byStaff: jest.fn(),
+    byBranch: jest.fn(),
   };
   let service: EndOfDayReportService;
 
@@ -35,6 +36,7 @@ describe('EndOfDayReportService', () => {
     repo.supplierPayments.mockResolvedValue([]);
     repo.topProducts.mockResolvedValue([]);
     repo.byStaff.mockResolvedValue([]);
+    repo.byBranch.mockResolvedValue([]);
     service = new EndOfDayReportService(
       repo as unknown as EndOfDayReportRepository,
       new InMemoryReportCache(() => now),
@@ -55,6 +57,20 @@ describe('EndOfDayReportService', () => {
     ]);
     repo.topProducts.mockResolvedValue([{ productId: 'p1', productName: 'A', qtyBase: 3n, amount: 90_000n }]);
     repo.byStaff.mockResolvedValue([{ staffId: 's1', staffName: 'Lan', orderCount: 5, netAmount: 2_800_000n }]);
+    repo.byBranch.mockResolvedValue([
+      {
+        branchId: BRANCH_1,
+        branchName: 'CN1',
+        orderCount: 5,
+        cancelledCount: 1,
+        grossAmount: 3_000_000n,
+        refundAmount: 200_000n,
+        receiptCount: 2,
+        receiptAmount: 7_000_000n,
+        paymentCount: 3,
+        paymentAmount: 800_000n,
+      },
+    ]);
 
     const report = await service.endOfDay({ date: DATE }, admin);
 
@@ -78,6 +94,21 @@ describe('EndOfDayReportService', () => {
       },
       topProducts: [{ productId: 'p1', productName: 'A', qtyBase: 3, amount: 90_000 }],
       byStaff: [{ staffId: 's1', staffName: 'Lan', orderCount: 5, netAmount: 2_800_000 }],
+      byBranch: [
+        {
+          branchId: BRANCH_1,
+          branchName: 'CN1',
+          orderCount: 5,
+          cancelledCount: 1,
+          grossAmount: 3_000_000,
+          refundAmount: 200_000,
+          netAmount: 2_800_000,
+          receiptCount: 2,
+          receiptAmount: 7_000_000,
+          paymentCount: 3,
+          paymentAmount: 800_000,
+        },
+      ],
     });
   });
 
@@ -117,9 +148,12 @@ describe('EndOfDayReportService', () => {
     expect(repo.paymentsByMethod).not.toHaveBeenCalled();
   });
 
-  it('ADMIN rỗng → toàn chuỗi (undefined)', async () => {
+  it('ADMIN rỗng → toàn chuỗi (undefined); byBranch cùng phạm vi', async () => {
     await service.endOfDay({ date: DATE }, admin);
     expect(repo.paymentsByMethod).toHaveBeenCalledWith(expect.anything(), undefined);
+    expect(repo.byBranch).toHaveBeenCalledWith(expect.anything(), undefined);
+    await service.endOfDay({ date: DATE }, pm);
+    expect(repo.byBranch).toHaveBeenCalledWith(expect.anything(), [BRANCH_1]);
   });
 
   it('cache theo ngày + phạm vi: dùng lại trong 60s, hết hạn đọc lại; khác ngày / ADMIN-PM không dùng chung', async () => {

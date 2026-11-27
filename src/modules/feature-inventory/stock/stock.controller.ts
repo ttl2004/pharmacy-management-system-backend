@@ -6,6 +6,7 @@ import { AuthzGuard } from '../../feature-auth/authz/guards/auth.guard';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
 import {
+  ExpirySummaryQuery,
   LowStockQuery,
   MovementSummaryQuery,
   NearExpiryQuery,
@@ -97,6 +98,25 @@ export class StockController {
   @ApiOperation({ description: 'Lô còn hàng hết hạn trong N ngày tới (gồm cả lô đã hết hạn).' })
   nearExpiry(@Query() query: NearExpiryQuery, @CurrentActor() actor: RequestActor) {
     return this.stockQueryService.nearExpiry(query, actor);
+  }
+
+  @Get('reports/expiry-summary')
+  @ApiOperation({
+    description:
+      'Số lô còn tồn đã hết hạn / cận hạn (còn 1..days ngày), tổng và từng chi nhánh (byBranch, chỉ chi nhánh có lô). ADMIN bỏ trống branchId = toàn chuỗi.',
+  })
+  @ApiOkResponse({
+    schema: {
+      example: {
+        days: 30,
+        expired: 3,
+        expiring: 5,
+        byBranch: [{ branchId: 'uuid', branchCode: 'CN001', branchName: 'Chi nhánh 1', expired: 3, expiring: 5 }],
+      },
+    },
+  })
+  expirySummary(@Query() query: ExpirySummaryQuery, @CurrentActor() actor: RequestActor) {
+    return this.stockQueryService.expirySummary(query, actor);
   }
 
   @Get('reports/movement-summary')

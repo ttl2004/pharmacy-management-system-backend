@@ -65,6 +65,22 @@ export class NearExpiryQuery extends BranchFilter {
   days?: number = 90;
 }
 
+/** Đếm lô hết hạn / cận hạn — không phân trang (một dòng mỗi chi nhánh). */
+export class ExpirySummaryQuery {
+  @IsOptional()
+  @IsUUID()
+  @ApiPropertyOptional({ description: 'ADMIN bỏ trống = toàn chuỗi; PM/nhân viên bỏ trống hoặc đúng chi nhánh mình, khác → 1506' })
+  branchId?: string;
+
+  @IsOptional()
+  @Transform(toInt)
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  @ApiPropertyOptional({ default: 30, description: 'Cận hạn = còn 1..N ngày (lô hết hạn hôm nay tính là đã hết hạn)' })
+  days?: number = 30;
+}
+
 export class MovementSummaryQuery {
   @IsOptional()
   @IsUUID()

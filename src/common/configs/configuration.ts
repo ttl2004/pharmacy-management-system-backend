@@ -28,6 +28,12 @@ export default () => {
       },
     },
 
+    // Thiếu url = tắt nhập thuốc từ ảnh (endpoint bản nháp trả OCR_SERVICE_UNAVAILABLE).
+    ocr: {
+      url: env.OCR_SERVICE_URL,
+      apiKey: env.OCR_SERVICE_API_KEY,
+    },
+
     superAdmin: {
       email: env.SUPER_ADMIN_EMAIL,
       username: env.SUPER_ADMIN_USERNAME,

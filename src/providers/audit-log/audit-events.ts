@@ -111,6 +111,9 @@ export const AUDIT_EVENTS = {
   'REPORT.RECONCILE_MISMATCH': { action: 'UPDATE', severity: 2, reasonRequired: false },
   'REPORT.RECONCILE_TRIGGERED': { action: 'UPDATE', severity: 1, reasonRequired: false },
   'DRUG.SYNCED': { action: 'UPDATE', severity: 1, reasonRequired: false },
+  /** Thuốc MANUAL (nhập tay từ tờ HDSD): tạo khi lưu bản nháp, sửa khi ghi đè hoặc sửa qua sửa sản phẩm. */
+  'DRUG.CREATED': { action: 'CREATE', severity: 0, reasonRequired: false },
+  'DRUG.UPDATED': { action: 'UPDATE', severity: 0, reasonRequired: false },
 } as const satisfies Record<string, AuditEventDef>;
 
 export type AuditEvent = keyof typeof AUDIT_EVENTS;

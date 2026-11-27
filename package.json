@@ -35,6 +35,7 @@
     "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^11.2.0",
     "@fastify/helmet": "^13.0.2",
+    "@fastify/multipart": "^9.0.3",
     "@fastify/static": "^10.1.10",
     "@golevelup/nestjs-rabbitmq": "^9.0.0",
     "@nestjs-modules/mailer": "^2.3.4",

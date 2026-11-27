@@ -7,6 +7,7 @@ import compress from '@fastify/compress';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -51,6 +52,10 @@ async function bootstrap() {
   });
 
   await app.register(cookie);
+
+  // Tải ảnh tờ HDSD (POST /drug-leaflet-draft): tối đa 20 file x 5 MB. Multipart đọc theo luồng nên không chịu `bodyLimit`
+  // (4 MB) của adapter; tổng dung lượng bị chặn bởi `limits` này (<= 100 MB).
+  await app.register(multipart, { limits: { files: 20, fileSize: 5 * 1024 * 1024 } });
 
   // Ảnh sản phẩm đã tải lên (ProductImageService) — phục vụ tĩnh, không cần đăng nhập như ảnh công khai storefront.
   await mkdir(join(UPLOAD_ROOT, 'products'), { recursive: true });

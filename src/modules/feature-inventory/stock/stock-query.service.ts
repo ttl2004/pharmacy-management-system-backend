@@ -171,20 +171,32 @@ export class StockQueryService {
         message: `Kỳ báo cáo tối đa ${MAX_SUMMARY_DAYS} ngày`,
       });
     }
-    const rows = await this.stock.findMovementSummary({
+    const filter = {
       branchId,
       from: vietnamDayStartUtc(query.fromDate),
       toExclusive: vietnamDayStartUtc(addDaysToDateOnly(query.toDate, 1)),
-    });
+    };
+    // Cùng bộ lọc/phạm vi: dòng theo sản phẩm + tổng theo chi nhánh (byBranch, chỉ khi xem toàn chuỗi — đã lọc một
+    // chi nhánh thì bỏ câu thứ hai, trả mảng rỗng).
+    const [rows, byBranch, showCost] = await Promise.all([
+      this.stock.findMovementSummary(filter),
+      branchId ? Promise.resolve([]) : this.stock.findMovementSummaryByBranch(filter),
+      canSeeCost(this.permissions, actor.user),
+    ]);
     // Cột giá trị tiền theo giá vốn: ẩn (null) với người không thấy được giá vốn (K8).
-    const showCost = await canSeeCost(this.permissions, actor.user);
+    const hideValue = <T extends object>(row: T) => ({
+      ...row,
+      openingValue: null,
+      inValue: null,
+      outValue: null,
+      closingValue: null,
+    });
     return {
       branchId: branchId ?? null,
       fromDate: query.fromDate,
       toDate: query.toDate,
-      rows: showCost
-        ? rows
-        : rows.map((row) => ({ ...row, openingValue: null, inValue: null, outValue: null, closingValue: null })),
+      rows: showCost ? rows : rows.map(hideValue),
+      byBranch: showCost ? byBranch : byBranch.map(hideValue),
     };
   }
 

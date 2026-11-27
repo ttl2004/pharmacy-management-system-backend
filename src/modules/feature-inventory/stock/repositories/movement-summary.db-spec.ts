@@ -183,6 +183,57 @@ describe('StockQueryRepository.findMovementSummary — bảng tháng (db)', () =
     expectMatches(await repo.findMovementSummary(q), await oracle(null, q.from, q.toExclusive));
   });
 
+  it.each(cases)(
+    'theo chi nhánh: kỳ %s → %s, chi nhánh %s — khớp cộng sổ và khớp tổng các dòng sản phẩm',
+    async (fromDate, toDate, branch) => {
+      await seedHistory();
+      const p = period(fromDate, toDate);
+      const filter = { ...p, branchId: branch === null ? undefined : base.branches[branch].id };
+      for (let i = 0; i < 2; i++) {
+        const byBranch = await repo.findMovementSummaryByBranch(filter);
+        const branches = branch === null ? [0, 1] : [branch];
+        const expected: Record<string, unknown>[] = [];
+        for (const b of branches) {
+          const perProduct = [...(await oracle(b, p.from, p.toExclusive)).values()];
+          if (!perProduct.length) continue;
+          const sum = (k: string) => perProduct.reduce((acc, r) => acc + r[k], 0);
+          const opening = sum('opening');
+          const openingValue = sum('openingValue');
+          expected.push({
+            branchId: base.branches[b].id,
+            branchCode: base.branches[b].code,
+            branchName: base.branches[b].name,
+            opening,
+            inQuantity: sum('inQuantity'),
+            outQuantity: sum('outQuantity'),
+            closing: opening + sum('inQuantity') - sum('outQuantity'),
+            openingValue,
+            inValue: sum('inValue'),
+            outValue: sum('outValue'),
+            closingValue: openingValue + sum('inValue') - sum('outValue'),
+          });
+        }
+        expect(byBranch).toEqual(expected);
+      }
+    },
+  );
+
+  it('theo chi nhánh: tồn cuối, nhập, xuất (SL + giá trị) cộng lại = tổng dòng sản phẩm toàn chuỗi, kể cả chuyển kho', async () => {
+    await seedHistory();
+    // Chuyển kho nội bộ trong kỳ: xuất ở CN1, nhập ở CN2 — cả hai cách gom đều tính vào nhập/xuất.
+    await insert([
+      { branch: 0, product: 0, at: vn('2026-09-05'), type: 'TRANSFER_OUT', qty: -6, cost: 500 },
+      { branch: 1, product: 0, at: vn('2026-09-06'), type: 'TRANSFER_IN', qty: 6, cost: 500 },
+    ]);
+    const p = period('2026-08-01', '2026-10-31');
+    const [rows, byBranch] = await Promise.all([repo.findMovementSummary(p), repo.findMovementSummaryByBranch(p)]);
+    const keys = ['closing', 'closingValue', 'inQuantity', 'outQuantity', 'inValue', 'outValue'] as const;
+    const total = (list: Record<(typeof keys)[number], number>[]) =>
+      Object.fromEntries(keys.map((k) => [k, list.reduce((acc, r) => acc + r[k], 0)]));
+    expect(total(byBranch)).toEqual(total(rows));
+    expect(byBranch).toHaveLength(2);
+  });
+
   it('tổng vượt int4 không lỗi', async () => {
     await insert([
       { branch: 0, product: 0, at: vn('2026-06-01'), type: 'IMPORT', qty: 2_000_000_000, cost: 1 },

@@ -19,6 +19,7 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import { DuplicateResolutionRequest, ManualDrugInput } from '../../drug-leaflet/dtos/manual-drug.request';
 import { ProductExtraFieldsRequest } from './product-extra-fields.request';
 
 const CODE_PATTERN = /^[A-Z0-9_-]+$/;
@@ -274,4 +275,26 @@ export class UpdateProductRequest extends ProductExtraFieldsRequest {
     description: 'Trạng thái đầy đủ mới của cấu hình đơn vị bán; bỏ trống để giữ nguyên',
   })
   units?: ProductUnitRequest[];
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ManualDrugInput)
+  @ApiPropertyOptional({
+    type: ManualDrugInput,
+    description:
+      'Sửa thông tin thuốc nhập tay (MANUAL) đang gắn với sản phẩm, dùng chung cho mọi sản phẩm gắn thuốc này. ' +
+      'Thuốc DQG gửi khối này trả DRUG_NOT_MANUAL (1618)',
+  })
+  drug?: ManualDrugInput;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => DuplicateResolutionRequest)
+  @ApiPropertyOptional({
+    type: DuplicateResolutionRequest,
+    description:
+      'Gửi lại sau lỗi trùng số đăng ký (1616/1617) khi đổi số đăng ký trong khối `drug`: LINK_DQG chuyển sản phẩm sang ' +
+      'thuốc DQG, OVERWRITE_MANUAL chuyển sang thuốc nhập tay kia và ghi đè nó',
+  })
+  resolution?: DuplicateResolutionRequest;
 }

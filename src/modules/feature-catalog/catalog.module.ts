@@ -10,6 +10,14 @@ import { DrugSourceClient } from './drug/drug-source.client';
 import { DrugController } from './drug/drug.controller';
 import { DrugService } from './drug/drug.service';
 import { DrugRepository } from './drug/repositories/drug.repository';
+import { DrugLeafletDraftService } from './drug-leaflet/drug-leaflet-draft.service';
+import { DrugLeafletFollowUpService } from './drug-leaflet/drug-leaflet-follow-up.service';
+import { DrugLeafletSaveService } from './drug-leaflet/drug-leaflet-save.service';
+import { DrugLeafletController } from './drug-leaflet/drug-leaflet.controller';
+import { ManualDrugWriter } from './drug-leaflet/manual-drug.writer';
+import { OcrServiceClient } from './drug-leaflet/ocr-service.client';
+import { RegistrationDuplicateChecker } from './drug-leaflet/registration-duplicate.checker';
+import { DrugLeafletDraftRepository } from './drug-leaflet/repositories/drug-leaflet-draft.repository';
 import { LocationController } from './location/location.controller';
 import { LocationService } from './location/location.service';
 import { LocationRepository } from './location/repositories/location.repository';
@@ -45,6 +53,7 @@ import { PriceBookRowsRepository } from './price-book/repositories/price-book-ro
     RouteController,
     PriceBookController,
     DrugController,
+    DrugLeafletController,
   ],
   providers: [
     CatalogTransactions,
@@ -68,6 +77,13 @@ import { PriceBookRowsRepository } from './price-book/repositories/price-book-ro
     DrugService,
     DrugRepository,
     DrugSourceClient,
+    OcrServiceClient,
+    DrugLeafletDraftRepository,
+    DrugLeafletDraftService,
+    RegistrationDuplicateChecker,
+    ManualDrugWriter,
+    DrugLeafletFollowUpService,
+    DrugLeafletSaveService,
   ],
   // Repository được export để `StorefrontModule` dùng lại truy vấn đọc công khai, không viết lại.
   exports: [

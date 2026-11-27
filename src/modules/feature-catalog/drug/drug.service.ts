@@ -94,6 +94,7 @@ export class DrugService extends AbstractBaseService<Drug> {
     const filter: BaseWhere<Drug> = {};
     if (query.status) filter.status = query.status;
     if (query.isPrescription !== undefined) filter.isPrescription = query.isPrescription;
+    if (query.source) filter.source = query.source;
 
     return this.drugRepository.findManyWithPagination(filter, {
       page: query.page,
@@ -112,9 +113,10 @@ export class DrugService extends AbstractBaseService<Drug> {
   }
 
   /**
-   * Kéo toàn bộ danh mục từ nguồn CSDL Dược và ghi đè bản sao cục bộ. Cả lần chạy giữ khoá đồng bộ từ TRƯỚC khi tải
-   * nguồn, nên hai lần bấm gần nhau không thể để snapshot cũ ghi sau snapshot mới. Mọi lỗi giữa chừng (kể cả rào tỉ lệ
-   * INACTIVE) đều rollback — không bao giờ để lại danh mục ghi dở. Nhật ký ghi trong cùng transaction.
+   * Kéo toàn bộ danh mục từ nguồn CSDL Dược và ghi đè bản sao cục bộ (chỉ thuốc DQG, thuốc MANUAL nhập tay không bị
+   * đụng). Cả lần chạy giữ khoá đồng bộ từ TRƯỚC khi tải nguồn, nên hai lần bấm gần nhau không thể để snapshot cũ ghi
+   * sau snapshot mới. Mọi lỗi giữa chừng (kể cả rào tỉ lệ INACTIVE) đều rollback - không bao giờ để lại danh mục ghi
+   * dở. Nhật ký ghi trong cùng transaction.
    */
   sync(actor: RequestActor, force = false): Promise<DrugSyncResult> {
     const callerId = actor.user.userId;

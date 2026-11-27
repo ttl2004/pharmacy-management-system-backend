@@ -1553,3 +1553,80 @@ model SalesReconcileRun {
   @@index([startedAt(sort: Desc)])
   @@map("sales_reconcile_runs")
 }
+
+// ============================================================
+//  DỮ LIỆU THAM CHIẾU TƯƠNG TÁC THUỐC (DDInter) — CHỈ ĐỌC
+//  - Nạp từ 4 file CSV bằng `npm run import:interaction-data` (mỗi bảng thay toàn bộ trong 1 transaction); app không ghi.
+//  - Khoá theo mã DDInter (DDInterXXX) / số đăng ký thuốc; tên cột giữ ĐÚNG như header CSV (kể cả hoa/thường).
+//  - KHÔNG có khoá ngoại, cố ý: dữ liệu ngoài, nạp lại toàn bộ được, không ràng buộc với products/drugs.
+// ============================================================
+
+/// Cặp thuốc tương tác (DDInter). Level: Major | Moderate | Minor | Unknown.
+model DdinterInteraction {
+  id          Int     @id @map("InteractionID")
+  ddinterIdA  String  @map("DDInterID_A") @db.VarChar(20)
+  drugA       String  @map("Drug_A")
+  ddinterIdB  String  @map("DDInterID_B") @db.VarChar(20)
+  drugB       String  @map("Drug_B")
+  level       String  @map("Level") @db.VarChar(20)
+  interaction String? @map("Interaction")
+  management  String? @map("Management")
+
+  @@index([ddinterIdA, ddinterIdB])
+  @@map("ddinter_interactions_final")
+}
+
+/// Thuốc – bệnh. level 1|2|3 ứng severity Minor|Moderate|Major.
+model DrugDiseaseInteraction {
+  id          Int     @id
+  drugId      String  @map("drug_id") @db.VarChar(20)
+  drugName    String  @map("drug_name")
+  level       Int?
+  severity    String  @db.VarChar(20)
+  diseaseName String  @map("disease_name")
+  description String?
+  references  String? @map("references")
+
+  @@index([drugId])
+  @@map("drug_disease_interactions")
+}
+
+/// Thuốc – thức ăn. level 1|2|3 ứng severity Minor|Moderate|Major.
+model DrugFoodInteraction {
+  id          Int     @id
+  drugId      String  @map("drug_id") @db.VarChar(20)
+  drugName    String  @map("drug_name")
+  level       Int?
+  severity    String  @db.VarChar(20)
+  foodName    String  @map("food_name")
+  description String?
+  management  String?
+  mechanism   String?
+  references  String? @map("references")
+
+  @@index([drugId])
+  @@map("drug_food_interactions")
+}
+
+/// Ánh xạ số đăng ký thuốc quốc gia → hoạt chất DDInter, mỗi hoạt chất một dòng (ingredientOrder). ddinterId null = chưa khớp.
+model NationalDrugDdinterMapping {
+  registrationNumber   String  @map("registration_number") @db.VarChar(100)
+  drugName             String  @map("drug_name")
+  drugGroup            String  @map("drug_group") @db.VarChar(50)
+  inferredRoute        String? @map("inferred_route") @db.VarChar(20)
+  ingredientTextRaw    String? @map("ingredient_text_raw")
+  ingredientOrder      Int     @map("ingredient_order")
+  ingredientName       String? @map("ingredient_name")
+  ingredientAlternates String? @map("ingredient_alternates")
+  matchMethod          String  @map("match_method") @db.VarChar(30)
+  ddinterId            String? @map("ddinter_id") @db.VarChar(20)
+  ddinterDrug          String? @map("ddinter_drug")
+  confidence           Float?
+  needsReview          Boolean @map("needs_review")
+  suggestedDdinterId   String? @map("suggested_ddinter_id") @db.VarChar(20)
+  suggestedDdinterDrug String? @map("suggested_ddinter_drug")
+  suggestedScore       Float?  @map("suggested_score")
+
+  @@id([registrationNumber, ingredientOrder])
+  @@map("national_drug_ddinter_mapping")
+}

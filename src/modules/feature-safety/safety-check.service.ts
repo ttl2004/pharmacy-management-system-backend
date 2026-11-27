@@ -1,13 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ProductType } from '@prisma/client';
-import { PrismaService } from 'src/common/databases/prisma.service';
 import { invalidReference } from 'src/modules/feature-inventory/core/inventory.error';
+import { buildDrugWarnings, buildInteractionCheck, emptyCheckResult } from './interaction-knowledge';
 import {
-  DrugWarningsResult,
-  InteractionCheckResult,
-  InteractionServiceClient,
-  InteractionSeverity,
-} from './interaction-service.client';
+  type CartProductRow,
+  interactionDataUnavailable,
+  InteractionKnowledgeRepository,
+} from './interaction-knowledge.repository';
+import type { InteractionCheckResult, InteractionSeverity } from './interaction.types';
 import type { ProductRef, SafetyCheckResult, SafetyWarning, UncheckedProduct } from './safety.types';
 
 const SEVERITY_RANK: Record<InteractionSeverity, number> = { major: 3, moderate: 2, minor: 1, unknown: 0 };
@@ -24,26 +24,30 @@ interface CartDrug extends ProductRef {
 }
 
 /**
- * Kiểm tra an toàn cho giỏ hàng: hàng hoá → thuốc trong danh mục (số đăng ký) → service tương tác (TTT-BE).
- * Kết quả trả theo **hàng hoá** của BE, không lộ số đăng ký cho FE phải tự ghép.
+ * Kiểm tra an toàn cho giỏ hàng: hàng hoá → thuốc trong danh mục (số đăng ký) → dữ liệu tương tác DDInter (trong DB).
+ * Mỗi lần kiểm tra là MỘT câu SQL (giỏ + dữ liệu tương tác). Kết quả trả theo **hàng hoá** của BE, không lộ số đăng ký
+ * cho FE phải tự ghép.
  */
 @Injectable()
 export class SafetyCheckService {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly client: InteractionServiceClient,
-  ) {}
+  private readonly logger = new Logger(SafetyCheckService.name);
+
+  constructor(private readonly repository: InteractionKnowledgeRepository) {}
 
   async check(productIds: string[]): Promise<SafetyCheckResult> {
-    const drugs = await this.loadCartDrugs(productIds);
+    const uniqueIds = [...new Set(productIds)];
+    const rows = await this.repository.loadForCheck(uniqueIds);
+    const drugs = toCartDrugs(uniqueIds, rows.products);
     const withNumber = drugs.filter((drug) => drug.registrationNumber);
     const productsByNumber = groupByRegistrationNumber(withNumber);
 
-    // Dưới 2 thuốc khác nhau thì không thể có cặp tương tác: không gọi service, để đơn 1 thuốc vẫn bán được khi service tắt.
-    const result =
-      productsByNumber.size >= 2
-        ? await this.client.checkInteractions([...productsByNumber.keys()])
-        : emptyCheckResult();
+    // Dưới 2 thuốc khác nhau thì không thể có cặp tương tác: bỏ qua phần tra (kể cả khi dữ liệu tương tác rỗng),
+    // để đơn 1 thuốc vẫn bán được như trước.
+    let result: InteractionCheckResult = emptyCheckResult();
+    if (productsByNumber.size >= 2) {
+      this.assertDataLoaded(rows.dataLoaded);
+      result = buildInteractionCheck([...productsByNumber.keys()], rows.mapping, rows.interactions);
+    }
 
     const warnings = [
       ...drugDrugWarnings(result, productsByNumber),
@@ -63,10 +67,13 @@ export class SafetyCheckService {
 
   /** Lưu ý bệnh lý / thức ăn theo từng hàng thuốc — chỉ để tham khảo, không chặn bán. */
   async drugWarnings(productIds: string[]) {
-    const drugs = await this.loadCartDrugs(productIds);
+    const uniqueIds = [...new Set(productIds)];
+    const rows = await this.repository.loadForWarnings(uniqueIds);
+    const drugs = toCartDrugs(uniqueIds, rows.products);
     const numbers = [...new Set(drugs.map((d) => d.registrationNumber).filter((n): n is string => !!n))];
-    const result: DrugWarningsResult = numbers.length
-      ? await this.client.getDrugWarnings(numbers)
+    if (numbers.length) this.assertDataLoaded(rows.dataLoaded);
+    const result = numbers.length
+      ? buildDrugWarnings(numbers, rows.mapping, rows.diseases, rows.foods)
       : { drugs: [], notFound: [] };
     const byNumber = new Map(result.drugs.map((drug) => [drug.registrationNumber, drug]));
 
@@ -82,29 +89,27 @@ export class SafetyCheckService {
     });
   }
 
-  private async loadCartDrugs(productIds: string[]): Promise<CartDrug[]> {
-    const uniqueIds = [...new Set(productIds)];
-    const products = await this.prisma.product.findMany({
-      where: { id: { in: uniqueIds }, isDeleted: false },
-      select: { id: true, name: true, type: true, drug: { select: { registrationNumber: true } } },
-    });
-    if (products.length !== uniqueIds.length) throw invalidReference('có hàng hoá không tồn tại');
-
-    // Giữ thứ tự giỏ hàng để cảnh báo hiện "thuốc thêm trước + thuốc thêm sau".
-    const byId = new Map(products.map((product) => [product.id, product]));
-    return uniqueIds
-      .map((id) => byId.get(id)!)
-      .filter((product) => product.type === ProductType.DRUG)
-      .map((product) => ({
-        productId: product.id,
-        name: product.name,
-        registrationNumber: product.drug?.registrationNumber?.trim() || null,
-      }));
+  /**
+   * Bảng dữ liệu tương tác rỗng (đã chạy migration nhưng chưa nạp / nạp hỏng) mà coi như "không có cảnh báo" thì đơn
+   * có cặp nghiêm trọng sẽ thu tiền được không cần dược sĩ duyệt → phải báo 1611 (lùi về kiểm tra thủ công).
+   */
+  private assertDataLoaded(dataLoaded: boolean): void {
+    if (dataLoaded) return;
+    this.logger.error('Bảng dữ liệu tương tác thuốc đang rỗng — chạy `npm run import:interaction-data`');
+    throw interactionDataUnavailable();
   }
 }
 
-function emptyCheckResult(): InteractionCheckResult {
-  return { interactions: [], duplicates: [], hasMajor: false, notFound: [], incomplete: [] };
+/** Hàng hoá → hàng thuốc theo thứ tự giỏ ("thuốc thêm trước + thuốc thêm sau"). Thiếu hàng nào → 1602. */
+function toCartDrugs(uniqueIds: string[], products: CartProductRow[]): CartDrug[] {
+  if (products.length !== uniqueIds.length) throw invalidReference('có hàng hoá không tồn tại');
+  return products
+    .filter((product) => product.type === ProductType.DRUG)
+    .map((product) => ({
+      productId: product.id,
+      name: product.name,
+      registrationNumber: product.registrationNumber?.trim() || null,
+    }));
 }
 
 function groupByRegistrationNumber(drugs: CartDrug[]): Map<string, ProductRef[]> {
@@ -171,7 +176,7 @@ function duplicateWarnings(
   });
 }
 
-/** Hai hàng hoá khác nhau cùng trỏ tới MỘT thuốc (cùng số đăng ký) — service không thấy vì chỉ nhận số đăng ký. */
+/** Hai hàng hoá khác nhau cùng trỏ tới MỘT thuốc (cùng số đăng ký) — phần tra tương tác không thấy vì chỉ nhận số đăng ký. */
 function sameDrugWarnings(productsByNumber: Map<string, ProductRef[]>): SafetyWarning[] {
   return [...productsByNumber.entries()]
     .filter(([, products]) => products.length >= 2)

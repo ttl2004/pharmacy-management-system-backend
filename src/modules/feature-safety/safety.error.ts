@@ -9,7 +9,7 @@ export const safetyErrors = {
       message: `Đơn có cảnh báo tương tác nghiêm trọng chưa được dược sĩ duyệt: ${summaries.join('; ')}`,
     }),
 
-  /** 1804: service tương tác tắt mà đơn chưa có xác nhận kiểm tra thủ công. */
+  /** 1804: không tra được dữ liệu tương tác mà đơn chưa có xác nhận kiểm tra thủ công. */
   manualCheckRequired: () =>
     new ErrorException({
       code: ErrorCode.INTERACTION_APPROVAL_REQUIRED,

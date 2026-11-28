@@ -40,6 +40,8 @@ describe('ProductService — mã hàng tự sinh SPxxxx (db)', () => {
       new ProductRepository(prisma as unknown as PrismaService),
       new CatalogTransactions(prisma as unknown as PrismaService),
       new AuditLogService(),
+      {} as never, // RegistrationDuplicateChecker — luồng tạo/khôi phục không dùng
+      {} as never, // ManualDrugWriter — luồng tạo/khôi phục không dùng
     );
   });
   afterAll(async () => {

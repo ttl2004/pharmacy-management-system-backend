@@ -41,6 +41,8 @@ describe('ProductService — xoá nhả mã vạch, khôi phục (db)', () => {
       repo,
       new CatalogTransactions(prisma as unknown as PrismaService),
       new AuditLogService(),
+      {} as never, // RegistrationDuplicateChecker — luồng tạo/khôi phục không dùng
+      {} as never, // ManualDrugWriter — luồng tạo/khôi phục không dùng
     );
   });
   afterAll(async () => {

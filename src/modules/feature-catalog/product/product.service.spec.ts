@@ -63,7 +63,7 @@ function makeService(
       ),
     ...transactionOverrides,
   } as never;
-  return new ProductService(repository, transactions, audit as never);
+  return new ProductService(repository, transactions, audit as never, {} as never, {} as never);
 }
 
 function duplicateError(target = 'code'): Prisma.PrismaClientKnownRequestError {

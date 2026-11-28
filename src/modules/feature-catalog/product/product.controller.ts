@@ -69,7 +69,8 @@ export class ProductController {
   @Patch(':id')
   @ApiOperation({
     description:
-      'Sửa sản phẩm. Không gửi units để giữ nguyên cấu hình đơn vị bán; có gửi units là thay TOÀN BỘ — dòng vắng mặt bị xoá mềm. Đổi baseUnitId bắt buộc gửi kèm units.',
+      'Sửa sản phẩm. Không gửi units để giữ nguyên cấu hình đơn vị bán; có gửi units là thay TOÀN BỘ - dòng vắng mặt bị xoá mềm. Đổi baseUnitId bắt buộc gửi kèm units. ' +
+      'Khối `drug` sửa thuốc nhập tay đang gắn (thuốc DQG trả 1618); đổi số đăng ký trùng thuốc khác trả 1616/1617 kèm `details`, gửi lại với `resolution`.',
   })
   update(
     @Param('id', new ParseUUIDPipe()) id: string,

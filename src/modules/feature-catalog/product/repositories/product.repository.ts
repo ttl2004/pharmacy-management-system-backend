@@ -85,6 +85,19 @@ const PRODUCT_DETAIL_SELECT = {
       manufacturerName: true,
       countryOfOrigin: true,
       status: true,
+      // Thuốc nhập tay (MANUAL) sửa được trong drawer sửa sản phẩm: cần nguồn, 5 trường từ tờ HDSD và ảnh HDSD.
+      source: true,
+      interactions: true,
+      pregnancyLactation: true,
+      overdose: true,
+      shelfLife: true,
+      dosageFormText: true,
+      contraindications: true,
+      sideEffects: true,
+      warnings: true,
+      leafletImageUrls: true,
+      // Số sản phẩm chưa xoá gắn cùng thuốc; đưa ra ngoài thành `drugProductCount` ở `findDetailWith`.
+      _count: { select: { products: { where: { isDeleted: false } } } },
     },
   },
   units: {
@@ -129,7 +142,20 @@ export type ProductUnitRow = {
   unit: { name: string };
 };
 
-export type ProductDetail = Prisma.ProductGetPayload<{ select: typeof PRODUCT_DETAIL_SELECT }>;
+type ProductDetailRow = Prisma.ProductGetPayload<{ select: typeof PRODUCT_DETAIL_SELECT }>;
+type ProductDetailDrug = Omit<NonNullable<ProductDetailRow['drug']>, '_count'>;
+/** Chi tiết sản phẩm; `drugProductCount` = số sản phẩm chưa xoá gắn cùng thuốc (0 khi chưa gắn thuốc). */
+export type ProductDetail = Omit<ProductDetailRow, 'drug'> & {
+  drug: ProductDetailDrug | null;
+  drugProductCount: number;
+};
+
+function toProductDetail(row: ProductDetailRow | null): ProductDetail | null {
+  if (!row) return null;
+  if (!row.drug) return { ...row, drug: null, drugProductCount: 0 };
+  const { _count, ...drug } = row.drug;
+  return { ...row, drug, drugProductCount: _count.products };
+}
 /** Phần thuốc trong danh mục mà hàng hoá cần khi liên kết: cờ kê đơn (chép) và văn bản điền sẵn. */
 const LINKED_DRUG_SELECT = {
   id: true,
@@ -291,8 +317,9 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
    * (`baseUnitId` hiệu lực, invariant đơn vị cơ bản) sẽ dựa trên snapshot cũ và ghi đè mất thay đổi đã
    * commit của request khác.
    */
-  findDetailWith(client: Prisma.TransactionClient, id: string): Promise<ProductDetail | null> {
-    return client.product.findFirst({ where: { id, isDeleted: false }, select: PRODUCT_DETAIL_SELECT });
+  async findDetailWith(client: Prisma.TransactionClient, id: string): Promise<ProductDetail | null> {
+    const row = await client.product.findFirst({ where: { id, isDeleted: false }, select: PRODUCT_DETAIL_SELECT });
+    return toProductDetail(row);
   }
 
   /**

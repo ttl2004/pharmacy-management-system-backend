@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import { Drug, Prisma, RecordStatus } from '@prisma/client';
+import { Drug, DrugSource, Prisma, RecordStatus } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
 import { ErrorException } from 'src/common/exceptions/error.exception';
 import { ErrorCode } from 'src/common/types/error-code';
@@ -56,8 +56,9 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
     );
   }
 
+  /** Chỉ đếm thuốc DQG: thuốc MANUAL không do đồng bộ quản lý nên không tính vào mẫu số của rào 10%. */
   countActive(tx: Prisma.TransactionClient): Promise<number> {
-    return tx.drug.count({ where: { status: RecordStatus.ACTIVE, isDeleted: false } });
+    return tx.drug.count({ where: { source: DrugSource.DQG, status: RecordStatus.ACTIVE, isDeleted: false } });
   }
 
   /** Upsert theo `code`, chia lô. Mọi dòng có trong nguồn được ghi `syncedAt` của lần này và bật ACTIVE trở lại. */
@@ -91,7 +92,7 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
   /**
    * Cờ kê đơn của hàng hoá luôn theo danh mục: nguồn đổi phân loại thì mọi hàng đang trỏ tới thuốc đó đổi theo.
    * Một câu `UPDATE … RETURNING` — trả từng hàng đã sửa (cờ cũ luôn là phủ định cờ mới vì chỉ sửa hàng lệch) để
-   * ghi nhật ký mà không phải đọc lại.
+   * ghi nhật ký mà không phải đọc lại. Chỉ áp cho sản phẩm gắn thuốc DQG (thuốc MANUAL do nhân viên quyết định).
    */
   syncProductPrescription(
     tx: Prisma.TransactionClient,
@@ -102,7 +103,8 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
       UPDATE "products" p
       SET "requiresPrescription" = d."isPrescription", "updatedAt" = ${syncedAt}, "updatedBy" = ${actorId}::uuid
       FROM "drugs" d
-      WHERE p."drugId" = d."id" AND p."isDeleted" = false AND p."requiresPrescription" <> d."isPrescription"
+      WHERE p."drugId" = d."id" AND d."source" = 'DQG' AND p."isDeleted" = false
+        AND p."requiresPrescription" <> d."isPrescription"
       RETURNING p."id" AS "id", p."code" AS "code", NOT d."isPrescription" AS "before", d."isPrescription" AS "after"`;
   }
 
@@ -115,13 +117,14 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
       UPDATE "products" p
       SET "isControlled" = true, "updatedAt" = ${syncedAt}, "updatedBy" = ${actorId}::uuid
       FROM "drugs" d
-      WHERE p."drugId" = d."id" AND p."isDeleted" = false AND p."isControlled" = false
+      WHERE p."drugId" = d."id" AND d."source" = 'DQG' AND p."isDeleted" = false AND p."isControlled" = false
         AND COALESCE(TRIM(d."controlType"), '') <> ''
       RETURNING p."id" AS "id", p."code" AS "code"`;
   }
 
   private staleWhere(syncedAt: Date): Prisma.DrugWhereInput {
-    return { status: RecordStatus.ACTIVE, isDeleted: false, syncedAt: { not: syncedAt } };
+    // Chỉ thuốc DQG: thuốc MANUAL không có trong nguồn nên không bao giờ bị coi là "cũ".
+    return { source: DrugSource.DQG, status: RecordStatus.ACTIVE, isDeleted: false, syncedAt: { not: syncedAt } };
   }
 
   /** `id` tự cấp vì Prisma sinh uuid ở client, SQL thô không có. */
@@ -133,7 +136,7 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
   ): Promise<number> {
     const rows = drugs.map(
       (drug) => Prisma.sql`(
-        ${randomUUID()}::uuid, ${drug.code}, ${drug.name}, ${drug.drugGroup}, ${drug.controlType},
+        ${randomUUID()}::uuid, ${drug.code}, ${drug.name}, ${drug.drugGroup}, ${drug.controlType}, 'DQG'::"DrugSource",
         ${drug.isPrescription}, ${drug.registrationNumber}, ${drug.registeredAt}::date,
         ${drug.registrationExpiresAt}::date, ${drug.strength}, ${drug.ingredients}, ${drug.manufacturerName},
         ${drug.countryOfOrigin}, ${drug.packagingSpec}, ${drug.route}, ${drug.indications}, ${drug.contraindications},
@@ -144,7 +147,7 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
 
     return tx.$executeRaw`
       INSERT INTO "drugs" (
-        "id", "code", "name", "drugGroup", "controlType",
+        "id", "code", "name", "drugGroup", "controlType", "source",
         "isPrescription", "registrationNumber", "registeredAt",
         "registrationExpiresAt", "strength", "ingredients", "manufacturerName",
         "countryOfOrigin", "packagingSpec", "route", "indications", "contraindications",
@@ -177,6 +180,7 @@ export class DrugRepository extends PrismaBaseRepository<Drug> {
         "syncedAt" = EXCLUDED."syncedAt",
         "updatedAt" = EXCLUDED."syncedAt",
         "updatedBy" = EXCLUDED."createdBy"
+      WHERE "drugs"."source" = 'DQG'
     `;
   }
 }

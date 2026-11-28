@@ -10,10 +10,13 @@ import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
 import { BaseWhere } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { CatalogTransactions, productWriteLocks } from '../catalog-transactions';
+import { ManualDrugWriter } from '../drug-leaflet/manual-drug.writer';
+import { RegistrationDuplicateChecker } from '../drug-leaflet/registration-duplicate.checker';
 import { CreateProductRequest, ProductUnitRequest, UpdateProductRequest } from './dtos/product.request';
 import { ProductQuery } from './dtos/product.query';
 import { PRODUCT_LIST_FILTER_KEYS, toProductListFilter } from 'src/common/dtos/product-list-filter.query';
 import { productCreatedEntry, productDeletedEntry, productRestoredEntry, productUpdatedEntries } from './product-audit';
+import { resolveManualDrugTarget } from './product-manual-drug-target';
 import { toExtraCreateData, toExtraUpdateData } from './product-extra-fields.mapper';
 import {
   DRUG_INGREDIENTS_SEARCH_FIELD,
@@ -32,6 +35,8 @@ export class ProductService extends AbstractBaseService<Product> {
     private readonly productRepository: ProductRepository,
     private readonly transactions: CatalogTransactions,
     private readonly audit: AuditLogService,
+    private readonly duplicates: RegistrationDuplicateChecker,
+    private readonly drugWriter: ManualDrugWriter,
   ) {
     super(productRepository);
   }
@@ -93,7 +98,7 @@ export class ProductService extends AbstractBaseService<Product> {
     let created: ProductDetail | null = null;
     for (let attempt = 1; ; attempt++) {
       try {
-        created = await this.transactions.write(locks, (tx) => this.insertProduct(tx, dto, actor));
+        created = await this.transactions.write(locks, (tx) => this.createInTx(tx, dto, actor));
         break;
       } catch (error) {
         // Mã tự sinh đã được kiểm "chưa ai dùng" ngay trong câu nextval, nhưng một request nhập tay CÙNG mã vẫn có thể
@@ -107,12 +112,19 @@ export class ProductService extends AbstractBaseService<Product> {
     return created;
   }
 
-  private async insertProduct(
+  /**
+   * Lõi tạo sản phẩm, chạy trong transaction của nơi gọi. Nơi gọi phải giữ sẵn `productWriteLocks(null, barcodes)`
+   * (qua `CatalogTransactions.write`) và tự dịch lỗi trùng bằng `rethrowDuplicate`. Dùng chung cho `POST /product` và
+   * lưu bản nháp thuốc từ ảnh HDSD (tạo Drug + Product trong cùng một transaction).
+   */
+  async createInTx(
     tx: Prisma.TransactionClient,
     dto: CreateProductRequest,
     actor: RequestActor,
   ): Promise<ProductDetail | null> {
     const callerId = actor.user.userId;
+    // Kiểm lại ở đây vì nơi gọi khác `create` có thể chưa kiểm (hàm thuần, không đọc DB).
+    this.assertUnitConfig(dto.units, dto.baseUnitId, dto.barcode ?? null);
     await this.assertReferences(tx, {
       categoryId: dto.categoryId,
       manufacturerId: dto.manufacturerId ?? null,
@@ -180,8 +192,9 @@ export class ProductService extends AbstractBaseService<Product> {
       updated = await this.transactions.write(locks, async (tx) => {
         // Đọc trong cùng transaction, SAU khi giữ khoá sản phẩm: mọi suy luận bên dưới dựa trên đúng trạng thái
         // sẽ bị ghi đè, không phải snapshot đọc ngoài mà lần ghi khác có thể vừa đổi.
-        const existing = await this.productRepository.findDetailWith(tx, id);
-        if (!existing) throw this.notFound();
+        const found = await this.productRepository.findDetailWith(tx, id);
+        if (!found) throw this.notFound();
+        let existing = found;
 
         const baseUnitId = dto.baseUnitId ?? existing.baseUnitId;
         const baseUnitChanged = dto.baseUnitId !== undefined && dto.baseUnitId !== existing.baseUnitId;
@@ -217,7 +230,32 @@ export class ProductService extends AbstractBaseService<Product> {
         await this.assertUpdatedBarcodes(tx, id, dto);
         const locationIds = dto.locationIds && (await this.assertLocations(tx, dto.locationIds));
         await this.assertRoute(tx, dto.routeId);
-        const newDrug = dto.drugId !== undefined ? await this.assertDrugOnUpdate(tx, existing, dto.drugId) : null;
+
+        // Khối `drug` (design §5.7): sửa thuốc MANUAL đang gắn, hoặc theo `resolution` chuyển sang thuốc trùng số đăng ký
+        // (LINK_DQG / OVERWRITE_MANUAL đi qua `assertDrugOnUpdate` như đổi thuốc thường, giữ luật PRODUCT_HAS_STOCK).
+        // Thứ tự khoá: product/mã vạch (đầu tx) -> drug-registration (chỉ khi đổi số đăng ký) -> drug:<id> (writer và
+        // `assertNoDuplicatePack`, luôn cùng một thuốc) - khớp với lưu bản nháp.
+        let input: UpdateProductRequest = dto;
+        let overwriteDrugId: string | null = null;
+        if (dto.drug) {
+          if (dto.drugId !== undefined && dto.drugId !== existing.drugId) {
+            throw this.badRequest('Không gửi đồng thời thuốc mới (drugId) và khối thông tin thuốc (drug)');
+          }
+          const target = await resolveManualDrugTarget(tx, this.duplicates, existing.drug, dto.drug, dto.resolution);
+          if (target.type === 'KEEP') {
+            await this.drugWriter.update(tx, target.drugId, dto.drug, actor);
+            // Đọc lại: lấy bản thuốc vừa ghi cho cờ kê đơn/kiểm soát, và cờ của chính sản phẩm này mà writer vừa đồng bộ
+            // (writer đã ghi nhật ký đổi cờ, so với bản cũ sẽ ghi trùng).
+            existing = (await this.productRepository.findDetailWith(tx, id)) ?? existing;
+          } else {
+            input = { ...dto, drugId: target.drugId };
+            if (target.type === 'OVERWRITE_MANUAL') overwriteDrugId = target.drugId;
+          }
+        }
+
+        let newDrug = input.drugId !== undefined ? await this.assertDrugOnUpdate(tx, existing, input.drugId) : null;
+        // Ghi đè SAU khi `assertDrugOnUpdate` cho phép chuyển thuốc; dùng bản thuốc vừa ghi để tính cờ.
+        if (overwriteDrugId && dto.drug) newDrug = await this.drugWriter.update(tx, overwriteDrugId, dto.drug, actor);
         const linkedDrug = newDrug ?? existing.drug;
         if (linkedDrug && (newDrug || dto.units !== undefined)) {
           const units =
@@ -225,7 +263,7 @@ export class ProductService extends AbstractBaseService<Product> {
           await this.assertNoDuplicatePack(tx, linkedDrug.id, units, id);
         }
 
-        const data = this.toUpdateData(dto, callerId);
+        const data = this.toUpdateData(input, callerId);
         if (linkedDrug) data.requiresPrescription = this.prescriptionOf(linkedDrug, dto.requiresPrescription);
         // D3: thuốc liên kết (mới hoặc cũ) thuộc danh mục kiểm soát đặc biệt → ép bật cờ; thuốc thường → giữ giá trị thủ công.
         if (linkedDrug && this.isControlledByCatalog(linkedDrug)) {

@@ -7,7 +7,7 @@ import { SafetyCheckService } from './safety-check.service';
 import { safetyErrors } from './safety.error';
 import type { StoredInteractionApproval } from './safety.types';
 
-/** Kết quả kiểm tra giỏ trước khi thu tiền. `available = false`: service tương tác không chạy. */
+/** Kết quả kiểm tra giỏ trước khi thu tiền. `available = false`: không tra được dữ liệu tương tác (1611). */
 export type PayPrecheck =
   | { available: true; productIds: string[]; majorWarningIds: string[]; majorSummaries: string[] }
   | { available: false; productIds: string[] };
@@ -15,7 +15,7 @@ export type PayPrecheck =
 /**
  * Chốt chặn an toàn của luồng bán hàng — OrderService chỉ gọi qua đây:
  * 1. Lập/sửa đơn: đọc phiếu duyệt (nếu có) thành nội dung lưu vào đơn.
- * 2. Thu tiền: `precheck` (gọi service, NGOÀI transaction) rồi `assertPayAllowed` (trong transaction).
+ * 2. Thu tiền: `precheck` (tra tương tác, NGOÀI transaction) rồi `assertPayAllowed` (trong transaction).
  */
 @Injectable()
 export class SaleSafetyGate {

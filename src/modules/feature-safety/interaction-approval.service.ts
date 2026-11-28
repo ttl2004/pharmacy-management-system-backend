@@ -104,7 +104,7 @@ export class InteractionApprovalService {
 
   /**
    * Cảnh báo cần duyệt = các cảnh báo nghiêm trọng hiện tại (BE tự kiểm, không tin FE gửi lên).
-   * Service tương tác tắt → duyệt thủ công (dược sĩ xác nhận đã tự kiểm tra).
+   * Không tra được dữ liệu tương tác (1611) → duyệt thủ công (dược sĩ xác nhận đã tự kiểm tra).
    */
   private async warningsToApprove(productIds: string[]) {
     try {
@@ -114,7 +114,11 @@ export class InteractionApprovalService {
       return { warningIds: majors.map((w) => w.id), warningSummaries: majors.map((w) => w.summary), manual: false };
     } catch (error) {
       if (error instanceof ErrorException && error.errorCode === ErrorCode.INTERACTION_SERVICE_UNAVAILABLE) {
-        return { warningIds: [], warningSummaries: ['Kiểm tra thủ công: service tương tác không chạy'], manual: true };
+        return {
+          warningIds: [],
+          warningSummaries: ['Kiểm tra thủ công: không tra được dữ liệu tương tác'],
+          manual: true,
+        };
       }
       throw error;
     }

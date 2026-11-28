@@ -8,6 +8,7 @@ import { permissionError } from 'src/modules/feature-auth/permission/permission.
 import { PermissionService } from 'src/modules/feature-auth/permission/permission.service';
 import { auditActorOf } from 'src/providers/audit-log/audit-actor';
 import { AuditLogService } from 'src/providers/audit-log/audit-log.service';
+import { canSeeCost } from '../core/cost-visibility';
 import { badRequest, documentErrors } from '../core/inventory.error';
 import { branchWhere } from '../core/inventory-scope';
 import { InventoryTransactions } from '../core/inventory-transactions';
@@ -37,6 +38,8 @@ export class GoodsReceiptPaymentService {
 
   /** Cập nhật số đã trả NCC (tổng, không phải số trả thêm). Lịch sử từng lần đổi nằm ở `audit_logs`. */
   async updatePayment(id: string, dto: UpdateReceiptPaymentRequest, actor: RequestActor): Promise<GoodsReceiptDetail> {
+    // Người không thấy giá vốn (K8) không được đổi tiền phiếu nhập; phản hồi cũng đi qua `maskReceiptDetail`.
+    if (!(await canSeeCost(this.permissions, actor.user))) throw permissionError(ErrorCode.PERMISSION_DENIED);
     const scope = resolveBranchScope(actor.user);
     const actorId = actor.user.userId;
 
@@ -55,6 +58,12 @@ export class GoodsReceiptPaymentService {
           throw badRequest('Muốn giảm số đã trả, hãy huỷ phiếu chi tương ứng');
         }
         if (paidAmount > head.paidAmount) {
+          // Nợ thật của phiếu = Tổng − trả hàng NCC đã bù (đọc dưới khoá phiếu); chỉ chặn khi TĂNG số đã trả.
+          const maxPaid = head.totalAmount - (await this.receipts.returnedAmountOf(tx, id));
+          if (paidAmount > maxPaid) {
+            const shown = maxPaid > 0n ? maxPaid : 0n;
+            throw badRequest(`Tổng đã trả vượt số nợ của phiếu (đã trừ trả hàng): tối đa ${shown.toString()}`);
+          }
           // Lập phiếu chi = ghi công nợ → cần cả `supplier-debt:write` và chịu cùng trần nợ như POST /supplier-payment.
           await this.assertCanWriteDebt(actor);
           const delta = paidAmount - head.paidAmount;

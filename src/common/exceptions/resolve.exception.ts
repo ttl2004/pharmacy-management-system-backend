@@ -56,11 +56,13 @@ export class ResolveExceptionFilter implements ExceptionFilter {
     let errorCode: ErrorCode;
     let statusCode = 500;
     let code: ErrorCode | undefined;
+    let details: Record<string, unknown> | undefined;
 
     if (exception instanceof ErrorException) {
       message = exception.message;
       errorCode = exception.errorCode;
       statusCode = 400;
+      details = exception.details;
     } else if (exception instanceof HttpException) {
       statusCode = exception.getStatus();
       const body = exception.getResponse();
@@ -97,6 +99,8 @@ export class ResolveExceptionFilter implements ExceptionFilter {
       errorCode: errorCode,
       code,
       statusCode,
+      // Chỉ thêm khoá `details` khi lỗi có kèm dữ liệu: body các lỗi khác giữ nguyên như cũ.
+      ...(details !== undefined && { details }),
     });
   }
 }

@@ -1,11 +1,12 @@
 import { Controller, Get, Param, ParseUUIDPipe, Query, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AUTH_JWT } from 'src/common/constants/app.constant';
 import { CurrentActor, type RequestActor } from 'src/common/decorators/current-actor.decorator';
 import { AuthzGuard } from '../../feature-auth/authz/guards/auth.guard';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
 import {
+  ExpirySummaryQuery,
   LowStockQuery,
   MovementSummaryQuery,
   NearExpiryQuery,
@@ -14,6 +15,9 @@ import {
   StockProductQuery,
 } from './dtos/stock.query';
 import { StockQueryService } from './stock-query.service';
+import { BranchProductListService } from './branch-product-list.service';
+import { BranchProductListQuery } from './dtos/branch-product-list.query';
+import { BRANCH_PRODUCT_CHAIN_EXAMPLE, BRANCH_PRODUCT_LIST_EXAMPLE } from './dtos/branch-product-list.response';
 
 @Controller('stock')
 @ApiTags('Stock')
@@ -22,7 +26,40 @@ import { StockQueryService } from './stock-query.service';
 @UseGuards(AuthzGuard, PermissionGuard)
 @RequirePermissions('stock:read')
 export class StockController {
-  constructor(private readonly stockQueryService: StockQueryService) {}
+  constructor(
+    private readonly stockQueryService: StockQueryService,
+    private readonly branchProductList: BranchProductListService,
+  ) {}
+
+  @Get('branch-products')
+  @RequirePermissions('stock:read', 'product:read')
+  @ApiOperation({
+    summary: 'Hàng hoá chi nhánh (lọc/sắp xếp/phân trang ở BE)',
+    description: [
+      'Chỉ hàng ĐÃ TỪNG CÓ LÔ (lô chưa xoá) trong phạm vi, kể cả tồn 0. Mỗi dòng = trường sản phẩm (như `GET /product`',
+      'với bộ lọc mới: đơn vị bán, vị trí, thuốc liên kết…) + `qtyOnHand`, `sellable`, `avgCost`, `lastPurchaseCost`,',
+      '`soldLast30Days`, `stockoutDate`, `nearestExpiry`, `minStock`, `maxStock`, `branches`.',
+      '',
+      '- **Chi nhánh** (gửi `branchId`, hoặc PM/nhân viên): số liệu của chi nhánh; `branches` = null.',
+      '- **Toàn chuỗi** (ADMIN/SUPER_ADMIN không gửi `branchId`): mỗi hàng một dòng, tồn cộng cả chuỗi, giá vốn bình quân',
+      '  gia quyền theo tồn AVAILABLE cả chuỗi, giá nhập cuối = phiếu CONFIRMED mới nhất cả chuỗi; `minStock`/`maxStock` = null;',
+      '  `branches` = từng chi nhánh có lô (xếp theo mã chi nhánh).',
+      '',
+      'Giá vốn = bình quân giá nhập lô AVAILABLE còn tồn; giá nhập cuối = (đơn giá − giảm giá)/hệ số của dòng phiếu nhập',
+      'CONFIRMED mới nhất — CÙNG định nghĩa với Thiết lập giá, theo đơn vị gốc, làm tròn đồng. Không được xem giá vốn',
+      '(thiếu goods-receipt:create và price-book:update) → hai giá = null, sắp xếp theo hai cột đó bị bỏ qua.',
+      'Dự kiến hết hàng = hôm nay + floor(tồn × 30 / lượng bán ròng 30 ngày gần nhất); null khi tồn ≤ 0 hoặc không bán.',
+      '`summary.totalQtyOnHand` = tổng tồn của TOÀN BỘ kết quả lọc (không chỉ trang).',
+    ].join('\n'),
+  })
+  @ApiOkResponse({
+    description: 'Trang hàng hoá chi nhánh. Ví dụ ở chế độ chi nhánh; chế độ toàn chuỗi xem `x-chain-example`.',
+    schema: { example: BRANCH_PRODUCT_LIST_EXAMPLE, 'x-chain-example': BRANCH_PRODUCT_CHAIN_EXAMPLE } as object,
+  })
+  @ApiResponse({ status: 400, description: '1002/400 tham số không hợp lệ (enum, uuid, ngày YYYY-MM-DD, page/limit)' })
+  branchProducts(@Query() query: BranchProductListQuery, @CurrentActor() actor: RequestActor) {
+    return this.branchProductList.list(query, actor);
+  }
 
   @Get('batches')
   @ApiOperation({ description: 'Tồn theo lô, sắp theo hạn dùng gần nhất trước (FEFO). Mặc định chỉ lô còn hàng.' })
@@ -63,8 +100,30 @@ export class StockController {
     return this.stockQueryService.nearExpiry(query, actor);
   }
 
+  @Get('reports/expiry-summary')
+  @ApiOperation({
+    description:
+      'Số lô còn tồn đã hết hạn / cận hạn (còn 1..days ngày), tổng và từng chi nhánh (byBranch, chỉ chi nhánh có lô). ADMIN bỏ trống branchId = toàn chuỗi.',
+  })
+  @ApiOkResponse({
+    schema: {
+      example: {
+        days: 30,
+        expired: 3,
+        expiring: 5,
+        byBranch: [{ branchId: 'uuid', branchCode: 'CN001', branchName: 'Chi nhánh 1', expired: 3, expiring: 5 }],
+      },
+    },
+  })
+  expirySummary(@Query() query: ExpirySummaryQuery, @CurrentActor() actor: RequestActor) {
+    return this.stockQueryService.expirySummary(query, actor);
+  }
+
   @Get('reports/movement-summary')
-  @ApiOperation({ description: 'Nhập–xuất–tồn theo kỳ (ngày giờ VN), tối đa 366 ngày.' })
+  @ApiOperation({
+    description:
+      'Nhập–xuất–tồn theo kỳ (ngày giờ VN), tối đa 366 ngày. rows = theo sản phẩm; byBranch = tổng từng chi nhánh (tồn đầu/nhập/xuất/tồn cuối theo đơn vị gốc + giá trị, null nếu không xem được giá vốn). ADMIN bỏ trống branchId = toàn chuỗi; PM chỉ chi nhánh mình (khác → 1506).',
+  })
   movementSummary(@Query() query: MovementSummaryQuery, @CurrentActor() actor: RequestActor) {
     return this.stockQueryService.movementSummary(query, actor);
   }

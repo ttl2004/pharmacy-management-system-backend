@@ -57,6 +57,14 @@ export type StockMovementWithBalance = StockMovementRow & {
   productBalanceAfter: number;
 };
 
+export interface ExpirySummaryRow {
+  branchId: string;
+  branchCode: string;
+  branchName: string;
+  expired: number;
+  expiring: number;
+}
+
 export interface ProductStockRow {
   branchId: string;
   branchCode: string;
@@ -93,6 +101,21 @@ export interface MovementSummaryRow {
   disposeQty: number;
   returnInQty: number;
   returnOutQty: number;
+}
+
+/** Nhập–xuất–tồn gộp theo chi nhánh (đơn vị gốc cộng dồn mọi sản phẩm, giá trị theo giá vốn bút toán). */
+export interface MovementSummaryBranchRow {
+  branchId: string;
+  branchCode: string;
+  branchName: string;
+  opening: number;
+  inQuantity: number;
+  outQuantity: number;
+  closing: number;
+  openingValue: number;
+  inValue: number;
+  outValue: number;
+  closingValue: number;
 }
 
 /**
@@ -264,6 +287,24 @@ export class StockQueryRepository {
   }
 
   /**
+   * Số lô còn tồn đã hết hạn (`expiryDate <= today`) / cận hạn (`today < expiryDate <= until`), gom theo chi nhánh.
+   * Quét theo index `expiryDate` (chỉ lô hết hạn tới `until`), không đọc từng lô về app. Chi nhánh không có lô nào
+   * trong khoảng thì không có dòng.
+   */
+  findExpirySummary(filter: { branchId?: string; today: Date; until: Date }): Promise<ExpirySummaryRow[]> {
+    const branch = filter.branchId ? Prisma.sql`AND b."branchId" = ${filter.branchId}::uuid` : Prisma.empty;
+    return this.prisma.$queryRaw<ExpirySummaryRow[]>(Prisma.sql`
+      SELECT b."branchId", br."code" AS "branchCode", br."name" AS "branchName",
+             COUNT(*) FILTER (WHERE b."expiryDate" <= ${filter.today}::date)::int AS "expired",
+             COUNT(*) FILTER (WHERE b."expiryDate" > ${filter.today}::date)::int AS "expiring"
+      FROM "stock_batches" b
+      JOIN "branches" br ON br."id" = b."branchId"
+      WHERE b."isDeleted" = false AND b."quantityOnHand" > 0 AND b."expiryDate" <= ${filter.until}::date ${branch}
+      GROUP BY b."branchId", br."code", br."name"
+      ORDER BY br."code"`);
+  }
+
+  /**
    * Sản phẩm dưới ngưỡng tại MỘT chi nhánh. Đi từ `products` (không từ `stock_batches`) để sản phẩm có ngưỡng mà
    * chưa từng có lô nào ở chi nhánh vẫn hiện ra — đó chính là hàng cần nhập gấp nhất.
    */
@@ -402,6 +443,83 @@ export class StockQueryRepository {
   }
 
   /**
+   * Nhập–xuất–tồn cùng kỳ/cùng cách tính với `findMovementSummary`, nhưng GROUP BY "branchId" (bảng tháng + sổ kho
+   * `[B, from)` cho tồn đầu, sổ kho trong kỳ cho nhập/xuất). Chuyển kho nội bộ tính xuất ở chi nhánh gửi, nhập ở chi
+   * nhánh nhận — dòng gộp theo sản phẩm toàn chuỗi cũng cộng TRANSFER_IN/OUT riêng vào nhập/xuất, nên Σ nhập/xuất theo
+   * chi nhánh = Σ nhập/xuất theo sản phẩm; chỉ tồn đầu/tồn cuối là bù trừ. Chi nhánh không có bút toán nào tới hết kỳ
+   * thì không có dòng.
+   */
+  async findMovementSummaryByBranch(filter: {
+    branchId?: string;
+    from: Date;
+    toExclusive: Date;
+  }): Promise<MovementSummaryBranchRow[]> {
+    const boundary = monthlyBoundary(filter.from, new Date());
+    await this.ensureMonthlyBuilt(boundary);
+
+    const branchOf = (alias: string) =>
+      filter.branchId ? Prisma.sql`AND ${Prisma.raw(alias)}."branchId" = ${filter.branchId}::uuid` : Prisma.empty;
+    const value = Prisma.sql`m."quantity"::bigint * COALESCE(m."unitCost", 0)`;
+
+    const rows = await this.prisma.$queryRaw<RawMovementSummaryBranchRow[]>(Prisma.sql`
+      WITH opening_parts AS (
+        SELECT s."branchId", SUM(s."quantity") AS "qty", SUM(s."value") AS "val"
+        FROM "stock_movement_monthly" s
+        WHERE s."month" < ${boundary.month}::date ${branchOf('s')}
+        GROUP BY s."branchId"
+        UNION ALL
+        SELECT m."branchId", SUM(m."quantity")::bigint, SUM(${value})
+        FROM "stock_movements" m
+        WHERE m."createdAt" >= ${boundary.at} AND m."createdAt" < ${filter.from} ${branchOf('m')}
+        GROUP BY m."branchId"
+      ),
+      opening AS (
+        SELECT "branchId", SUM("qty")::bigint AS "qty", SUM("val")::bigint AS "val"
+        FROM opening_parts GROUP BY "branchId"
+      ),
+      period AS (
+        SELECT m."branchId",
+               COALESCE(SUM(m."quantity") FILTER (WHERE m."quantity" > 0), 0)::bigint AS "inQuantity",
+               COALESCE(-SUM(m."quantity") FILTER (WHERE m."quantity" < 0), 0)::bigint AS "outQuantity",
+               COALESCE(SUM(${value}) FILTER (WHERE m."quantity" > 0), 0)::bigint AS "inValue",
+               COALESCE(-SUM(${value}) FILTER (WHERE m."quantity" < 0), 0)::bigint AS "outValue"
+        FROM "stock_movements" m
+        WHERE m."createdAt" >= ${filter.from} AND m."createdAt" < ${filter.toExclusive} ${branchOf('m')}
+        GROUP BY m."branchId"
+      )
+      SELECT br."id" AS "branchId", br."code" AS "branchCode", br."name" AS "branchName",
+             COALESCE(o."qty", 0) AS "opening", COALESCE(o."val", 0) AS "openingValue",
+             COALESCE(t."inQuantity", 0) AS "inQuantity", COALESCE(t."outQuantity", 0) AS "outQuantity",
+             COALESCE(t."inValue", 0) AS "inValue", COALESCE(t."outValue", 0) AS "outValue"
+      FROM opening o
+      FULL JOIN period t ON t."branchId" = o."branchId"
+      JOIN "branches" br ON br."id" = COALESCE(o."branchId", t."branchId")
+      ORDER BY br."code", br."id"`);
+
+    return rows.map((row) => {
+      const opening = Number(row.opening);
+      const inQuantity = Number(row.inQuantity);
+      const outQuantity = Number(row.outQuantity);
+      const openingValue = Number(row.openingValue);
+      const inValue = Number(row.inValue);
+      const outValue = Number(row.outValue);
+      return {
+        branchId: row.branchId,
+        branchCode: row.branchCode,
+        branchName: row.branchName,
+        opening,
+        inQuantity,
+        outQuantity,
+        closing: opening + inQuantity - outQuantity,
+        openingValue,
+        inValue,
+        outValue,
+        closingValue: openingValue + inValue - outValue,
+      };
+    });
+  }
+
+  /**
    * Bảo đảm `stock_movement_monthly` đã có mọi tháng trước `boundary.month`. Đường nhanh: một câu đọc tháng dựng gần
    * nhất. Thiếu thì dựng phần còn thiếu trong MỘT câu INSERT … GROUP BY tháng, dưới khoá advisory (hai request cùng
    * lúc không dựng trùng), rồi đánh dấu các tháng — kể cả tháng không phát sinh — để lần sau khỏi kiểm lại.
@@ -478,6 +596,18 @@ interface RawMovementSummaryRow {
   disposeQty: bigint;
   returnInQty: bigint;
   returnOutQty: bigint;
+}
+
+interface RawMovementSummaryBranchRow {
+  branchId: string;
+  branchCode: string;
+  branchName: string;
+  opening: bigint;
+  openingValue: bigint;
+  inQuantity: bigint;
+  outQuantity: bigint;
+  inValue: bigint;
+  outValue: bigint;
 }
 
 /** Bút toán có thể mang `createdAt` = lúc BẮT ĐẦU transaction; tháng chỉ coi là đóng sau ngần này. */

@@ -74,7 +74,10 @@ type Presented<T extends { discountPercent: Prisma.Decimal | null; receiver: Bri
 > & { discountPercent: number | null; receiverUser: Brief };
 
 export type GoodsReceiptSummary = Presented<Prisma.GoodsReceiptGetPayload<{ select: typeof RECEIPT_LIST_SELECT }>>;
-export type GoodsReceiptDetail = Presented<Prisma.GoodsReceiptGetPayload<{ select: typeof RECEIPT_DETAIL_SELECT }>>;
+/** `returnedAmount`: nợ của phiếu đã bù bằng phiếu trả NCC (VND) — nợ thật = `totalAmount − returnedAmount`. */
+export type GoodsReceiptDetail = Presented<Prisma.GoodsReceiptGetPayload<{ select: typeof RECEIPT_DETAIL_SELECT }>> & {
+  returnedAmount: bigint;
+};
 
 export function presentReceipt<T extends { discountPercent: Prisma.Decimal | null; receiver: Brief }>(
   row: T,

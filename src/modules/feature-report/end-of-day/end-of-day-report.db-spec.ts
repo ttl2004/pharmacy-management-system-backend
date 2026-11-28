@@ -168,6 +168,63 @@ describe('GET /reports/end-of-day — truy vấn thật (db)', () => {
     ]);
   });
 
+  it('byBranch: doanh thu / hoàn / số đơn / đơn huỷ tách theo chi nhánh, tổng các dòng = sales; lọc chi nhánh chỉ còn CN đó', async () => {
+    await order({ branch: 0, payments: [{ amount: 1_000, at: `${DAY}T09:00:00` }] });
+    await order({ branch: 1, payments: [{ amount: 5_000, method: PaymentMethod.CARD, at: `${DAY}T09:30:00` }] });
+    await order({ branch: 1, payments: [{ amount: 2_000, at: `${DAY}T10:00:00` }] });
+    await order({
+      branch: 0,
+      status: OrderStatus.CANCELLED,
+      completedAt: '2026-11-09T15:00:00',
+      cancelledAt: `${DAY}T14:00:00`,
+      payments: [
+        { amount: 300, at: '2026-11-09T15:00:00' },
+        { amount: 300, kind: PaymentKind.REFUND, at: `${DAY}T14:00:00` },
+      ],
+    });
+
+    const all = await service.endOfDay({ date: DAY }, adminActor);
+    const pick = ({
+      branchName,
+      orderCount,
+      cancelledCount,
+      grossAmount,
+      refundAmount,
+      netAmount,
+    }: (typeof all.byBranch)[number]) => ({
+      branchName,
+      orderCount,
+      cancelledCount,
+      grossAmount,
+      refundAmount,
+      netAmount,
+    });
+    expect(all.byBranch.map(pick)).toEqual([
+      {
+        branchName: 'Chi nhánh 2',
+        orderCount: 2,
+        cancelledCount: 0,
+        grossAmount: 7_000,
+        refundAmount: 0,
+        netAmount: 7_000,
+      },
+      {
+        branchName: 'Chi nhánh 1',
+        orderCount: 1,
+        cancelledCount: 1,
+        grossAmount: 1_000,
+        refundAmount: 300,
+        netAmount: 700,
+      },
+    ]);
+    expect(all.byBranch.reduce((s, b) => s + b.netAmount, 0)).toBe(all.sales.netAmount);
+    expect(all.byBranch.reduce((s, b) => s + b.orderCount, 0)).toBe(all.sales.orderCount);
+    expect(all.byBranch.reduce((s, b) => s + b.cancelledCount, 0)).toBe(all.sales.cancelledCount);
+
+    const cn1 = await service.endOfDay({ date: DAY, branchIds: [base.branches[0].id] }, adminActor);
+    expect(cn1.byBranch.map((b) => b.branchId)).toEqual([base.branches[0].id]);
+  });
+
   it('ranh giới ngày giờ VN: 23:59 và 00:00 rơi đúng ngày; payment FAILED/PENDING và đơn đang xử lý không tính', async () => {
     await order({ completedAt: `${DAY}T00:00:00`, payments: [{ amount: 100, at: `${DAY}T00:00:00` }] }); // đầu ngày: vào
     await order({ completedAt: `${DAY}T23:59:59`, payments: [{ amount: 200, at: `${DAY}T23:59:59` }] }); // cuối ngày: vào
@@ -235,6 +292,22 @@ describe('GET /reports/end-of-day — truy vấn thật (db)', () => {
         { method: 'BANK_TRANSFER', amount: 2_000_000 },
       ],
     });
+    expect(all.byBranch).toEqual([
+      expect.objectContaining({
+        branchId: base.branches[0].id,
+        receiptCount: 2,
+        receiptAmount: 7_000_000,
+        paymentCount: 2,
+        paymentAmount: 1_300_000,
+      }),
+      expect.objectContaining({
+        branchId: base.branches[1].id,
+        receiptCount: 1,
+        receiptAmount: 9_000_000,
+        paymentCount: 1,
+        paymentAmount: 1_000_000,
+      }),
+    ]);
     const cn1 = await service.endOfDay({ date: DAY, branchIds: [base.branches[0].id] }, adminActor);
     expect(cn1.supplier).toMatchObject({
       receiptCount: 2,
@@ -269,6 +342,10 @@ describe('GET /reports/end-of-day — truy vấn thật (db)', () => {
     expect(report.byStaff).toEqual([]);
     expect(report.sales.grossAmount).toBe(100);
     const empty = await service.endOfDay({ date: '2026-01-01' }, adminActor);
+    expect(empty.byBranch.map((b) => [b.branchName, b.netAmount, b.orderCount])).toEqual([
+      ['Chi nhánh 1', 0, 0],
+      ['Chi nhánh 2', 0, 0],
+    ]);
     expect(empty.sales).toEqual({ orderCount: 0, grossAmount: 0, refundAmount: 0, netAmount: 0, cancelledCount: 0 });
     expect(empty.supplier.receiptCount).toBe(0);
   });

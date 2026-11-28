@@ -29,6 +29,8 @@ export class EndOfDayReportController {
       '`supplier`: phiếu nhập xác nhận và phiếu chi NCC (chưa huỷ, theo paidAt) trong ngày, lọc theo chi nhánh của phiếu. ' +
       '`topProducts` ≤ 10 theo tiền của đơn thu trong ngày còn COMPLETED. `byStaff` theo nhân viên lập đơn (ròng = thu − hoàn ' +
       'của các payment trong ngày gắn với đơn của họ), giảm dần theo ròng; đơn không gán nhân viên không vào mục này. ' +
+      '`byBranch`: mỗi chi nhánh trong phạm vi một dòng (kể cả 0đ) với số đơn, đơn huỷ, thu/hoàn/ròng, phiếu nhập và ' +
+      'phiếu chi NCC; tổng các dòng = `sales`/`supplier`. ' +
       'Cache tối đa 60 giây.',
   })
   endOfDay(@Query() query: EndOfDayReportQuery, @CurrentActor() actor: RequestActor) {

@@ -1,9 +1,26 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, Product, ReceiptStatus, RecordStatus, TransferStatus } from '@prisma/client';
 import { PrismaService } from 'src/common/databases/prisma.service';
+import {
+  type CatalogSortKey,
+  PRODUCT_FILTER_JOINS,
+  type ProductListFilter,
+  catalogSortExpr,
+  orderBySql,
+  productFilterConditions,
+} from 'src/common/databases/sql/product-filter.sql';
+import { type ProductListItem, findListItemsInOrder } from 'src/common/databases/product-list-item';
 import { escapeLike } from 'src/common/utils/like-pattern.util';
 import { BaseWhere, PaginationResult } from 'src/providers/abstract-base/repositories/abstract-base.repository';
 import { PrismaBaseRepository } from 'src/providers/abstract-base/repositories/prisma-base.repository';
+
+/**
+ * Mã hàng tự sinh: `SP` + số từ SEQUENCE `product_code_seq`, đệm 4 chữ số (`SP0001`) cho khớp mã đang có; vượt 9 999
+ * thì mã tự dài thêm, không vỡ. Cùng cách sinh mã chứng từ kho (`DOCUMENT_CODE_FORMATS`): không dùng `MAX + 1`.
+ */
+export const PRODUCT_CODE_FORMAT = { prefix: 'SP', sequence: 'product_code_seq', digits: 4 } as const;
+/** Số lần bỏ qua mã đã bị nhập tay chiếm trước khi bỏ cuộc (thực tế hầu như không xảy ra). */
+const MAX_CODE_ATTEMPTS = 100;
 
 /**
  * Các cột đọc được của Product. Cố ý dùng `select` tường minh thay vì trả nguyên row: ẩn
@@ -68,6 +85,19 @@ const PRODUCT_DETAIL_SELECT = {
       manufacturerName: true,
       countryOfOrigin: true,
       status: true,
+      // Thuốc nhập tay (MANUAL) sửa được trong drawer sửa sản phẩm: cần nguồn, 5 trường từ tờ HDSD và ảnh HDSD.
+      source: true,
+      interactions: true,
+      pregnancyLactation: true,
+      overdose: true,
+      shelfLife: true,
+      dosageFormText: true,
+      contraindications: true,
+      sideEffects: true,
+      warnings: true,
+      leafletImageUrls: true,
+      // Số sản phẩm chưa xoá gắn cùng thuốc; đưa ra ngoài thành `drugProductCount` ở `findDetailWith`.
+      _count: { select: { products: { where: { isDeleted: false } } } },
     },
   },
   units: {
@@ -92,6 +122,15 @@ const PRODUCT_DETAIL_SELECT = {
 } satisfies Prisma.ProductSelect;
 
 export type ProductSummary = Prisma.ProductGetPayload<{ select: typeof PRODUCT_SUMMARY_SELECT }>;
+export interface CatalogPageOptions {
+  page: number;
+  limit: number;
+  sortBy?: CatalogSortKey;
+  sortDir: 'asc' | 'desc';
+  /** Chỉ lấy sản phẩm đã xoá mềm (cho người có quyền xoá, để khôi phục). */
+  deleted: boolean;
+}
+
 /** Dòng ProductUnit dùng cho đối chiếu replace-all (kể cả dòng đã xoá mềm). */
 export type ProductUnitRow = {
   id: string;
@@ -103,7 +142,20 @@ export type ProductUnitRow = {
   unit: { name: string };
 };
 
-export type ProductDetail = Prisma.ProductGetPayload<{ select: typeof PRODUCT_DETAIL_SELECT }>;
+type ProductDetailRow = Prisma.ProductGetPayload<{ select: typeof PRODUCT_DETAIL_SELECT }>;
+type ProductDetailDrug = Omit<NonNullable<ProductDetailRow['drug']>, '_count'>;
+/** Chi tiết sản phẩm; `drugProductCount` = số sản phẩm chưa xoá gắn cùng thuốc (0 khi chưa gắn thuốc). */
+export type ProductDetail = Omit<ProductDetailRow, 'drug'> & {
+  drug: ProductDetailDrug | null;
+  drugProductCount: number;
+};
+
+function toProductDetail(row: ProductDetailRow | null): ProductDetail | null {
+  if (!row) return null;
+  if (!row.drug) return { ...row, drug: null, drugProductCount: 0 };
+  const { _count, ...drug } = row.drug;
+  return { ...row, drug, drugProductCount: _count.products };
+}
 /** Phần thuốc trong danh mục mà hàng hoá cần khi liên kết: cờ kê đơn (chép) và văn bản điền sẵn. */
 const LINKED_DRUG_SELECT = {
   id: true,
@@ -214,6 +266,39 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
     };
   }
 
+  /**
+   * Danh mục hàng hoá: lọc, sắp xếp, đếm hoàn toàn ở SQL (một câu lấy id trang + một câu đếm), rồi đọc đủ trường cho
+   * ≤ `limit` dòng bằng một câu Prisma. Không phụ thuộc chi nhánh.
+   */
+  async findCatalogPage(
+    filter: ProductListFilter,
+    options: CatalogPageOptions,
+  ): Promise<PaginationResult<ProductListItem>> {
+    const where = Prisma.join(
+      [Prisma.sql`p."isDeleted" = ${options.deleted}`, ...productFilterConditions(filter, 'ALL')],
+      ' AND ',
+    );
+    const from = Prisma.sql`FROM "products" p ${PRODUCT_FILTER_JOINS} WHERE ${where}`;
+    const order = orderBySql(options.sortBy ? catalogSortExpr(options.sortBy) : null, options.sortDir);
+    const [idRows, [{ count }]] = await Promise.all([
+      this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT p."id" ${from} ORDER BY ${order}
+        LIMIT ${options.limit} OFFSET ${(options.page - 1) * options.limit}`),
+      this.prisma.$queryRaw<{ count: number }[]>(Prisma.sql`SELECT COUNT(*)::int AS "count" ${from}`),
+    ]);
+    const hits = await findListItemsInOrder(
+      this.prisma,
+      idRows.map((r) => r.id),
+    );
+    return {
+      hits,
+      total: count,
+      page: options.page,
+      totalPages: Math.ceil(count / options.limit),
+      limit: options.limit,
+    };
+  }
+
   private onlyDeleted(where: Record<string, unknown>): Record<string, unknown> {
     if (Array.isArray(where.AND)) {
       const [base, ...rest] = where.AND as Record<string, unknown>[];
@@ -232,8 +317,9 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
    * (`baseUnitId` hiệu lực, invariant đơn vị cơ bản) sẽ dựa trên snapshot cũ và ghi đè mất thay đổi đã
    * commit của request khác.
    */
-  findDetailWith(client: Prisma.TransactionClient, id: string): Promise<ProductDetail | null> {
-    return client.product.findFirst({ where: { id, isDeleted: false }, select: PRODUCT_DETAIL_SELECT });
+  async findDetailWith(client: Prisma.TransactionClient, id: string): Promise<ProductDetail | null> {
+    const row = await client.product.findFirst({ where: { id, isDeleted: false }, select: PRODUCT_DETAIL_SELECT });
+    return toProductDetail(row);
   }
 
   /**
@@ -362,6 +448,24 @@ export class ProductRepository extends PrismaBaseRepository<Product> {
     if (unit?.barcode) return { barcode: unit.barcode, source: 'product_units' };
 
     return null;
+  }
+
+  /**
+   * Mã tự sinh tiếp theo. Mỗi lần thử là MỘT câu lệnh: lấy `nextval` và kiểm luôn mã đó đã có chưa (kể cả bản ghi
+   * xoá mềm — `code` unique toàn bảng), nên đường thường chỉ tốn một lượt DB. Mã đã bị nhập tay chiếm (vd ai đó gõ
+   * "SP0123") thì bỏ qua lấy số kế. Số đã lấy không quay lại khi rollback nên mã có thể hụt số — chỉ cần duy nhất.
+   */
+  async nextAutoCode(client: Prisma.TransactionClient): Promise<string> {
+    const { prefix, sequence, digits } = PRODUCT_CODE_FORMAT;
+    for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
+      // Tên sequence lấy từ hằng số trong code, không bao giờ từ input — an toàn khi ghép vào SQL.
+      const [row] = await client.$queryRaw<{ code: string; taken: boolean }[]>(Prisma.sql`
+        WITH s AS MATERIALIZED (SELECT nextval(${Prisma.raw(`'"${sequence}"'`)})::text AS n),
+        c AS (SELECT ${prefix} || lpad(s.n, GREATEST(${digits}::int, length(s.n)), '0') AS code FROM s)
+        SELECT c.code, EXISTS (SELECT 1 FROM "products" p WHERE p."code" = c.code) AS taken FROM c`);
+      if (!row.taken) return row.code;
+    }
+    throw new Error(`Không sinh được mã hàng sau ${MAX_CODE_ATTEMPTS} lần thử`);
   }
 
   createProduct(client: Prisma.TransactionClient, data: Prisma.ProductUncheckedCreateInput): Promise<{ id: string }> {

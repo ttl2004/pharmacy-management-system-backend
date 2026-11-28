@@ -28,6 +28,20 @@ export interface EndOfDayReportResponse {
   };
   topProducts: { productId: string; productName: string; qtyBase: number; amount: number }[];
   byStaff: { staffId: string; staffName: string; orderCount: number; netAmount: number }[];
+  /** Mỗi chi nhánh trong phạm vi một dòng; tổng các dòng = `sales` / `supplier` (ngoài `paymentByMethod`). */
+  byBranch: {
+    branchId: string;
+    branchName: string;
+    orderCount: number;
+    cancelledCount: number;
+    grossAmount: number;
+    refundAmount: number;
+    netAmount: number;
+    receiptCount: number;
+    receiptAmount: number;
+    paymentCount: number;
+    paymentAmount: number;
+  }[];
 }
 
 @Injectable()
@@ -48,13 +62,14 @@ export class EndOfDayReportService {
     if (cached) return cached;
 
     const range = { start: vietnamDayStartUtc(date), end: vietnamDayStartUtc(addDaysToDateOnly(date, 1)) };
-    const [payments, counts, receipts, supplierPays, top, staff] = await Promise.all([
+    const [payments, counts, receipts, supplierPays, top, staff, branches] = await Promise.all([
       this.repo.paymentsByMethod(range, branchIds),
       this.repo.orderCounts(range, branchIds),
       this.repo.supplierReceipts(range, branchIds),
       this.repo.supplierPayments(range, branchIds),
       this.repo.topProducts(range, END_OF_DAY_TOP_LIMIT, branchIds),
       this.repo.byStaff(range, branchIds),
+      this.repo.byBranch(range, branchIds),
     ]);
 
     const byMethod = SALE_METHODS.map((method) => {
@@ -106,6 +121,19 @@ export class EndOfDayReportService {
         staffName: r.staffName,
         orderCount: r.orderCount,
         netAmount: Number(r.netAmount),
+      })),
+      byBranch: branches.map((r) => ({
+        branchId: r.branchId,
+        branchName: r.branchName,
+        orderCount: r.orderCount,
+        cancelledCount: r.cancelledCount,
+        grossAmount: Number(r.grossAmount),
+        refundAmount: Number(r.refundAmount),
+        netAmount: Number(r.grossAmount - r.refundAmount),
+        receiptCount: r.receiptCount,
+        receiptAmount: Number(r.receiptAmount),
+        paymentCount: r.paymentCount,
+        paymentAmount: Number(r.paymentAmount),
       })),
     };
     this.cache.set(key, report, END_OF_DAY_REPORT_TTL_MS);

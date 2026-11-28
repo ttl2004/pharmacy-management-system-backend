@@ -295,10 +295,14 @@ model Manufacturer {
   address   String?      @db.Text
   note      String?      @db.Text
   status    RecordStatus @default(ACTIVE)
+  /// Tên đã chuẩn hoá (`normalizeManufacturerName`) để so trùng. Không unique: dữ liệu cũ có thể đã trùng;
+  /// chống tạo trùng bằng advisory lock theo khoá này trong transaction.
+  nameKey   String?      @db.VarChar(200)
 
   products Product[]
 
   @@index([status])
+  @@index([nameKey])
   @@map("manufacturers")
 }
 
@@ -379,6 +383,7 @@ model Product {
   orderItems           OrderItem[]
   salesDailyProducts   SalesDailyProduct[]
   salesDailyChain      SalesDailyProductChain[]
+  leafletDrafts        DrugLeafletDraft[]
 
   @@index([categoryId])
   @@index([manufacturerId])
@@ -390,8 +395,24 @@ model Product {
   @@map("products")
 }
 
-/// Bản sao cục bộ danh mục thuốc CSDL Dược quốc gia — chỉ ghi bằng đồng bộ (`POST /drug/sync`), không sửa tay.
-/// Thuốc biến mất khỏi nguồn chuyển INACTIVE chứ không xoá, vì hàng hoá cũ vẫn trỏ tới.
+/// Nguồn của thuốc: DQG = bản sao danh mục Cổng Dược quốc gia, MANUAL = nhân viên nhập từ ảnh tờ HDSD.
+enum DrugSource {
+  DQG
+  MANUAL
+}
+
+/// Trạng thái bản nháp nhập thuốc từ ảnh HDSD.
+enum DrugLeafletDraftStatus {
+  PROCESSING
+  READY
+  FAILED
+  SAVED
+  DISCARDED
+}
+
+/// Danh mục thuốc dùng chung. Thuốc `DQG` là bản sao CSDL Dược quốc gia - chỉ ghi bằng đồng bộ (`POST /drug/sync`).
+/// Thuốc `MANUAL` do nhân viên nhập từ ảnh tờ HDSD và sửa tay; đồng bộ không đụng tới.
+/// Thuốc DQG biến mất khỏi nguồn chuyển INACTIVE chứ không xoá, vì hàng hoá cũ vẫn trỏ tới.
 model Drug {
   id                    String       @id @default(uuid()) @db.Uuid
   isDeleted             Boolean      @default(false)
@@ -399,7 +420,8 @@ model Drug {
   createdBy             String?      @db.Uuid
   updatedAt             DateTime?    @db.Timestamptz(3)
   updatedBy             String?      @db.Uuid
-  /// Mã định danh thuốc do Cổng Dược quốc gia cấp — khoá đồng bộ và mã gửi liên thông.
+  /// `DQG`: mã định danh do Cổng Dược quốc gia cấp - khoá đồng bộ và mã gửi liên thông.
+  /// `MANUAL`: mã tự sinh từ sequence `drug_manual_code_seq`, dạng `MANUAL-000001`, không trùng mã DQG.
   code                  String       @unique @db.VarChar(50)
   name                  String       @db.VarChar(250)
   drugGroup             String?      @db.VarChar(100)
@@ -423,19 +445,64 @@ model Drug {
   warnings              String?      @db.Text
   dosage                String?      @db.Text
   status                RecordStatus @default(ACTIVE)
-  /// Lần đồng bộ gần nhất có thuốc này trong nguồn.
-  syncedAt              DateTime     @db.Timestamptz(3)
+  /// Lần đồng bộ gần nhất có thuốc này trong nguồn. Null với thuốc `MANUAL`.
+  syncedAt              DateTime?    @db.Timestamptz(3)
+  source                DrugSource   @default(DQG)
+  /// 5 trường bổ sung từ tờ HDSD (chỉ thuốc `MANUAL` có dữ liệu).
+  interactions          String?      @db.Text
+  pregnancyLactation    String?      @db.Text
+  overdose              String?      @db.Text
+  shelfLife             String?      @db.VarChar(100)
+  /// Dạng bào chế nguyên văn trên tờ HDSD (Product.dosageForm là bản quy đổi sang enum).
+  dosageFormText        String?      @db.VarChar(250)
+  /// Ảnh tờ HDSD đã lưu, chỉ để đối chiếu.
+  leafletImageUrls      String[]     @default([])
 
-  products Product[]
+  products      Product[]
+  leafletDrafts DrugLeafletDraft[]
 
   @@index([name])
   @@index([status])
+  @@index([source])
   /// Tìm kiếm `ILIKE '%…%'` (search của base repo) — btree không dùng được, cần trigram (extension pg_trgm).
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "drugs_name_trgm_idx")
   @@index([code(ops: raw("gin_trgm_ops"))], type: Gin, map: "drugs_code_trgm_idx")
   @@index([ingredients(ops: raw("gin_trgm_ops"))], type: Gin, map: "drugs_ingredients_trgm_idx")
   @@index([registrationNumber(ops: raw("gin_trgm_ops"))], type: Gin, map: "drugs_registration_number_trgm_idx")
   @@map("drugs")
+}
+
+/// Bản nháp thuốc từ ảnh tờ HDSD: ảnh gửi OCR service, kết quả giữ bên OCR (`extractionId`), dùng chung cho nhân viên có `product:create`.
+model DrugLeafletDraft {
+  id               String                 @id @default(uuid()) @db.Uuid
+  /// Id hiện hành bên OCR service, đổi khi chạy lại.
+  extractionId     String                 @db.VarChar(64)
+  status           DrugLeafletDraftStatus @default(PROCESSING)
+  error            String?                @db.Text
+  imageCount       Int
+  productId        String?                @db.Uuid
+  drugId           String?                @db.Uuid
+  savedAt          DateTime?              @db.Timestamptz(3)
+  savedBy          String?                @db.Uuid
+  discardedAt      DateTime?              @db.Timestamptz(3)
+  discardedBy      String?                @db.Uuid
+  /// Việc sau khi lưu: sao ảnh HDSD về máy, gửi feedback sang OCR. Null = chưa xong, cron thử lại.
+  imagesCopiedAt   DateTime?              @db.Timestamptz(3)
+  feedbackSentAt   DateTime?              @db.Timestamptz(3)
+  /// Rating + final_fields đã chốt lúc lưu.
+  feedbackPayload  Json?
+  followUpAttempts Int                    @default(0)
+  followUpError    String?                @db.Text
+  createdAt        DateTime               @default(now()) @db.Timestamptz(3)
+  createdBy        String?                @db.Uuid
+  updatedAt        DateTime?              @db.Timestamptz(3)
+  updatedBy        String?                @db.Uuid
+
+  product Product? @relation(fields: [productId], references: [id], onDelete: Restrict)
+  drug    Drug?    @relation(fields: [drugId], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@map("drug_leaflet_drafts")
 }
 
 /// Vị trí (kệ/tủ) dùng chung toàn chuỗi. Một sản phẩm có thể nằm ở nhiều vị trí.
@@ -1031,6 +1098,7 @@ model StockAdjustment {
   items           StockAdjustmentItem[]
 
   @@index([branchId, status, createdAt])
+  @@index([goodsReceiptId])
   @@map("stock_adjustments")
 }
 
@@ -1489,4 +1557,81 @@ model SalesReconcileRun {
 
   @@index([startedAt(sort: Desc)])
   @@map("sales_reconcile_runs")
+}
+
+// ============================================================
+//  DỮ LIỆU THAM CHIẾU TƯƠNG TÁC THUỐC (DDInter) — CHỈ ĐỌC
+//  - Nạp từ 4 file CSV bằng `npm run import:interaction-data` (mỗi bảng thay toàn bộ trong 1 transaction); app không ghi.
+//  - Khoá theo mã DDInter (DDInterXXX) / số đăng ký thuốc; tên cột giữ ĐÚNG như header CSV (kể cả hoa/thường).
+//  - KHÔNG có khoá ngoại, cố ý: dữ liệu ngoài, nạp lại toàn bộ được, không ràng buộc với products/drugs.
+// ============================================================
+
+/// Cặp thuốc tương tác (DDInter). Level: Major | Moderate | Minor | Unknown.
+model DdinterInteraction {
+  id          Int     @id @map("InteractionID")
+  ddinterIdA  String  @map("DDInterID_A") @db.VarChar(20)
+  drugA       String  @map("Drug_A")
+  ddinterIdB  String  @map("DDInterID_B") @db.VarChar(20)
+  drugB       String  @map("Drug_B")
+  level       String  @map("Level") @db.VarChar(20)
+  interaction String? @map("Interaction")
+  management  String? @map("Management")
+
+  @@index([ddinterIdA, ddinterIdB])
+  @@map("ddinter_interactions_final")
+}
+
+/// Thuốc – bệnh. level 1|2|3 ứng severity Minor|Moderate|Major.
+model DrugDiseaseInteraction {
+  id          Int     @id
+  drugId      String  @map("drug_id") @db.VarChar(20)
+  drugName    String  @map("drug_name")
+  level       Int?
+  severity    String  @db.VarChar(20)
+  diseaseName String  @map("disease_name")
+  description String?
+  references  String? @map("references")
+
+  @@index([drugId])
+  @@map("drug_disease_interactions")
+}
+
+/// Thuốc – thức ăn. level 1|2|3 ứng severity Minor|Moderate|Major.
+model DrugFoodInteraction {
+  id          Int     @id
+  drugId      String  @map("drug_id") @db.VarChar(20)
+  drugName    String  @map("drug_name")
+  level       Int?
+  severity    String  @db.VarChar(20)
+  foodName    String  @map("food_name")
+  description String?
+  management  String?
+  mechanism   String?
+  references  String? @map("references")
+
+  @@index([drugId])
+  @@map("drug_food_interactions")
+}
+
+/// Ánh xạ số đăng ký thuốc quốc gia → hoạt chất DDInter, mỗi hoạt chất một dòng (ingredientOrder). ddinterId null = chưa khớp.
+model NationalDrugDdinterMapping {
+  registrationNumber   String  @map("registration_number") @db.VarChar(100)
+  drugName             String  @map("drug_name")
+  drugGroup            String  @map("drug_group") @db.VarChar(50)
+  inferredRoute        String? @map("inferred_route") @db.VarChar(20)
+  ingredientTextRaw    String? @map("ingredient_text_raw")
+  ingredientOrder      Int     @map("ingredient_order")
+  ingredientName       String? @map("ingredient_name")
+  ingredientAlternates String? @map("ingredient_alternates")
+  matchMethod          String  @map("match_method") @db.VarChar(30)
+  ddinterId            String? @map("ddinter_id") @db.VarChar(20)
+  ddinterDrug          String? @map("ddinter_drug")
+  confidence           Float?
+  needsReview          Boolean @map("needs_review")
+  suggestedDdinterId   String? @map("suggested_ddinter_id") @db.VarChar(20)
+  suggestedDdinterDrug String? @map("suggested_ddinter_drug")
+  suggestedScore       Float?  @map("suggested_score")
+
+  @@id([registrationNumber, ingredientOrder])
+  @@map("national_drug_ddinter_mapping")
 }

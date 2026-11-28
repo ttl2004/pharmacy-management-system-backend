@@ -19,6 +19,7 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import { DuplicateResolutionRequest, ManualDrugInput } from '../../drug-leaflet/dtos/manual-drug.request';
 import { ProductExtraFieldsRequest } from './product-extra-fields.request';
 
 const CODE_PATTERN = /^[A-Z0-9_-]+$/;
@@ -32,6 +33,12 @@ const IMAGE_URL_PATTERN = /^(https?:\/\/\S+|\/uploads\/products\/[0-9a-f-]{36}\.
 /** `@Transform` chạy trước class-validator nên `sp0001` được đưa về `SP0001` rồi mới qua regex. */
 const normalizeCode = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? value.trim().toUpperCase() : value;
+
+/** Khi tạo: để trống (hoặc chỉ khoảng trắng) = không gửi → BE tự sinh mã `SPxxxx`. */
+const normalizeOptionalCode = ({ value }: { value: unknown }) => {
+  const code = normalizeCode({ value });
+  return code === '' || code === null ? undefined : code;
+};
 
 export class ProductUnitRequest {
   @IsUUID()
@@ -73,13 +80,13 @@ export class ProductUnitRequest {
 }
 
 export class CreateProductRequest extends ProductExtraFieldsRequest {
-  @Transform(normalizeCode)
+  @IsOptional()
+  @Transform(normalizeOptionalCode)
   @IsString()
-  @IsNotEmpty()
   @MaxLength(30)
   @Matches(CODE_PATTERN, { message: 'code chỉ nhận chữ in hoa không dấu, chữ số, gạch ngang và gạch dưới' })
-  @ApiProperty({ example: 'SP0001' })
-  code: string;
+  @ApiPropertyOptional({ example: 'SP0001', description: 'Bỏ trống → hệ thống tự sinh `SP` + số tăng dần' })
+  code?: string;
 
   @IsOptional()
   @IsString()
@@ -274,4 +281,26 @@ export class UpdateProductRequest extends ProductExtraFieldsRequest {
     description: 'Trạng thái đầy đủ mới của cấu hình đơn vị bán; bỏ trống để giữ nguyên',
   })
   units?: ProductUnitRequest[];
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ManualDrugInput)
+  @ApiPropertyOptional({
+    type: ManualDrugInput,
+    description:
+      'Sửa thông tin thuốc nhập tay (MANUAL) đang gắn với sản phẩm, dùng chung cho mọi sản phẩm gắn thuốc này. ' +
+      'Thuốc DQG gửi khối này trả DRUG_NOT_MANUAL (1618)',
+  })
+  drug?: ManualDrugInput;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => DuplicateResolutionRequest)
+  @ApiPropertyOptional({
+    type: DuplicateResolutionRequest,
+    description:
+      'Gửi lại sau lỗi trùng số đăng ký (1616/1617) khi đổi số đăng ký trong khối `drug`: LINK_DQG chuyển sản phẩm sang ' +
+      'thuốc DQG, OVERWRITE_MANUAL chuyển sang thuốc nhập tay kia và ghi đè nó',
+  })
+  resolution?: DuplicateResolutionRequest;
 }

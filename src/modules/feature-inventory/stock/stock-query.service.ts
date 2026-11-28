@@ -18,6 +18,7 @@ import { canSeeCost } from '../core/cost-visibility';
 import { branchWhere } from '../core/inventory-scope';
 import { afterCursorDesc, decodeCursor, toKeysetPage } from 'src/common/utils/keyset-cursor';
 import {
+  ExpirySummaryQuery,
   LowStockQuery,
   MovementSummaryQuery,
   NearExpiryQuery,
@@ -139,6 +140,27 @@ export class StockQueryService {
     );
   }
 
+  /**
+   * Thẻ Tổng quan: số lô hết hạn / cận hạn ≤ `days` ngày còn tồn, tổng + từng chi nhánh. ADMIN bỏ trống = toàn chuỗi;
+   * PM bị ép về chi nhánh mình (gửi chi nhánh khác → 1506). Đếm cả lô cách ly/thu hồi (như báo cáo cận hạn).
+   */
+  async expirySummary(query: ExpirySummaryQuery, actor: RequestActor) {
+    const branchId = scopedBranchFilter(resolveBranchScope(actor.user), query.branchId);
+    const days = query.days ?? 30;
+    const today = todayInVietnam();
+    const byBranch = await this.stock.findExpirySummary({
+      branchId,
+      today: parseDateOnly(today),
+      until: parseDateOnly(addDaysToDateOnly(today, days)),
+    });
+    return {
+      days,
+      expired: byBranch.reduce((sum, row) => sum + row.expired, 0),
+      expiring: byBranch.reduce((sum, row) => sum + row.expiring, 0),
+      byBranch,
+    };
+  }
+
   async movementSummary(query: MovementSummaryQuery, actor: RequestActor) {
     const branchId = scopedBranchFilter(resolveBranchScope(actor.user), query.branchId);
     const days = daysBetweenDateOnly(query.fromDate, query.toDate);
@@ -149,20 +171,32 @@ export class StockQueryService {
         message: `Kỳ báo cáo tối đa ${MAX_SUMMARY_DAYS} ngày`,
       });
     }
-    const rows = await this.stock.findMovementSummary({
+    const filter = {
       branchId,
       from: vietnamDayStartUtc(query.fromDate),
       toExclusive: vietnamDayStartUtc(addDaysToDateOnly(query.toDate, 1)),
-    });
+    };
+    // Cùng bộ lọc/phạm vi: dòng theo sản phẩm + tổng theo chi nhánh (byBranch, chỉ khi xem toàn chuỗi — đã lọc một
+    // chi nhánh thì bỏ câu thứ hai, trả mảng rỗng).
+    const [rows, byBranch, showCost] = await Promise.all([
+      this.stock.findMovementSummary(filter),
+      branchId ? Promise.resolve([]) : this.stock.findMovementSummaryByBranch(filter),
+      canSeeCost(this.permissions, actor.user),
+    ]);
     // Cột giá trị tiền theo giá vốn: ẩn (null) với người không thấy được giá vốn (K8).
-    const showCost = await canSeeCost(this.permissions, actor.user);
+    const hideValue = <T extends object>(row: T) => ({
+      ...row,
+      openingValue: null,
+      inValue: null,
+      outValue: null,
+      closingValue: null,
+    });
     return {
       branchId: branchId ?? null,
       fromDate: query.fromDate,
       toDate: query.toDate,
-      rows: showCost
-        ? rows
-        : rows.map((row) => ({ ...row, openingValue: null, inValue: null, outValue: null, closingValue: null })),
+      rows: showCost ? rows : rows.map(hideValue),
+      byBranch: showCost ? byBranch : byBranch.map(hideValue),
     };
   }
 

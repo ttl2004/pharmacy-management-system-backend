@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { RecordStatus } from '@prisma/client';
+import { DrugSource, RecordStatus } from '@prisma/client';
 import { Transform } from 'class-transformer';
 import { IsBoolean, IsEnum, IsOptional } from 'class-validator';
 import { AbstractBaseQuery } from 'src/providers/abstract-base/abstract-base.query';
@@ -16,6 +16,11 @@ export class DrugQuery extends AbstractBaseQuery {
   @IsBoolean()
   @ApiPropertyOptional({ type: Boolean, description: 'Lọc thuốc kê đơn' })
   isPrescription?: boolean;
+
+  @IsOptional()
+  @IsEnum(DrugSource)
+  @ApiPropertyOptional({ enum: DrugSource, description: 'DQG = từ CSDL Dược quốc gia, MANUAL = nhập tay từ ảnh tờ HDSD' })
+  source?: DrugSource;
 }
 
 export class DrugSyncQuery {

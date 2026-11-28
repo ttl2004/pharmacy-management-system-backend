@@ -51,6 +51,7 @@ function makeService(
     findActiveDrug: jest.fn().mockResolvedValue({ id: 'drug-id', isPrescription: false }),
     findPacksByDrug: jest.fn().mockResolvedValue([]),
     replaceLocations: jest.fn().mockResolvedValue(undefined),
+    nextAutoCode: jest.fn().mockResolvedValue('SP9999'),
     ...repositoryOverrides,
   } as never;
   const transactions = {
@@ -62,7 +63,7 @@ function makeService(
       ),
     ...transactionOverrides,
   } as never;
-  return new ProductService(repository, transactions, audit as never);
+  return new ProductService(repository, transactions, audit as never, {} as never, {} as never);
 }
 
 function duplicateError(target = 'code'): Prisma.PrismaClientKnownRequestError {
@@ -138,6 +139,48 @@ describe('ProductService — danh sách', () => {
     await service.list({ page: 1, limit: 10 });
 
     expect(findPageWithSummary).toHaveBeenCalledWith({}, expect.anything());
+  });
+
+  it('có tham số lọc mới → Danh mục hàng hoá lọc ở SQL, gộp bộ lọc cũ (search → q, status → statuses)', async () => {
+    const findPageWithSummary = jest.fn();
+    const findCatalogPage = jest.fn().mockResolvedValue({ hits: [], total: 0, page: 2, totalPages: 0, limit: 20 });
+    const service = makeService({ findPageWithSummary, findCatalogPage });
+
+    await service.list({
+      page: 2,
+      limit: 20,
+      search: 'para',
+      status: RecordStatus.ACTIVE,
+      categoryId: 'category-id',
+      types: [ProductType.DRUG],
+      sortBy: 'price',
+      sortDir: 'desc',
+    });
+
+    expect(findPageWithSummary).not.toHaveBeenCalled();
+    expect(findCatalogPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        q: 'para',
+        searchField: 'code_name',
+        statuses: [RecordStatus.ACTIVE],
+        types: [ProductType.DRUG],
+        categoryId: 'category-id',
+        categoryIds: [],
+      }),
+      { page: 2, limit: 20, sortBy: 'price', sortDir: 'desc', deleted: false },
+    );
+  });
+
+  it('chỉ gửi sortBy cũng chuyển sang đường SQL; chế độ đã xoá được giữ', async () => {
+    const findCatalogPage = jest.fn().mockResolvedValue({ hits: [], total: 0, page: 1, totalPages: 0, limit: 10 });
+    const service = makeService({ findCatalogPage });
+
+    await service.list({ page: 1, limit: 10, sortBy: 'name' }, true);
+
+    expect(findCatalogPage).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sortBy: 'name', sortDir: 'asc', deleted: true }),
+    );
   });
 });
 
@@ -341,6 +384,96 @@ describe('ProductService — tạo', () => {
     await expect(service.create(validCreatePayload(), ACTOR)).rejects.toMatchObject({
       errorCode: ErrorCode.DUPLICATE_CODE,
     });
+  });
+
+  it('không gửi code → lấy mã tự sinh của repository trong cùng transaction', async () => {
+    const createProduct = jest.fn().mockResolvedValue({ id: 'product-id' });
+    const nextAutoCode = jest.fn().mockResolvedValue('SP0011');
+    const service = makeService({ createProduct, nextAutoCode, findDetailWith: jest.fn().mockResolvedValue({}) });
+
+    await service.create(validCreatePayload({ code: undefined }), ACTOR);
+
+    expect(nextAutoCode).toHaveBeenCalledTimes(1);
+    expect(createProduct).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'SP0011' }));
+  });
+
+  it('gửi code → dùng đúng mã đó, không tiêu số của sequence', async () => {
+    const nextAutoCode = jest.fn();
+    const service = makeService({ nextAutoCode, findDetailWith: jest.fn().mockResolvedValue({}) });
+
+    await service.create(validCreatePayload(), ACTOR);
+
+    expect(nextAutoCode).not.toHaveBeenCalled();
+  });
+
+  it('mã tự sinh bị lần nhập tay song song giành mất → chạy lại transaction với số kế tiếp', async () => {
+    const createProduct = jest
+      .fn()
+      .mockRejectedValueOnce(duplicateError('code'))
+      .mockResolvedValue({ id: 'product-id' });
+    const nextAutoCode = jest.fn().mockResolvedValueOnce('SP0011').mockResolvedValueOnce('SP0012');
+    const detail = { id: 'product-id', code: 'SP0012' };
+    const service = makeService({ createProduct, nextAutoCode, findDetailWith: jest.fn().mockResolvedValue(detail) });
+
+    await expect(service.create(validCreatePayload({ code: undefined }), ACTOR)).resolves.toEqual(detail);
+    expect(createProduct).toHaveBeenCalledTimes(2);
+    expect(createProduct).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ code: 'SP0012' }));
+  });
+
+  it('mã tự sinh trùng mãi → dừng sau số lần giới hạn, báo DUPLICATE_CODE', async () => {
+    const createProduct = jest.fn().mockRejectedValue(duplicateError('code'));
+    const service = makeService({ createProduct, nextAutoCode: jest.fn().mockResolvedValue('SP0011') });
+
+    await expect(service.create(validCreatePayload({ code: undefined }), ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.DUPLICATE_CODE,
+    });
+    expect(createProduct).toHaveBeenCalledTimes(3);
+  });
+
+  it('mã nhập tay trùng hoặc trùng mã vạch → không chạy lại, báo DUPLICATE_CODE', async () => {
+    const manual = jest.fn().mockRejectedValue(duplicateError('code'));
+    await expect(makeService({ createProduct: manual }).create(validCreatePayload(), ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.DUPLICATE_CODE,
+    });
+    expect(manual).toHaveBeenCalledTimes(1);
+
+    const barcode = jest.fn().mockRejectedValue(duplicateError('barcode'));
+    const service = makeService({ createProduct: barcode, nextAutoCode: jest.fn().mockResolvedValue('SP0011') });
+    await expect(service.create(validCreatePayload({ code: undefined }), ACTOR)).rejects.toMatchObject({
+      errorCode: ErrorCode.DUPLICATE_CODE,
+    });
+    expect(barcode).toHaveBeenCalledTimes(1);
+  });
+
+  it('target dạng chuỗi: products_code_key chạy lại, products_barcode_key (chứa "code") thì không', async () => {
+    const stringTarget = (target: string) =>
+      new Prisma.PrismaClientKnownRequestError('duplicate', {
+        code: 'P2002',
+        clientVersion: '6.19.3',
+        meta: { target },
+      });
+    const retry = jest
+      .fn()
+      .mockRejectedValueOnce(stringTarget('products_code_key'))
+      .mockResolvedValue({ id: 'product-id' });
+    const detail = { id: 'product-id' };
+    await expect(
+      makeService({
+        createProduct: retry,
+        nextAutoCode: jest.fn().mockResolvedValue('SP0011'),
+        findDetailWith: jest.fn().mockResolvedValue(detail),
+      }).create(validCreatePayload({ code: undefined }), ACTOR),
+    ).resolves.toEqual(detail);
+    expect(retry).toHaveBeenCalledTimes(2);
+
+    const barcode = jest.fn().mockRejectedValue(stringTarget('products_barcode_key'));
+    await expect(
+      makeService({ createProduct: barcode, nextAutoCode: jest.fn().mockResolvedValue('SP0011') }).create(
+        validCreatePayload({ code: undefined }),
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ errorCode: ErrorCode.DUPLICATE_CODE });
+    expect(barcode).toHaveBeenCalledTimes(1);
   });
 
   it('ghi ProductUnit lỗi thì lỗi ném ra ngoài, không trả chi tiết', async () => {

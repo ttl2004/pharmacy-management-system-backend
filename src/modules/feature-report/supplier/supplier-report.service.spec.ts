@@ -3,7 +3,7 @@ import { AuthRole } from 'src/common/types/common.enum';
 import { ErrorCode } from 'src/common/types/error-code';
 import { PermissionService } from '../../feature-auth/permission/permission.service';
 import { InMemoryReportCache } from '../report-cache';
-import { SupplierReportRepository } from './supplier-report.repository';
+import { SupplierReportFilter, SupplierReportRepository } from './supplier-report.repository';
 import { SupplierReportService } from './supplier-report.service';
 
 const actorOf = (role: AuthRole, branchId: string | null) =>
@@ -28,6 +28,7 @@ describe('SupplierReportService', () => {
     topProducts: jest.fn(),
     suppliersByIds: jest.fn(),
     branches: jest.fn(),
+    receiptList: jest.fn(),
   };
   const permissions = { getGrantedCodes: jest.fn() };
   let service: SupplierReportService;
@@ -269,5 +270,57 @@ describe('SupplierReportService', () => {
     now += 60_001;
     await service.supplierReport({ ...range, supplierId: S1 }, admin);
     expect(repo.receipts).toHaveBeenCalledTimes(5);
+  });
+
+  describe('supplierReceipts', () => {
+    const row = {
+      id: 'r1',
+      code: 'PN1',
+      confirmedAt: new Date('2026-11-05T03:00:00Z'),
+      supplierId: S1,
+      supplierName: 'A',
+      branchId: BRANCH_1,
+      branchName: 'CN1',
+      totalAmount: 1000n,
+      paidAmount: 300n,
+      returnAmount: 100n,
+      total: 7,
+    };
+
+    it('ánh xạ dòng, remaining = nhập − trả − trả hàng, total từ cửa sổ; mặc định limit 100; mốc giờ VN', async () => {
+      repo.receiptList.mockResolvedValue([row]);
+      const res = await service.supplierReceipts({ ...range, supplierId: S1 }, admin);
+      expect(res.total).toBe(7);
+      expect(res.items[0]).toMatchObject({
+        paidAmount: 300,
+        returnAmount: 100,
+        remaining: 600,
+        confirmedAt: '2026-11-05T03:00:00.000Z',
+      });
+      const [filter, limit] = repo.receiptList.mock.calls[0] as [SupplierReportFilter, number];
+      expect(limit).toBe(100);
+      expect(filter.start.toISOString()).toBe('2026-10-31T17:00:00.000Z');
+      expect(filter.end.toISOString()).toBe('2026-11-30T17:00:00.000Z');
+      expect(filter.supplierId).toBe(S1);
+    });
+
+    it('PM bị giới hạn chi nhánh mình, CN khác → 1506; rỗng → total 0', async () => {
+      repo.receiptList.mockResolvedValue([]);
+      const res = await service.supplierReceipts(range, pm);
+      expect(res).toEqual({ items: [], total: 0 });
+      expect((repo.receiptList.mock.calls[0] as [SupplierReportFilter])[0].branchIds).toEqual([BRANCH_1]);
+      await expect(service.supplierReceipts({ ...range, branchIds: [BRANCH_2] }, pm)).rejects.toMatchObject({
+        response: { code: ErrorCode.BRANCH_ACCESS_DENIED },
+      });
+    });
+
+    it('thiếu supplier-debt:read → paidAmount, remaining null; có cache', async () => {
+      permissions.getGrantedCodes.mockResolvedValue(new Set(['report:read']));
+      repo.receiptList.mockResolvedValue([row]);
+      const res = await service.supplierReceipts({ ...range, limit: 5 }, admin);
+      expect(res.items[0]).toMatchObject({ paidAmount: null, remaining: null, totalAmount: 1000 });
+      await service.supplierReceipts({ ...range, limit: 5 }, admin);
+      expect(repo.receiptList).toHaveBeenCalledTimes(1);
+    });
   });
 });

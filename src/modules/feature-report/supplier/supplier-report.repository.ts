@@ -34,6 +34,21 @@ export interface BranchNameRow {
   name: string;
 }
 
+export interface ReceiptListRow {
+  id: string;
+  code: string;
+  confirmedAt: Date;
+  supplierId: string;
+  supplierName: string;
+  branchId: string;
+  branchName: string;
+  totalAmount: bigint;
+  paidAmount: bigint;
+  returnAmount: bigint;
+  /** Tổng số phiếu khớp bộ lọc (trước LIMIT). */
+  total: number;
+}
+
 export interface TopProductRow {
   productId: string;
   productName: string;
@@ -132,6 +147,40 @@ export class SupplierReportRepository {
       qtyBase: Number(r.qtyBase),
       amount: r.amount,
     }));
+  }
+
+  /**
+   * Danh sách phiếu nhập tạo nên cột "Phiếu nhập": CÙNG điều kiện `receipts()` (CONFIRMED, chưa xoá, `confirmedAt` trong
+   * `[start, end)`, cùng `branchCond`/`supplierCond`). Đã trả = Σ phân bổ của phiếu chi chưa huỷ (như `payments()`, không
+   * lọc theo `paidAt`); trả hàng = Σ (`totalAmount − supplierPaid`) của phiếu trả NCC CONFIRMED gắn `goodsReceiptId`
+   * (như `returns()`). Sắp xếp mới nhất trước; `total` = COUNT cửa sổ cùng câu truy vấn.
+   */
+  receiptList(f: SupplierReportFilter, limit: number): Promise<ReceiptListRow[]> {
+    // Lọc + ORDER + LIMIT + COUNT cửa sổ chạy trên `page`; các subquery đã trả/trả hàng chỉ chạy cho ≤ `limit` dòng.
+    return this.prisma.$queryRaw<ReceiptListRow[]>(Prisma.sql`
+      WITH page AS (
+        SELECT r."id", r."code", r."confirmedAt", r."supplierId", r."branchId", r."totalAmount",
+          (COUNT(*) OVER())::int AS total
+        FROM "goods_receipts" r
+        WHERE r."status" = 'CONFIRMED' AND r."isDeleted" = false
+          AND r."confirmedAt" >= ${f.start} AND r."confirmedAt" < ${f.end}
+          ${this.branchCond(f, 'r')} ${this.supplierCond(f, 'r')}
+        ORDER BY r."confirmedAt" DESC, r."id"
+        LIMIT ${limit}
+      )
+      SELECT g."id", g."code", g."confirmedAt", g."supplierId", s."name" AS "supplierName",
+        g."branchId", b."name" AS "branchName", g."totalAmount",
+        COALESCE((SELECT SUM(a."amount") FROM "supplier_payment_allocations" a
+          JOIN "supplier_payments" p ON p."id" = a."paymentId" AND p."cancelledAt" IS NULL
+          WHERE a."receiptId" = g."id"), 0)::bigint AS "paidAmount",
+        COALESCE((SELECT SUM(t."totalAmount" - t."supplierPaid") FROM "stock_adjustments" t
+          WHERE t."goodsReceiptId" = g."id" AND t."type" = 'RETURN_TO_SUPPLIER' AND t."status" = 'CONFIRMED'
+            AND t."isDeleted" = false), 0)::bigint AS "returnAmount",
+        g.total
+      FROM page g
+      JOIN "suppliers" s ON s."id" = g."supplierId"
+      JOIN "branches" b ON b."id" = g."branchId"
+      ORDER BY g."confirmedAt" DESC, g."id"`);
   }
 
   /** Tên NCC của các NCC có mặt trong báo cáo — một câu cho cả danh sách. */

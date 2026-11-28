@@ -5,6 +5,7 @@ import { CurrentActor, type RequestActor } from 'src/common/decorators/current-a
 import { AuthzGuard } from '../../feature-auth/authz/guards/auth.guard';
 import { RequirePermissions } from '../../feature-auth/permission/decorators/require-permissions.decorator';
 import { PermissionGuard } from '../../feature-auth/permission/guards/permission.guard';
+import { SupplierReceiptsQuery } from './dtos/supplier-receipts.query';
 import { SupplierReportQuery } from './dtos/supplier-report.query';
 import { SupplierReportService } from './supplier-report.service';
 
@@ -31,5 +32,19 @@ export class SupplierReportController {
   })
   supplier(@Query() query: SupplierReportQuery, @CurrentActor() actor: RequestActor) {
     return this.service.supplierReport(query, actor);
+  }
+
+  @RequirePermissions('report:read')
+  @Get('supplier/receipts')
+  @ApiOperation({
+    summary: 'Danh sách phiếu nhập tạo nên báo cáo nhà cung cấp',
+    description:
+      'Cùng điều kiện cột "Phiếu nhập" của báo cáo NCC (CONFIRMED, chưa huỷ/xoá, confirmedAt trong kỳ giờ VN), nên `total` = số ' +
+      'phiếu ở báo cáo cho cùng bộ lọc. Mới nhất trước, tối đa `limit` (mặc định 100, tối đa 500). `paidAmount` = tổng phân bổ ' +
+      'phiếu chi chưa huỷ vào phiếu; `returnAmount` = Σ(tiền trả − NCC hoàn ngay) của phiếu trả NCC đã xác nhận gắn với phiếu; ' +
+      '`remaining` = tiền nhập − đã trả − trả hàng. Không có quyền supplier-debt:read: `paidAmount`, `remaining` = null. Cache 60 giây.',
+  })
+  supplierReceipts(@Query() query: SupplierReceiptsQuery, @CurrentActor() actor: RequestActor) {
+    return this.service.supplierReceipts(query, actor);
   }
 }

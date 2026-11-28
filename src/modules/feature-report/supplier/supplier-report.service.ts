@@ -7,6 +7,7 @@ import { addDaysToDateOnly, daysBetweenDateOnly, vietnamDayStartUtc } from 'src/
 import { PermissionService } from '../../feature-auth/permission/permission.service';
 import { REPORT_CACHE, ReportCache } from '../report-cache';
 import { resolveReportScope } from '../report-scope';
+import { SUPPLIER_RECEIPTS_DEFAULT_LIMIT, SupplierReceiptsQuery } from './dtos/supplier-receipts.query';
 import { SupplierReportQuery } from './dtos/supplier-report.query';
 import { DebtComponentRow, SupplierReportRepository } from './supplier-report.repository';
 
@@ -55,6 +56,26 @@ export interface SupplierReportResponse {
   bySupplier: SupplierReportRow[];
   byBranch: SupplierReportBranchRow[];
   topProducts: { productId: string; productName: string; qtyBase: number; amount: number }[];
+}
+
+/** Phiếu nhập trong báo cáo; `paidAmount`/`remaining` `null` khi không có `supplier-debt:read`. */
+export interface SupplierReceiptItem {
+  id: string;
+  code: string;
+  confirmedAt: string;
+  supplierId: string;
+  supplierName: string;
+  branchId: string;
+  branchName: string;
+  totalAmount: number;
+  paidAmount: number | null;
+  returnAmount: number;
+  remaining: number | null;
+}
+
+export interface SupplierReceiptsResponse {
+  items: SupplierReceiptItem[];
+  total: number;
 }
 
 interface Acc {
@@ -241,6 +262,53 @@ export class SupplierReportService {
     };
     this.cache.set(key, report, SUPPLIER_REPORT_TTL_MS);
     return report;
+  }
+
+  async supplierReceipts(query: SupplierReceiptsQuery, actor: RequestActor): Promise<SupplierReceiptsResponse> {
+    this.assertRange(query.from, query.to);
+    const { branchIds, scopeKey } = resolveReportScope(actor, query.branchIds);
+    const canSeeDebt = await this.canSeeDebt(actor);
+    const limit = query.limit ?? SUPPLIER_RECEIPTS_DEFAULT_LIMIT;
+    const key = [
+      'supplier-receipts',
+      query.from,
+      query.to,
+      (branchIds ?? []).join(','),
+      query.supplierId ?? '',
+      limit,
+      scopeKey,
+      canSeeDebt ? 'debt' : 'nodebt',
+    ].join('|');
+    const cached = this.cache.get<SupplierReceiptsResponse>(key);
+    if (cached) return cached;
+
+    const rows = await this.repo.receiptList(
+      {
+        start: vietnamDayStartUtc(query.from),
+        end: vietnamDayStartUtc(addDaysToDateOnly(query.to, 1)),
+        branchIds,
+        supplierId: query.supplierId,
+      },
+      limit,
+    );
+    const result: SupplierReceiptsResponse = {
+      items: rows.map((r) => ({
+        id: r.id,
+        code: r.code,
+        confirmedAt: r.confirmedAt.toISOString(),
+        supplierId: r.supplierId,
+        supplierName: r.supplierName,
+        branchId: r.branchId,
+        branchName: r.branchName,
+        totalAmount: Number(r.totalAmount),
+        paidAmount: canSeeDebt ? Number(r.paidAmount) : null,
+        returnAmount: Number(r.returnAmount),
+        remaining: canSeeDebt ? Number(r.totalAmount - r.paidAmount - r.returnAmount) : null,
+      })),
+      total: rows[0]?.total ?? 0,
+    };
+    this.cache.set(key, result, SUPPLIER_REPORT_TTL_MS);
+    return result;
   }
 
   /** Như `SupplierListService.scopeParams`: SUPER_ADMIN luôn có, vai khác theo quyền `supplier-debt:read`. */

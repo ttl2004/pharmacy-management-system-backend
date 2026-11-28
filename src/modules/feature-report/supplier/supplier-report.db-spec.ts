@@ -558,4 +558,77 @@ describe('GET /reports/supplier — truy vấn thật (db)', () => {
       { productId: base.products[0].id, productName: 'Paracetamol', qtyBase: 20, amount: 700 },
     ]);
   });
+
+  describe('GET /reports/supplier/receipts', () => {
+    const q = { from: '2026-11-01', to: '2026-11-30' };
+
+    it('số phiếu = cột Phiếu nhập của báo cáo; loại huỷ/xoá/ngoài kỳ; đã trả và trả hàng theo từng phiếu', async () => {
+      const r1 = await receipt(0, 0, 20_000_000, '2026-11-05T10:00:00');
+      const r2 = await receipt(0, 1, 3_000_000, '2026-11-20T10:00:00');
+      await receipt(1, 0, 700, '2026-11-03T10:00:00');
+      await receipt(0, 0, 1, '2026-11-03T10:00:00', { status: ReceiptStatus.CANCELLED });
+      await receipt(0, 0, 1, '2026-11-03T10:00:00', { deleted: true });
+      await receipt(0, 0, 1, '2026-10-31T23:59:00');
+      await receipt(0, 0, 1, '2026-12-01T00:00:00');
+      await payment(0, '2026-11-12T09:00:00', [{ receiptId: r1.id, amount: 15_000_000 }]);
+      await payment(0, '2026-11-13T09:00:00', [{ receiptId: r1.id, amount: 1_000_000 }], true);
+      await prisma.stockAdjustment.create({
+        data: {
+          code: 'TH-LINK',
+          branchId: base.branches[1].id,
+          supplierId: sup[0].id,
+          goodsReceiptId: r2.id,
+          type: AdjustmentType.RETURN_TO_SUPPLIER,
+          status: ReceiptStatus.CONFIRMED,
+          reason: 'Lỗi',
+          goodsAmount: 500_000,
+          totalAmount: 500_000,
+          supplierPaid: 100_000,
+          confirmedAt: vn('2026-11-21T09:00:00'),
+        },
+      });
+
+      const report = await service.supplierReport(q, adminActor);
+      const list = await service.supplierReceipts(q, adminActor);
+      expect(list.total).toBe(report.bySupplier.reduce((n, r) => n + r.receiptCount, 0));
+      expect(list.total).toBe(report.byBranch.reduce((n, r) => n + r.receiptCount, 0));
+      expect(list.items.map((i) => i.confirmedAt)).toEqual([...list.items.map((i) => i.confirmedAt)].sort().reverse());
+      const i1 = list.items.find((i) => i.id === r1.id)!;
+      expect(i1).toMatchObject({
+        totalAmount: 20_000_000,
+        paidAmount: 15_000_000,
+        returnAmount: 0,
+        remaining: 5_000_000,
+      });
+      expect(i1.supplierName).toBe('Dược Hậu Giang');
+      const i2 = list.items.find((i) => i.id === r2.id)!;
+      expect(i2).toMatchObject({ paidAmount: 0, returnAmount: 400_000, remaining: 2_600_000 });
+
+      const one = await service.supplierReceipts({ ...q, supplierId: sup[0].id }, adminActor);
+      expect(one.total).toBe(report.bySupplier.find((r) => r.supplierId === sup[0].id)!.receiptCount);
+      const br = await service.supplierReceipts({ ...q, branchIds: [base.branches[1].id] }, adminActor);
+      expect(br.items.map((i) => i.id)).toEqual([r2.id]);
+      const lim = await service.supplierReceipts({ ...q, limit: 1 }, adminActor);
+      expect(lim.items).toHaveLength(1);
+      expect(lim.total).toBe(list.total);
+    });
+
+    it('PM chỉ thấy chi nhánh mình, xin chi nhánh khác → 1506', async () => {
+      await receipt(0, 0, 100, '2026-11-05T10:00:00');
+      await receipt(0, 1, 200, '2026-11-06T10:00:00');
+      const own = await service.supplierReceipts(q, pmActor(base.branches[0].id));
+      expect(own.total).toBe(1);
+      expect(own.items[0].branchId).toBe(base.branches[0].id);
+      await expect(
+        service.supplierReceipts({ ...q, branchIds: [base.branches[1].id] }, pmActor(base.branches[0].id)),
+      ).rejects.toBeDefined();
+    });
+
+    it('thiếu supplier-debt:read → paidAmount, remaining null', async () => {
+      await receipt(0, 0, 100, '2026-11-05T10:00:00');
+      granted = new Set(['report:read']);
+      const list = await service.supplierReceipts(q, adminActor);
+      expect(list.items[0]).toMatchObject({ totalAmount: 100, paidAmount: null, remaining: null });
+    });
+  });
 });

@@ -109,14 +109,31 @@ export class GoodsReceiptRepository {
   }
 
   /** `scopeWhere` (vd `{ branchId }`) nằm ngay trong `where` — bản ghi ngoài phạm vi coi như không tồn tại. */
-  findDetail(
+  async findDetail(
     id: string,
     scopeWhere: { branchId?: string },
     client: Prisma.TransactionClient = this.prisma,
   ): Promise<GoodsReceiptDetail | null> {
-    return client.goodsReceipt
-      .findFirst({ where: { id, isDeleted: false, ...scopeWhere }, select: RECEIPT_DETAIL_SELECT })
-      .then((row) => (row ? presentReceipt(row) : null));
+    const row = await client.goodsReceipt.findFirst({
+      where: { id, isDeleted: false, ...scopeWhere },
+      select: RECEIPT_DETAIL_SELECT,
+    });
+    if (!row) return null;
+    return { ...presentReceipt(row), returnedAmount: await this.returnedAmountOf(client, id) };
+  }
+
+  /**
+   * Phần nợ của phiếu đã được trả hàng NCC bù trừ: Σ (`totalAmount − supplierPaid`) của phiếu trả NCC CONFIRMED, chưa
+   * xoá, gắn `goodsReceiptId` — CÙNG biểu thức/điều kiện với cột "trả hàng" của báo cáo NCC (`receiptList`) và dòng
+   * RETURN của sổ nợ. Nợ thật của phiếu = `totalAmount − returnedAmount`. Một câu truy vấn, đi theo index `goodsReceiptId`.
+   */
+  async returnedAmountOf(client: Prisma.TransactionClient, receiptId: string): Promise<bigint> {
+    const rows = await client.$queryRaw<{ amount: bigint }[]>(Prisma.sql`
+      SELECT COALESCE(SUM(t."totalAmount" - t."supplierPaid"), 0)::bigint AS amount
+      FROM "stock_adjustments" t
+      WHERE t."goodsReceiptId" = ${receiptId}::uuid AND t."type" = 'RETURN_TO_SUPPLIER' AND t."status" = 'CONFIRMED'
+        AND t."isDeleted" = false`);
+    return rows[0]?.amount ?? 0n;
   }
 
   findStatus(tx: Prisma.TransactionClient, id: string, scopeWhere: { branchId?: string }): Promise<ReceiptHead | null> {

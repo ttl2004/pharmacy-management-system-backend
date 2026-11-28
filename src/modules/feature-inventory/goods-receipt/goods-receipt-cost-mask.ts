@@ -28,6 +28,7 @@ export function maskReceiptDetail(detail: GoodsReceiptDetail) {
   return {
     ...detail,
     ...NO_MONEY,
+    returnedAmount: null,
     expenses: [],
     items: detail.items.map((item) => ({ ...item, importPrice: null, unitDiscount: null, totalPrice: null })),
   };

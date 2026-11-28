@@ -29,13 +29,14 @@ const head = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-function setup(receiptHead: ReturnType<typeof head>) {
+function setup(receiptHead: ReturnType<typeof head>, returned = 0n) {
   const receipts = {
     findStatus: jest.fn().mockResolvedValue(receiptHead),
     findStatusForUpdate: jest.fn().mockResolvedValue(receiptHead),
     transition: jest.fn().mockResolvedValue(1),
     findDetail: jest.fn().mockResolvedValue({ id: 'r1' }),
     isValidReceiver: jest.fn().mockResolvedValue(true),
+    returnedAmountOf: jest.fn().mockResolvedValue(returned),
   };
   const debts = {
     lockSupplier: jest.fn().mockResolvedValue(true),
@@ -48,8 +49,8 @@ function setup(receiptHead: ReturnType<typeof head>) {
 }
 
 describe('GoodsReceiptPaymentService — nhật ký', () => {
-  function makeService(receiptHead: ReturnType<typeof head>) {
-    const deps = setup(receiptHead);
+  function makeService(receiptHead: ReturnType<typeof head>, returned = 0n) {
+    const deps = setup(receiptHead, returned);
     const supplierPayments = {
       createForReceipt: jest.fn().mockResolvedValue({
         id: 'pay1',
@@ -58,7 +59,9 @@ describe('GoodsReceiptPaymentService — nhật ký', () => {
         auditEntries: [{ event: 'GOODS_RECEIPT.PAYMENT_UPDATED' }, { event: 'SUPPLIER_PAYMENT.CREATED' }],
       }),
     };
-    const permissions = { getGrantedCodes: jest.fn().mockResolvedValue(new Set(['supplier-debt:write'])) };
+    const permissions = {
+      getGrantedCodes: jest.fn().mockResolvedValue(new Set(['supplier-debt:write', 'goods-receipt:create'])),
+    };
     const service = new GoodsReceiptPaymentService(
       deps.receipts as never,
       deps.locker,
@@ -68,7 +71,7 @@ describe('GoodsReceiptPaymentService — nhật ký', () => {
       deps.transactions as never,
       deps.audit as never,
     );
-    return { service, supplierPayments, audit: deps.audit };
+    return { service, supplierPayments, audit: deps.audit, receipts: deps.receipts };
   }
 
   it('phiếu nháp: GOODS_RECEIPT.PAYMENT_UPDATED, amount = paidAmount mới (bigint)', async () => {
@@ -105,6 +108,63 @@ describe('GoodsReceiptPaymentService — nhật ký', () => {
     expect(audit.record).toHaveBeenCalledTimes(1);
     const [, , entries] = audit.record.mock.calls[0] as RecordCall;
     expect(entries.map((entry) => entry.event)).toEqual(['GOODS_RECEIPT.PAYMENT_UPDATED', 'SUPPLIER_PAYMENT.CREATED']);
+  });
+
+  it('phiếu đã xác nhận có trả hàng NCC: vượt nợ thật (tổng − trả hàng) bị từ chối, bằng nợ thật thì lập phiếu chi đúng số', async () => {
+    const confirmed = head({ status: ReceiptStatus.CONFIRMED, totalAmount: 10_000n, paidAmount: 2_000n });
+    const over = makeService(confirmed, 4_000n);
+    await expect(over.service.updatePayment('r1', { paidAmount: 6_001 } as never, PM_A)).rejects.toThrow(
+      'Tổng đã trả vượt số nợ của phiếu (đã trừ trả hàng): tối đa 6000',
+    );
+    expect(over.supplierPayments.createForReceipt).not.toHaveBeenCalled();
+
+    const atNet = makeService(confirmed, 4_000n);
+    await atNet.service.updatePayment('r1', { paidAmount: 6_000 } as never, PM_A);
+    expect(atNet.supplierPayments.createForReceipt).toHaveBeenCalledWith(
+      {},
+      expect.anything(),
+      4_000n,
+      expect.anything(),
+      { actorId: 'pm-a' },
+    );
+  });
+
+  it('nợ thật âm hoặc bằng số đã trả: tăng bị chặn và báo tối đa 0; số không đổi không bị chặn bởi trần', async () => {
+    const confirmed = head({ status: ReceiptStatus.CONFIRMED, totalAmount: 10_000n, paidAmount: 10_000n });
+    const a = makeService(confirmed, 12_000n);
+    await expect(a.service.updatePayment('r1', { paidAmount: 10_000 } as never, PM_A)).resolves.toBeDefined();
+    const b = makeService(head({ status: ReceiptStatus.CONFIRMED, totalAmount: 10_000n, paidAmount: 9_000n }), 12_000n);
+    await expect(b.service.updatePayment('r1', { paidAmount: 9_500 } as never, PM_A)).rejects.toThrow('tối đa 0');
+  });
+
+  it('giảm số đã trả: báo "huỷ phiếu chi" trước, không xét trần trả hàng', async () => {
+    const { service, receipts } = makeService(
+      head({ status: ReceiptStatus.CONFIRMED, totalAmount: 10_000n, paidAmount: 8_000n }),
+      9_000n,
+    );
+    await expect(service.updatePayment('r1', { paidAmount: 5_000 } as never, PM_A)).rejects.toThrow('huỷ phiếu chi');
+    expect(receipts.returnedAmountOf).not.toHaveBeenCalled();
+  });
+
+  it('người không thấy giá vốn → 403, không khoá/ghi gì', async () => {
+    const deps = setup(head({ status: ReceiptStatus.CONFIRMED }));
+    const service = new GoodsReceiptPaymentService(
+      deps.receipts as never,
+      deps.locker,
+      deps.debts as never,
+      {} as never,
+      { getGrantedCodes: jest.fn().mockResolvedValue(new Set(['supplier-debt:write'])) } as never,
+      deps.transactions as never,
+      deps.audit as never,
+    );
+    await expect(service.updatePayment('r1', { paidAmount: 5_000 } as never, PM_A)).rejects.toBeDefined();
+    expect(deps.transactions.run).not.toHaveBeenCalled();
+  });
+
+  it('phiếu nháp không tra trả hàng (chưa thể có phiếu trả)', async () => {
+    const { service, receipts } = makeService(head(), 4_000n);
+    await service.updatePayment('r1', { paidAmount: 10_000 } as never, PM_A);
+    expect(receipts.returnedAmountOf).not.toHaveBeenCalled();
   });
 
   it('không đổi số đã trả → không ghi', async () => {

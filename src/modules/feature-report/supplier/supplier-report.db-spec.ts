@@ -275,6 +275,34 @@ describe('GET /reports/supplier — truy vấn thật (db)', () => {
       returnAmount: 50,
       adjustmentAmount: 18,
     });
+    // Toàn chuỗi: mỗi chi nhánh một dòng, phiếu chi tách theo chi nhánh của phiếu nhập được phân bổ; tổng = totals.
+    expect(all.byBranch).toEqual([
+      {
+        branchId: cn2.id,
+        branchName: 'Chi nhánh 2',
+        receiptCount: 1,
+        purchaseAmount: 2000,
+        returnCount: 1,
+        returnAmount: 50,
+        paidAmount: 200,
+        adjustmentAmount: 11,
+        openingDebt: 0,
+        closingDebt: 2000 - 200 - 50 + 11,
+      },
+      {
+        branchId: cn1.id,
+        branchName: 'Chi nhánh 1',
+        receiptCount: 1,
+        purchaseAmount: 1000,
+        returnCount: 0,
+        returnAmount: 0,
+        paidAmount: 100,
+        adjustmentAmount: 7,
+        openingDebt: 0,
+        closingDebt: 1000 - 100 + 7,
+      },
+    ]);
+    expect(all.byBranch.reduce((sum, b) => sum + (b.closingDebt ?? 0), 0)).toBe(all.totals.closingDebt);
 
     const only2 = await service.supplierReport({ ...q, branchIds: [cn2.id] }, adminActor);
     expect(only2.bySupplier[0]).toMatchObject({
@@ -285,6 +313,7 @@ describe('GET /reports/supplier — truy vấn thật (db)', () => {
       adjustmentAmount: 11,
       closingDebt: 2000 - 200 - 50 + 11,
     });
+    expect(only2.byBranch.map((b) => b.branchId)).toEqual([cn2.id]);
 
     const pm = await service.supplierReport(q, pmActor(cn1.id));
     expect(pm.bySupplier[0]).toMatchObject({
@@ -293,9 +322,61 @@ describe('GET /reports/supplier — truy vấn thật (db)', () => {
       returnAmount: 0,
       adjustmentAmount: 7,
     });
+    expect(pm.byBranch).toEqual([expect.objectContaining({ branchId: cn1.id, purchaseAmount: 1000, paidAmount: 100 })]);
     await expect(service.supplierReport({ ...q, branchIds: [cn2.id] }, pmActor(cn1.id))).rejects.toMatchObject({
       response: { code: 1506 },
     });
+  });
+
+  it('byBranch: một phiếu chi phân bổ vào phiếu nhập của 2 chi nhánh → đã trả tách theo chi nhánh, totals không đổi; tổng các dòng = totals', async () => {
+    const [cn1, cn2] = base.branches;
+    const old1 = await receipt(0, 0, 4_000, '2026-10-15T10:00:00');
+    const r1 = await receipt(0, 0, 10_000, '2026-11-02T10:00:00');
+    const r2 = await receipt(0, 1, 6_000, '2026-11-02T11:00:00');
+    await receipt(1, 1, 3_000, '2026-11-03T10:00:00');
+    // Phiếu chi lập ở CN1 nhưng trả cho cả phiếu nhập CN1 và CN2.
+    await payment(0, '2026-11-05T10:00:00', [
+      { receiptId: r1.id, amount: 7_000 },
+      { receiptId: r2.id, amount: 2_500 },
+    ]);
+    await payment(0, '2026-10-20T10:00:00', [{ receiptId: old1.id, amount: 1_000 }]); // trước kỳ: vào nợ đầu kỳ
+
+    const q = { from: '2026-11-01', to: '2026-11-30' };
+    const all = await service.supplierReport(q, adminActor);
+    expect(all.totals).toEqual({
+      purchaseAmount: 19_000,
+      returnAmount: 0,
+      paidAmount: 9_500,
+      adjustmentAmount: 0,
+      openingDebt: 3_000,
+      closingDebt: 3_000 + 19_000 - 9_500,
+    });
+    const byId = new Map(all.byBranch.map((b) => [b.branchId, b]));
+    expect(byId.get(cn1.id)).toMatchObject({
+      receiptCount: 1,
+      purchaseAmount: 10_000,
+      paidAmount: 7_000,
+      openingDebt: 3_000,
+      closingDebt: 3_000 + 10_000 - 7_000,
+    });
+    expect(byId.get(cn2.id)).toMatchObject({
+      receiptCount: 2,
+      purchaseAmount: 9_000,
+      paidAmount: 2_500,
+      openingDebt: 0,
+      closingDebt: 9_000 - 2_500,
+    });
+    const sum = (k: 'purchaseAmount' | 'paidAmount' | 'returnAmount' | 'openingDebt' | 'closingDebt') =>
+      all.byBranch.reduce((acc, b) => acc + (b[k] ?? 0), 0);
+    expect(sum('purchaseAmount')).toBe(all.totals.purchaseAmount);
+    expect(sum('paidAmount')).toBe(all.totals.paidAmount);
+    expect(sum('returnAmount')).toBe(all.totals.returnAmount);
+    expect(sum('openingDebt')).toBe(all.totals.openingDebt);
+    expect(sum('closingDebt')).toBe(all.totals.closingDebt);
+    // Lọc từng chi nhánh cho đúng số của dòng chi nhánh đó trong toàn chuỗi.
+    const only2 = await service.supplierReport({ ...q, branchIds: [cn2.id] }, adminActor);
+    expect(only2.totals.paidAmount).toBe(2_500);
+    expect(only2.byBranch).toEqual([byId.get(cn2.id)]);
   });
 
   it('bySupplier: có phát sinh HOẶC nợ đầu kỳ ≠ 0; sắp theo purchaseAmount giảm dần rồi supplierId; lọc supplierId', async () => {
@@ -423,6 +504,25 @@ describe('GET /reports/supplier — truy vấn thật (db)', () => {
       openingDebt: null,
       closingDebt: null,
     });
+    // Theo chi nhánh: số nhập/trả vẫn có, mọi trường nợ null như totals.
+    expect(report.byBranch).toEqual([
+      expect.objectContaining({
+        branchId: base.branches[0].id,
+        purchaseAmount: 900,
+        returnAmount: 100,
+        paidAmount: null,
+        adjustmentAmount: null,
+        openingDebt: null,
+        closingDebt: null,
+      }),
+      expect.objectContaining({
+        branchId: base.branches[1].id,
+        purchaseAmount: 0,
+        paidAmount: null,
+        openingDebt: null,
+        closingDebt: null,
+      }),
+    ]);
     const json = JSON.stringify(report);
     expect(json).not.toContain('777777');
     expect(json).not.toContain('321');
@@ -457,5 +557,78 @@ describe('GET /reports/supplier — truy vấn thật (db)', () => {
     expect(only.topProducts).toEqual([
       { productId: base.products[0].id, productName: 'Paracetamol', qtyBase: 20, amount: 700 },
     ]);
+  });
+
+  describe('GET /reports/supplier/receipts', () => {
+    const q = { from: '2026-11-01', to: '2026-11-30' };
+
+    it('số phiếu = cột Phiếu nhập của báo cáo; loại huỷ/xoá/ngoài kỳ; đã trả và trả hàng theo từng phiếu', async () => {
+      const r1 = await receipt(0, 0, 20_000_000, '2026-11-05T10:00:00');
+      const r2 = await receipt(0, 1, 3_000_000, '2026-11-20T10:00:00');
+      await receipt(1, 0, 700, '2026-11-03T10:00:00');
+      await receipt(0, 0, 1, '2026-11-03T10:00:00', { status: ReceiptStatus.CANCELLED });
+      await receipt(0, 0, 1, '2026-11-03T10:00:00', { deleted: true });
+      await receipt(0, 0, 1, '2026-10-31T23:59:00');
+      await receipt(0, 0, 1, '2026-12-01T00:00:00');
+      await payment(0, '2026-11-12T09:00:00', [{ receiptId: r1.id, amount: 15_000_000 }]);
+      await payment(0, '2026-11-13T09:00:00', [{ receiptId: r1.id, amount: 1_000_000 }], true);
+      await prisma.stockAdjustment.create({
+        data: {
+          code: 'TH-LINK',
+          branchId: base.branches[1].id,
+          supplierId: sup[0].id,
+          goodsReceiptId: r2.id,
+          type: AdjustmentType.RETURN_TO_SUPPLIER,
+          status: ReceiptStatus.CONFIRMED,
+          reason: 'Lỗi',
+          goodsAmount: 500_000,
+          totalAmount: 500_000,
+          supplierPaid: 100_000,
+          confirmedAt: vn('2026-11-21T09:00:00'),
+        },
+      });
+
+      const report = await service.supplierReport(q, adminActor);
+      const list = await service.supplierReceipts(q, adminActor);
+      expect(list.total).toBe(report.bySupplier.reduce((n, r) => n + r.receiptCount, 0));
+      expect(list.total).toBe(report.byBranch.reduce((n, r) => n + r.receiptCount, 0));
+      expect(list.items.map((i) => i.confirmedAt)).toEqual([...list.items.map((i) => i.confirmedAt)].sort().reverse());
+      const i1 = list.items.find((i) => i.id === r1.id)!;
+      expect(i1).toMatchObject({
+        totalAmount: 20_000_000,
+        paidAmount: 15_000_000,
+        returnAmount: 0,
+        remaining: 5_000_000,
+      });
+      expect(i1.supplierName).toBe('Dược Hậu Giang');
+      const i2 = list.items.find((i) => i.id === r2.id)!;
+      expect(i2).toMatchObject({ paidAmount: 0, returnAmount: 400_000, remaining: 2_600_000 });
+
+      const one = await service.supplierReceipts({ ...q, supplierId: sup[0].id }, adminActor);
+      expect(one.total).toBe(report.bySupplier.find((r) => r.supplierId === sup[0].id)!.receiptCount);
+      const br = await service.supplierReceipts({ ...q, branchIds: [base.branches[1].id] }, adminActor);
+      expect(br.items.map((i) => i.id)).toEqual([r2.id]);
+      const lim = await service.supplierReceipts({ ...q, limit: 1 }, adminActor);
+      expect(lim.items).toHaveLength(1);
+      expect(lim.total).toBe(list.total);
+    });
+
+    it('PM chỉ thấy chi nhánh mình, xin chi nhánh khác → 1506', async () => {
+      await receipt(0, 0, 100, '2026-11-05T10:00:00');
+      await receipt(0, 1, 200, '2026-11-06T10:00:00');
+      const own = await service.supplierReceipts(q, pmActor(base.branches[0].id));
+      expect(own.total).toBe(1);
+      expect(own.items[0].branchId).toBe(base.branches[0].id);
+      await expect(
+        service.supplierReceipts({ ...q, branchIds: [base.branches[1].id] }, pmActor(base.branches[0].id)),
+      ).rejects.toBeDefined();
+    });
+
+    it('thiếu supplier-debt:read → paidAmount, remaining null', async () => {
+      await receipt(0, 0, 100, '2026-11-05T10:00:00');
+      granted = new Set(['report:read']);
+      const list = await service.supplierReceipts(q, adminActor);
+      expect(list.items[0]).toMatchObject({ totalAmount: 100, paidAmount: null, remaining: null });
+    });
   });
 });

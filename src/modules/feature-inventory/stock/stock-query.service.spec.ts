@@ -24,6 +24,7 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     findMovementsWithProductBalance: jest.fn().mockResolvedValue([]),
     findLowStock: jest.fn().mockResolvedValue([]),
     findMovementSummary: jest.fn().mockResolvedValue([]),
+    findMovementSummaryByBranch: jest.fn().mockResolvedValue([]),
     findExpirySummary: jest.fn().mockResolvedValue([]),
     ...overrides,
   };
@@ -179,6 +180,51 @@ describe('StockQueryService — nhập–xuất–tồn', () => {
       toExclusive: new Date('2026-10-31T17:00:00.000Z'),
     });
   });
+
+  it('đã lọc một chi nhánh (PM) → không gọi câu theo chi nhánh, byBranch rỗng', async () => {
+    const { service, repository } = makeService();
+    const result = await service.movementSummary({ fromDate: '2026-10-01', toDate: '2026-10-31' }, PM_A);
+    expect(result).toMatchObject({ branchId: BRANCH_A, byBranch: [] });
+    expect(repository.findMovementSummaryByBranch).not.toHaveBeenCalled();
+  });
+
+  it('ADMIN không gửi branchId → toàn chuỗi, trả byBranch cùng bộ lọc', async () => {
+    const byBranch = [
+      {
+        branchId: BRANCH_A,
+        branchCode: 'CN01',
+        branchName: 'A',
+        opening: 5,
+        inQuantity: 3,
+        outQuantity: 1,
+        closing: 7,
+      },
+      {
+        branchId: BRANCH_B,
+        branchCode: 'CN02',
+        branchName: 'B',
+        opening: 0,
+        inQuantity: 2,
+        outQuantity: 0,
+        closing: 2,
+      },
+    ];
+    const findMovementSummaryByBranch = jest.fn().mockResolvedValue(byBranch);
+    const { service, repository } = makeService({ findMovementSummaryByBranch });
+    const result = await service.movementSummary({ fromDate: '2026-10-01', toDate: '2026-10-31' }, ADMIN);
+    expect(result).toMatchObject({ branchId: null, rows: [], byBranch });
+    expect(repository.findMovementSummary).toHaveBeenCalledWith(expect.objectContaining({ branchId: undefined }));
+    expect(findMovementSummaryByBranch).toHaveBeenCalledWith(expect.objectContaining({ branchId: undefined }));
+  });
+
+  it('PM xin chi nhánh khác → 1506, không chạm DB', async () => {
+    const { service, repository } = makeService();
+    await expect(
+      service.movementSummary({ branchId: BRANCH_B, fromDate: '2026-10-01', toDate: '2026-10-31' }, PM_A),
+    ).rejects.toMatchObject({ response: { code: ErrorCode.BRANCH_ACCESS_DENIED } });
+    expect(repository.findMovementSummary).not.toHaveBeenCalled();
+    expect(repository.findMovementSummaryByBranch).not.toHaveBeenCalled();
+  });
 });
 
 describe('StockQueryService — ẩn giá vốn (K8)', () => {
@@ -194,6 +240,7 @@ describe('StockQueryService — ẩn giá vốn (K8)', () => {
   };
   const movementRow = { id: 'm1', refId: 'r1', unitCost: 700, quantity: 5, createdAt: new Date(), type: 'IMPORT' };
   const summaryRow = { productId: 'p1', opening: 1, openingValue: 10, inValue: 20, outValue: 5, closingValue: 25 };
+  const branchRow = { branchId: BRANCH_A, opening: 1, openingValue: 10, inValue: 20, outValue: 5, closingValue: 25 };
 
   function build(permissions: { getGrantedCodes: jest.Mock }) {
     const repository = {
@@ -202,6 +249,7 @@ describe('StockQueryService — ẩn giá vốn (K8)', () => {
       findMovementsWithProductBalance: jest.fn().mockResolvedValue([movementRow]),
       findRefCodes: jest.fn().mockResolvedValue(new Map()),
       findMovementSummary: jest.fn().mockResolvedValue([summaryRow]),
+      findMovementSummaryByBranch: jest.fn().mockResolvedValue([branchRow]),
     };
     return new StockQueryService(repository as never, permissions as never);
   }
@@ -222,6 +270,11 @@ describe('StockQueryService — ẩn giá vốn (K8)', () => {
       outValue: null,
       closingValue: null,
     });
+    // Nhân viên chỉ thấy chi nhánh mình → không có byBranch.
+    expect(summary.byBranch).toEqual([]);
+    // ADMIN (toàn chuỗi) không có quyền giá vốn → byBranch ẩn giá trị.
+    const chain = await service.movementSummary({ fromDate: '2026-01-01', toDate: '2026-01-31' } as never, ADMIN);
+    expect(chain.byBranch[0]).toMatchObject({ opening: 1, openingValue: null, inValue: null, closingValue: null });
   });
 
   it('PM có goods-receipt:create và SUPER_ADMIN thấy giá vốn', async () => {
@@ -233,6 +286,7 @@ describe('StockQueryService — ẩn giá vốn (K8)', () => {
     expect((await admin.getBatch('b1', superAdmin)).importPrice).toBe(700);
     const summary = await admin.movementSummary({ fromDate: '2026-01-01', toDate: '2026-01-31' } as never, superAdmin);
     expect(summary.rows[0]).toMatchObject({ inValue: 20 });
+    expect(summary.byBranch[0]).toMatchObject({ inValue: 20 });
   });
 
   it('chỉ có price-book:update cũng thấy giá vốn', async () => {

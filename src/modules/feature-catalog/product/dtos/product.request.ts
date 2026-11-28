@@ -34,6 +34,12 @@ const IMAGE_URL_PATTERN = /^(https?:\/\/\S+|\/uploads\/products\/[0-9a-f-]{36}\.
 const normalizeCode = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? value.trim().toUpperCase() : value;
 
+/** Khi tạo: để trống (hoặc chỉ khoảng trắng) = không gửi → BE tự sinh mã `SPxxxx`. */
+const normalizeOptionalCode = ({ value }: { value: unknown }) => {
+  const code = normalizeCode({ value });
+  return code === '' || code === null ? undefined : code;
+};
+
 export class ProductUnitRequest {
   @IsUUID()
   @ApiProperty()
@@ -74,13 +80,13 @@ export class ProductUnitRequest {
 }
 
 export class CreateProductRequest extends ProductExtraFieldsRequest {
-  @Transform(normalizeCode)
+  @IsOptional()
+  @Transform(normalizeOptionalCode)
   @IsString()
-  @IsNotEmpty()
   @MaxLength(30)
   @Matches(CODE_PATTERN, { message: 'code chỉ nhận chữ in hoa không dấu, chữ số, gạch ngang và gạch dưới' })
-  @ApiProperty({ example: 'SP0001' })
-  code: string;
+  @ApiPropertyOptional({ example: 'SP0001', description: 'Bỏ trống → hệ thống tự sinh `SP` + số tăng dần' })
+  code?: string;
 
   @IsOptional()
   @IsString()

@@ -120,7 +120,10 @@ export class StockController {
   }
 
   @Get('reports/movement-summary')
-  @ApiOperation({ description: 'Nhập–xuất–tồn theo kỳ (ngày giờ VN), tối đa 366 ngày.' })
+  @ApiOperation({
+    description:
+      'Nhập–xuất–tồn theo kỳ (ngày giờ VN), tối đa 366 ngày. rows = theo sản phẩm; byBranch = tổng từng chi nhánh (tồn đầu/nhập/xuất/tồn cuối theo đơn vị gốc + giá trị, null nếu không xem được giá vốn). ADMIN bỏ trống branchId = toàn chuỗi; PM chỉ chi nhánh mình (khác → 1506).',
+  })
   movementSummary(@Query() query: MovementSummaryQuery, @CurrentActor() actor: RequestActor) {
     return this.stockQueryService.movementSummary(query, actor);
   }

@@ -1098,6 +1098,7 @@ model StockAdjustment {
   items           StockAdjustmentItem[]
 
   @@index([branchId, status, createdAt])
+  @@index([goodsReceiptId])
   @@map("stock_adjustments")
 }
 

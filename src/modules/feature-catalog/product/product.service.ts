@@ -26,6 +26,9 @@ import {
   ProductUnitRow,
 } from './repositories/product.repository';
 
+/** Số lần chạy lại transaction tạo khi mã tự sinh bị một lần nhập tay song song giành mất (rất hiếm). */
+const MAX_AUTO_CODE_TRANSACTIONS = 3;
+
 @Injectable()
 export class ProductService extends AbstractBaseService<Product> {
   constructor(
@@ -87,15 +90,22 @@ export class ProductService extends AbstractBaseService<Product> {
     return product;
   }
 
+  /** `code` bỏ trống → hệ thống tự sinh `SPxxxx` từ sequence ngay trong transaction ghi sản phẩm. */
   async create(dto: CreateProductRequest, actor: RequestActor): Promise<ProductDetail> {
     this.assertUnitConfig(dto.units, dto.baseUnitId, dto.barcode ?? null);
 
-    let created: ProductDetail | null;
-    try {
-      const locks = productWriteLocks(null, [dto.barcode, ...dto.units.map((unit) => unit.barcode)]);
-      created = await this.transactions.write(locks, (tx) => this.createInTx(tx, dto, actor));
-    } catch (error) {
-      rethrowDuplicate(error);
+    const locks = productWriteLocks(null, [dto.barcode, ...dto.units.map((unit) => unit.barcode)]);
+    let created: ProductDetail | null = null;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        created = await this.transactions.write(locks, (tx) => this.createInTx(tx, dto, actor));
+        break;
+      } catch (error) {
+        // Mã tự sinh đã được kiểm "chưa ai dùng" ngay trong câu nextval, nhưng một request nhập tay CÙNG mã vẫn có thể
+        // ghi xen giữa lúc kiểm và lúc ghi → unique `code` từ chối. Transaction đã hỏng nên chạy lại cả khối (số mới).
+        if (dto.code === undefined && attempt < MAX_AUTO_CODE_TRANSACTIONS && isCodeConflict(error)) continue;
+        rethrowDuplicate(error);
+      }
     }
 
     if (!created) throw this.notFound();
@@ -127,7 +137,7 @@ export class ProductService extends AbstractBaseService<Product> {
     if (drug) await this.assertNoDuplicatePack(tx, drug.id, dto.units);
 
     const product = await this.productRepository.createProduct(tx, {
-      code: dto.code,
+      code: dto.code ?? (await this.productRepository.nextAutoCode(tx)),
       barcode: dto.barcode ?? null,
       name: dto.name,
       imageUrls: dto.imageUrls ?? [],
@@ -730,4 +740,13 @@ function prefillFromDrug(
 /** Có tham số lọc mới (hoặc `sortBy`) → dùng đường SQL đầy đủ của Danh mục hàng hoá. */
 function usesCatalogFilters(query: ProductQuery): boolean {
   return query.sortBy !== undefined || PRODUCT_LIST_FILTER_KEYS.some((key) => query[key] !== undefined);
+}
+
+/** Lỗi unique đúng cột `code` của sản phẩm (không phải mã vạch). */
+function isCodeConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false;
+  const target = error.meta?.target;
+  // So khớp CHÍNH XÁC: `products_barcode_key` chứa chuỗi con "code" nhưng không phải unique của cột mã hàng.
+  if (Array.isArray(target)) return target.includes('code');
+  return target === 'code' || target === 'products_code_key';
 }

@@ -18,6 +18,7 @@ import { canSeeCost } from '../core/cost-visibility';
 import { branchWhere } from '../core/inventory-scope';
 import { afterCursorDesc, decodeCursor, toKeysetPage } from 'src/common/utils/keyset-cursor';
 import {
+  ExpirySummaryQuery,
   LowStockQuery,
   MovementSummaryQuery,
   NearExpiryQuery,
@@ -137,6 +138,27 @@ export class StockQueryService {
       Object.assign(new StockBatchQuery(), { ...query, inStockOnly: true, expiringWithinDays: query.days ?? 90 }),
       actor,
     );
+  }
+
+  /**
+   * Thẻ Tổng quan: số lô hết hạn / cận hạn ≤ `days` ngày còn tồn, tổng + từng chi nhánh. ADMIN bỏ trống = toàn chuỗi;
+   * PM bị ép về chi nhánh mình (gửi chi nhánh khác → 1506). Đếm cả lô cách ly/thu hồi (như báo cáo cận hạn).
+   */
+  async expirySummary(query: ExpirySummaryQuery, actor: RequestActor) {
+    const branchId = scopedBranchFilter(resolveBranchScope(actor.user), query.branchId);
+    const days = query.days ?? 30;
+    const today = todayInVietnam();
+    const byBranch = await this.stock.findExpirySummary({
+      branchId,
+      today: parseDateOnly(today),
+      until: parseDateOnly(addDaysToDateOnly(today, days)),
+    });
+    return {
+      days,
+      expired: byBranch.reduce((sum, row) => sum + row.expired, 0),
+      expiring: byBranch.reduce((sum, row) => sum + row.expiring, 0),
+      byBranch,
+    };
   }
 
   async movementSummary(query: MovementSummaryQuery, actor: RequestActor) {

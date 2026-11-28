@@ -24,6 +24,7 @@ function makeService(overrides: Record<string, jest.Mock> = {}) {
     findMovementsWithProductBalance: jest.fn().mockResolvedValue([]),
     findLowStock: jest.fn().mockResolvedValue([]),
     findMovementSummary: jest.fn().mockResolvedValue([]),
+    findExpirySummary: jest.fn().mockResolvedValue([]),
     ...overrides,
   };
   const permissions = { getGrantedCodes: jest.fn().mockResolvedValue(new Set(['goods-receipt:create'])) };
@@ -57,6 +58,50 @@ describe('StockQueryService — phạm vi chi nhánh', () => {
     await expect(service.lowStock({ page: 1, limit: 10 } as never, ADMIN)).rejects.toMatchObject({
       errorCode: ErrorCode.HTTP_BAD_REQUEST,
     });
+  });
+});
+
+describe('StockQueryService.expirySummary — đếm lô hết hạn/cận hạn', () => {
+  const rows = [
+    { branchId: BRANCH_A, branchCode: 'CN01', branchName: 'A', expired: 2, expiring: 3 },
+    { branchId: BRANCH_B, branchCode: 'CN02', branchName: 'B', expired: 1, expiring: 0 },
+  ];
+
+  it('ADMIN không gửi branchId → toàn chuỗi, cộng tổng từ từng chi nhánh', async () => {
+    const findExpirySummary = jest.fn().mockResolvedValue(rows);
+    const { service } = makeService({ findExpirySummary });
+    const today = todayInVietnam();
+
+    await expect(service.expirySummary({} as never, ADMIN)).resolves.toEqual({
+      days: 30,
+      expired: 3,
+      expiring: 3,
+      byBranch: rows,
+    });
+    expect(findExpirySummary).toHaveBeenCalledWith({
+      branchId: undefined,
+      today: parseDateOnly(today),
+      until: parseDateOnly(addDaysToDateOnly(today, 30)),
+    });
+  });
+
+  it('PM không gửi branchId → ép chi nhánh mình; days theo query', async () => {
+    const { service, repository } = makeService();
+    await expect(service.expirySummary({ days: 7 } as never, PM_A)).resolves.toMatchObject({
+      days: 7,
+      expired: 0,
+      expiring: 0,
+      byBranch: [],
+    });
+    expect(repository.findExpirySummary).toHaveBeenCalledWith(expect.objectContaining({ branchId: BRANCH_A }));
+  });
+
+  it('PM xin chi nhánh khác → 1506, không chạm DB', async () => {
+    const { service, repository } = makeService();
+    await expect(service.expirySummary({ branchId: BRANCH_B } as never, PM_A)).rejects.toMatchObject({
+      response: { code: ErrorCode.BRANCH_ACCESS_DENIED },
+    });
+    expect(repository.findExpirySummary).not.toHaveBeenCalled();
   });
 });
 

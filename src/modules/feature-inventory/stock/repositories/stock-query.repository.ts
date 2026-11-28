@@ -57,6 +57,14 @@ export type StockMovementWithBalance = StockMovementRow & {
   productBalanceAfter: number;
 };
 
+export interface ExpirySummaryRow {
+  branchId: string;
+  branchCode: string;
+  branchName: string;
+  expired: number;
+  expiring: number;
+}
+
 export interface ProductStockRow {
   branchId: string;
   branchCode: string;
@@ -261,6 +269,24 @@ export class StockQueryRepository {
       this.prisma.$queryRaw<{ count: number }[]>(Prisma.sql`SELECT COUNT(*)::int AS "count" FROM (${grouped}) AS t`),
     ]);
     return { hits, total: count, page, totalPages: Math.ceil(count / limit), limit };
+  }
+
+  /**
+   * Số lô còn tồn đã hết hạn (`expiryDate <= today`) / cận hạn (`today < expiryDate <= until`), gom theo chi nhánh.
+   * Quét theo index `expiryDate` (chỉ lô hết hạn tới `until`), không đọc từng lô về app. Chi nhánh không có lô nào
+   * trong khoảng thì không có dòng.
+   */
+  findExpirySummary(filter: { branchId?: string; today: Date; until: Date }): Promise<ExpirySummaryRow[]> {
+    const branch = filter.branchId ? Prisma.sql`AND b."branchId" = ${filter.branchId}::uuid` : Prisma.empty;
+    return this.prisma.$queryRaw<ExpirySummaryRow[]>(Prisma.sql`
+      SELECT b."branchId", br."code" AS "branchCode", br."name" AS "branchName",
+             COUNT(*) FILTER (WHERE b."expiryDate" <= ${filter.today}::date)::int AS "expired",
+             COUNT(*) FILTER (WHERE b."expiryDate" > ${filter.today}::date)::int AS "expiring"
+      FROM "stock_batches" b
+      JOIN "branches" br ON br."id" = b."branchId"
+      WHERE b."isDeleted" = false AND b."quantityOnHand" > 0 AND b."expiryDate" <= ${filter.until}::date ${branch}
+      GROUP BY b."branchId", br."code", br."name"
+      ORDER BY br."code"`);
   }
 
   /**

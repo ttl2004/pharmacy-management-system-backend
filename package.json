@@ -19,6 +19,7 @@
     "seed:inventory": "ts-node -r tsconfig-paths/register src/scripts/seed-inventory.ts",
     "import:interaction-data": "ts-node -r tsconfig-paths/register src/scripts/import-interaction-data.ts",
     "report:rebuild": "ts-node -r tsconfig-paths/register src/scripts/rebuild-sales-rollup.ts",
+    "backfill:manufacturer": "ts-node -r tsconfig-paths/register src/scripts/backfill-manufacturer.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
